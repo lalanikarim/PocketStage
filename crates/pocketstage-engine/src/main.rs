@@ -169,10 +169,8 @@ fn main() {
                 a_stats.busy_ns.fetch_add(busy, Ordering::Relaxed);
 
                 // 4) Sample the output queue depth occasionally (output-side latency).
-                if cycle.is_multiple_of(64) {
-                    if let Ok(delay) = pcm.delay() {
-                        a_stats.delay_frames_max.fetch_max(delay as u64, Ordering::Relaxed);
-                    }
+                if cycle.is_multiple_of(64) && let Ok(delay) = pcm.delay() {
+                    a_stats.delay_frames_max.fetch_max(delay as u64, Ordering::Relaxed);
                 }
             }
             // Note: `synth` then `settings` drop here (reverse declaration order), which is the correct teardown order.
@@ -273,10 +271,10 @@ fn open_playback(device: &str) -> alsa::Result<PCM> {
 
         // Start as soon as one period is queued (lowest startup latency).
         // Best-effort: default (start when buffer full) still works, just starts ~16 ms later.
-        if let Ok(sw) = pcm.sw_params_current() {
-            if sw.set_start_threshold(actual_period).is_ok() {
-                let _ = pcm.sw_params(&sw);
-            }
+        if let Ok(sw) = pcm.sw_params_current()
+            && sw.set_start_threshold(actual_period).is_ok()
+        {
+            let _ = pcm.sw_params(&sw);
         }
     } // h/sw guards dropped here so `pcm` can be moved out
 
@@ -292,7 +290,7 @@ fn try_realtime_priority() {
     struct SchedParam {
         sched_priority: i32,
     }
-    extern "C" {
+    unsafe extern "C" {
         fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedParam) -> i32;
     }
     const SCHED_FIFO: i32 = 1; // libc::SCHED_FIFO

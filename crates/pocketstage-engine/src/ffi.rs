@@ -15,7 +15,7 @@ pub enum fluid_settings_t {}
 pub enum fluid_synth_t {}
 
 #[link(name = "fluidsynth")]
-extern "C" {
+unsafe extern "C" {
     // --- settings ---
     pub fn new_fluid_settings() -> *mut fluid_settings_t;
     pub fn delete_fluid_settings(settings: *mut fluid_settings_t);
