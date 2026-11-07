@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/brand/pocketstage.svg" width="128" alt="PocketStage logo: piano keys tucked into a pocket" />
+</p>
+
 # PocketStage
 
 A portable lite DAW running headless on Linux (Raspberry Pi or laptop). A MIDI
