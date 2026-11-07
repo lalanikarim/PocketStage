@@ -5,6 +5,8 @@
 //!   midi_probe watch [dev...]  timestamped decode of everything received;
 //!                              defaults to ALL input ports (the MKV exposes
 //!                              USB / Mackie / Editor subdevices)
+//!   midi_probe pump            run the production pump (hotplug + mpsc) and
+//!                              print PumpMessages — smoke test for `spawn_pump`
 //!
 //! Probe session checklist (T1):
 //!   1. Put the unit in a known mode first (MIDI/Advanced — HUI/template modes
@@ -13,7 +15,7 @@
 //!      transport buttons, octave/transpose, wheels, sustain taps.
 //!   3. Save the output (`midi_probe watch | tee probe-$(date +%F).log`).
 
-use pocketstage_midi::{Event, InputPort, Parser, list_input_ports};
+use pocketstage_midi::{self as midi, Event, InputPort, Parser, list_input_ports};
 
 use alsa::{Direction, Rawmidi};
 use std::collections::HashMap;
@@ -25,8 +27,9 @@ fn main() {
     match args.first().map(String::as_str) {
         None => list_ports(),
         Some("watch") => watch(&args[1..]),
+        Some("pump") => pump(&args[1..]),
         Some(other) => {
-            eprintln!("unknown command: {other}\nusage: midi_probe [watch <dev> ...]");
+            eprintln!("unknown command: {other}\nusage: midi_probe [watch|pump <dev> ...]");
             std::process::exit(2);
         }
     }
@@ -115,6 +118,43 @@ fn watch(filter: &[String]) -> ! {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
+}
+
+/// Drive the real pump (`spawn_pump`: polling reads + hotplug rescans) and
+/// print what the engine would receive.
+fn pump(filter: &[String]) -> ! {
+    let filter = (!filter.is_empty()).then(|| filter.to_vec());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _handle = midi::spawn_pump(tx, filter).expect("failed to spawn pump");
+    println!("[pump] running — Ctrl+C to stop\n");
+    let t0 = Instant::now();
+    for msg in rx {
+        match msg {
+            midi::PumpMessage::Midi(m) => {
+                println!(
+                    "[{:7.3}s] {}  {}",
+                    t0.elapsed().as_secs_f64(),
+                    m.port,
+                    format_event(&m.event)
+                );
+            }
+            midi::PumpMessage::PortConnected(p) => {
+                println!(
+                    "[{:7.3}s] HOTPLUG  +connected {}",
+                    t0.elapsed().as_secs_f64(),
+                    p.device_string()
+                );
+            }
+            midi::PumpMessage::PortDisconnected(p) => {
+                println!(
+                    "[{:7.3}s] HOTPLUG  -disconnected {}",
+                    t0.elapsed().as_secs_f64(),
+                    p.device_string()
+                );
+            }
+        }
+    }
+    std::process::exit(0)
 }
 
 fn format_event(ev: &Event) -> String {

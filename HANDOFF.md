@@ -135,10 +135,13 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    rejected not guessed), full validation invariants, `Project::default_project()` with
    R8 starter patches, 9 unit tests. CI added (`.github/workflows/ci.yml`:
    build + clippy -D warnings + fmt check + tests on push/PR).
-2. MIDI I/O + hotplug (`pocketstage-midi`) — 🔄 **IN PROGRESS**: port discovery +
-   streaming parser + **T1 `midi_probe` tool ✅ DONE** (verified live on the MKV:
-   all 3 subdevices discovered, note traffic decoded).
-   Remaining: hotplug monitoring + rawmidi→engine event pump.
+2. MIDI I/O + hotplug (`pocketstage-midi`) — ✅ **CORE DONE**: port discovery,
+   streaming parser, T1 `midi_probe` tool (verified live on the MKV), hotplug
+   tracking (`ActivePorts` + pure `diff_ports`), engine event pump
+   (`spawn_pump` → mpsc `PumpMessage`s; `midi_probe pump` smoke-tests it).
+   15 tests, hardware tests mutex-serialized (rawmidi excludes concurrent openers).
+   Deferred to when needed: rtrb lock-free ring for the audio-thread consumer,
+   ALSA inotify instead of 1 s poll-scan.
    **T1 session ready to run whenever you are:**
    `cargo run -p pocketstage-midi --bin midi_probe -- watch | tee probe-$(date +%F).log`
    (put the MKV in a known mode first — HUI/template modes remap CCs)

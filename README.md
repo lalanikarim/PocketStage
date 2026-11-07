@@ -21,7 +21,8 @@ with [`HANDOFF.md`](HANDOFF.md) and [`specs/brainstorming/scratchpad.md`](specs/
 - `crates/pocketstage-model` — project data model: clip matrix, patterns, takes,
   versioned JSON file format
 - `crates/pocketstage-midi` — ALSA rawmidi port discovery, MIDI byte-stream
-  parser, `midi_probe` tool (Oxygen CC-map ground-truthing)
+  parser, hotplug tracking, engine event pump (`spawn_pump`), `midi_probe` tool
+  (Oxygen CC-map ground-truthing)
 - planned: `pocketstage-oxygen`, `pocketstage-server`
 
 ## License
