@@ -1,0 +1,357 @@
+//! PocketStage project data model (scratchpad R2).
+//!
+//! The core structure is the **clip matrix**: tracks × scenes. A clip lives at
+//! a `(track, scene)` cell; launching a scene plays that whole column. This is
+//! the single source of truth shared by the engine, the Oxygen mapper and the
+//! web UI — hence its own crate with zero audio/MIDI dependencies.
+//!
+//! File format: [`ProjectFile`] wraps a schema `version` so future migrations
+//! are explicit. JSON on disk (human-diffable; msgpack can be an *additional*
+//! option later, per "open & hackable" differentiator).
+
+use serde::{Deserialize, Serialize};
+
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// R2: max 4 tracks (matches Oxygen 49 MKV's 4 faders exactly).
+pub const MAX_TRACKS: usize = 4;
+/// R2 / MVP: max 8 scenes (triggered by pads 1-8 in PLAY mode).
+pub const MAX_SCENES: usize = 8;
+/// Pattern resolution is fixed at 16th notes (R2).
+pub const STEPS_PER_BAR: usize = 16;
+/// R2: pattern length in bars, 1..=4.
+pub const MAX_PATTERN_BARS: u8 = 4;
+
+// ------------------------------------------------------------------- errors
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum ModelError {
+    #[error("unsupported schema version {0}: this build understands version <= {SCHEMA_VERSION}")]
+    UnsupportedVersion(u32),
+    #[error("invalid project file: {0}")]
+    Invalid(String),
+}
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum ValidationError {
+    #[error("project has {} tracks, max is {MAX_TRACKS}", .0)]
+    TooManyTracks(usize),
+    #[error("project has {} scenes, max is {MAX_SCENES}", .0)]
+    TooManyScenes(usize),
+    #[error("need at least 1 scene")]
+    NoScenes,
+    #[error("track '{track}' has {slots} clip slots but project has {scenes} scenes")]
+    ClipSlotMismatch {
+        track: String,
+        slots: usize,
+        scenes: usize,
+    },
+    #[error("bpm {0} out of range 20.0..=300.0")]
+    BpmOutOfRange(f64),
+    #[error("pattern length {bars} bars out of range 1..={MAX_PATTERN_BARS}")]
+    PatternBarsOutOfRange { bars: u8 },
+    #[error(
+        "pattern has {} steps, expected {} ({} bars x {STEPS_PER_BAR})",
+        .0, .1, .2
+    )]
+    PatternStepCount(usize, usize, u8),
+    #[error("note pitch {0} out of range 0..=127")]
+    PitchOutOfRange(u8),
+    #[error("velocity {0} out of range 1..=127")]
+    VelocityOutOfRange(u8),
+    #[error("gm_program {0} out of range 0..=127")]
+    ProgramOutOfRange(u8),
+}
+
+// ---------------------------------------------------------------- top level
+
+/// On-disk envelope. Bump [`SCHEMA_VERSION`] and write a migration when the
+/// shape changes incompatibly; unknown-future versions are rejected, never
+/// guessed at.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectFile {
+    pub version: u32,
+    pub project: Project,
+}
+
+impl ProjectFile {
+    /// Parse + version-check. Rejects future schema versions explicitly.
+    pub fn from_json_str(s: &str) -> Result<Self, ModelError> {
+        let value: serde_json::Value =
+            serde_json::from_str(s).map_err(|e| ModelError::Invalid(e.to_string()))?;
+        let version = match &value {
+            serde_json::Value::Object(map) => map
+                .get("version")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| ModelError::Invalid("object without numeric 'version'".into()))?,
+            other => {
+                return Err(ModelError::Invalid(format!(
+                    "expected object at top level, got {}",
+                    Self::json_type_name(other)
+                )));
+            }
+        };
+        if version > SCHEMA_VERSION as u64 {
+            return Err(ModelError::UnsupportedVersion(version as u32));
+        }
+        serde_json::from_value(value).map_err(|e| ModelError::Invalid(e.to_string()))
+    }
+
+    fn json_type_name(v: &serde_json::Value) -> &'static str {
+        match v {
+            serde_json::Value::Null => "null",
+            serde_json::Value::Bool(_) => "boolean",
+            serde_json::Value::Number(_) => "number",
+            serde_json::Value::String(_) => "string",
+            serde_json::Value::Array(_) => "array",
+            serde_json::Value::Object(_) => "object",
+        }
+    }
+
+    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Validate the wrapped project.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.project.validate()
+    }
+}
+
+/// A PocketStage project: fixed tempo, clip matrix, recorded takes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Project {
+    pub name: String,
+    /// Tempo in BPM. Fixed per project in v0.1 (R2).
+    #[serde(default = "default_bpm")]
+    pub bpm: f64,
+    pub tracks: Vec<Track>,
+    /// Vertical slices: launching a scene plays every non-empty clip in that
+    /// column (quantized per [`Scene::quantize`], D5).
+    pub scenes: Vec<Scene>,
+    /// Recorded MIDI performances (D4: MIDI-only recording in v0.1).
+    #[serde(default)]
+    pub takes: Vec<Take>,
+}
+
+fn default_bpm() -> f64 {
+    120.0
+}
+
+impl Project {
+    /// The stock boot project for the v0.1 vertical slice (R6): 4 tracks with
+    /// curated R8 starter patches, 8 empty scenes, 120 BPM.
+    pub fn default_project() -> Self {
+        let starters: [(&str, u8, [u8; 3]); MAX_TRACKS] = [
+            ("Piano", 0, [240, 220, 130]),   // Acoustic Grand
+            ("E.Piano", 4, [130, 200, 240]), // EPiano 1
+            ("Pad", 89, [190, 140, 240]),    // Pad 2 (warm)
+            ("Bass", 33, [140, 240, 150]),   // Finger Bass
+        ];
+        Project {
+            name: "Untitled".into(),
+            bpm: default_bpm(),
+            tracks: starters
+                .iter()
+                .map(|(name, program, color)| Track {
+                    name: (*name).into(),
+                    color: *color,
+                    instrument: InstrumentSlot {
+                        soundfont: None,
+                        gm_program: *program,
+                    },
+                    clips: vec![None; MAX_SCENES],
+                })
+                .collect(),
+            scenes: (1..=MAX_SCENES)
+                .map(|i| Scene {
+                    name: format!("S{i}"),
+                    quantize: None,
+                })
+                .collect(),
+            takes: Vec::new(),
+        }
+    }
+
+    /// Validate all invariants the engine relies on (see HANDOFF/scratchpad R2).
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.tracks.len() > MAX_TRACKS {
+            return Err(ValidationError::TooManyTracks(self.tracks.len()));
+        }
+        if self.scenes.is_empty() {
+            return Err(ValidationError::NoScenes);
+        }
+        if self.scenes.len() > MAX_SCENES {
+            return Err(ValidationError::TooManyScenes(self.scenes.len()));
+        }
+        if !(20.0..=300.0).contains(&self.bpm) {
+            return Err(ValidationError::BpmOutOfRange(self.bpm));
+        }
+        for track in &self.tracks {
+            if track.clips.len() != self.scenes.len() {
+                return Err(ValidationError::ClipSlotMismatch {
+                    track: track.name.clone(),
+                    slots: track.clips.len(),
+                    scenes: self.scenes.len(),
+                });
+            }
+            if track.instrument.gm_program > 127 {
+                return Err(ValidationError::ProgramOutOfRange(
+                    track.instrument.gm_program,
+                ));
+            }
+            for clip in track.clips.iter().flatten() {
+                validate_pattern(&clip.pattern)?;
+            }
+        }
+        for take in &self.takes {
+            for ev in &take.events {
+                // Strict: hand-edited project files must not smuggle bad pitches.
+                if let RecordedEvent::NoteOff { pitch, .. } | RecordedEvent::NoteOn { pitch, .. } =
+                    ev
+                    && *pitch > 127
+                {
+                    return Err(ValidationError::PitchOutOfRange(*pitch));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_pattern(pattern: &Pattern) -> Result<(), ValidationError> {
+    if pattern.bars == 0 || pattern.bars > MAX_PATTERN_BARS {
+        return Err(ValidationError::PatternBarsOutOfRange { bars: pattern.bars });
+    }
+    let expected = pattern.bars as usize * STEPS_PER_BAR;
+    if pattern.steps.len() != expected {
+        return Err(ValidationError::PatternStepCount(
+            pattern.steps.len(),
+            expected,
+            pattern.bars,
+        ));
+    }
+    for note in pattern.steps.iter().flatten() {
+        if note.pitch > 127 {
+            return Err(ValidationError::PitchOutOfRange(note.pitch));
+        }
+        if !(1..=127).contains(&note.velocity) {
+            return Err(ValidationError::VelocityOutOfRange(note.velocity));
+        }
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------- matrix rows
+
+/// A track = one FluidSynth internal MIDI channel (D3: track N → channel N).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Track {
+    pub name: String,
+    /// RGB color for UI/pad feedback, e.g. `[255, 128, 0]`.
+    #[serde(default = "default_color")]
+    pub color: [u8; 3],
+    pub instrument: InstrumentSlot,
+    /// One slot per scene (column); `None` = empty cell ("don't change" on
+    /// scene launch — R2).
+    pub clips: Vec<Option<Clip>>,
+}
+
+fn default_color() -> [u8; 3] {
+    [200, 200, 200]
+}
+
+/// Instrument binding for a track (R8 patch layer, simplified to its core).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InstrumentSlot {
+    /// Soundfont file name. Resolved against the box's `sounds/` directory;
+    /// `None` = engine default soundfont.
+    #[serde(default)]
+    pub soundfont: Option<String>,
+    /// General MIDI program number 0..=127 (drums: track on channel 9 uses the
+    /// GM kit and ignores this — scratchpad D3).
+    #[serde(default)]
+    pub gm_program: u8,
+}
+
+/// A scene = one column of the clip matrix.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Scene {
+    pub name: String,
+    /// Per-scene launch quantize override (D5); `None` = project default.
+    #[serde(default)]
+    pub quantize: Option<Quantize>,
+}
+
+/// When a scene-launch request actually starts playing (D5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Quantize {
+    Immediate,
+    NextBeat,
+    /// Default per D5.
+    NextBar,
+}
+
+/// A clip = one pattern on one track within one scene (a matrix cell).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Clip {
+    pub name: String,
+    pub pattern: Pattern,
+}
+
+/// Step sequence at fixed 16th-note resolution (R2).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pattern {
+    /// Loop length in bars, 1..=[MAX_PATTERN_BARS]. `steps.len()` must equal
+    /// `bars * STEPS_PER_BAR` (enforced by [validate]).
+    pub bars: u8,
+    pub steps: Vec<Option<StepNote>>,
+}
+
+/// A note occupying one step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepNote {
+    /// MIDI pitch 0..=127.
+    pub pitch: u8,
+    /// 1..=127.
+    pub velocity: u8,
+}
+
+// --------------------------------------------------------------- take layer
+
+/// A recorded MIDI performance (D4). Non-destructive; audio is an offline
+/// bounce of these events.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Take {
+    pub name: String,
+    /// Events sorted by `tick` (ticks = 16th notes from take start; the fixed
+    /// grid keeps storage tiny and needs no tempo math on playback — project
+    /// bpm is fixed in v0.1).
+    pub events: Vec<RecordedEvent>,
+}
+
+/// Minimal event set for takes in v0.1 (MIDI-only recording).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RecordedEvent {
+    NoteOn {
+        tick: u32,
+        channel: u8,
+        pitch: u8,
+        velocity: u8,
+    },
+    NoteOff {
+        tick: u32,
+        channel: u8,
+        pitch: u8,
+    },
+    ProgramChange {
+        tick: u32,
+        channel: u8,
+        program: u8,
+    },
+}
+
+#[cfg(test)]
+mod tests;

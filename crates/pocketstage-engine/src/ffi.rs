@@ -41,11 +41,7 @@ unsafe extern "C" {
         key: c_int,
         vel: c_int,
     ) -> c_int;
-    pub fn fluid_synth_noteoff(
-        synth: *mut fluid_synth_t,
-        chan: c_int,
-        key: c_int,
-    ) -> c_int;
+    pub fn fluid_synth_noteoff(synth: *mut fluid_synth_t, chan: c_int, key: c_int) -> c_int;
     pub fn fluid_synth_program_change(
         synth: *mut fluid_synth_t,
         chan: c_int,
@@ -70,7 +66,11 @@ pub struct Settings(pub(crate) *mut fluid_settings_t);
 impl Settings {
     pub fn new() -> Option<Settings> {
         let ptr = unsafe { new_fluid_settings() };
-        if ptr.is_null() { None } else { Some(Settings(ptr)) }
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Settings(ptr))
+        }
     }
 
     pub fn set_num(&self, name: &str, val: f64) {
@@ -100,14 +100,22 @@ unsafe impl Send for Synth {}
 impl Synth {
     pub fn new(settings: &Settings) -> Option<Synth> {
         let ptr = unsafe { new_fluid_synth(settings.0) };
-        if ptr.is_null() { None } else { Some(Synth(ptr)) }
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Synth(ptr))
+        }
     }
 
     /// Loads a soundfont; returns the sfont id on success.
     pub fn load_soundfont(&self, path: &str) -> Result<i32, String> {
         let cpath = CString::new(path).map_err(|e| e.to_string())?;
         let id = unsafe { fluid_synth_sfload(self.0, cpath.as_ptr(), 1) };
-        if id < 0 { Err(format!("fluid_synth_sfload failed for {path}")) } else { Ok(id) }
+        if id < 0 {
+            Err(format!("fluid_synth_sfload failed for {path}"))
+        } else {
+            Ok(id)
+        }
     }
 
     #[inline]

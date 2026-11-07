@@ -16,7 +16,9 @@ with [`HANDOFF.md`](HANDOFF.md) and [`specs/brainstorming/scratchpad.md`](specs/
 ## Workspace
 
 - `crates/pocketstage-engine` — audio callback, clock, FX, recorder (lock-free)
-- planned: `pocketstage-model`, `pocketstage-midi`, `pocketstage-oxygen`, `pocketstage-server`
+- `crates/pocketstage-model` — project data model: clip matrix, patterns, takes,
+  versioned JSON file format
+- planned: `pocketstage-midi`, `pocketstage-oxygen`, `pocketstage-server`
 
 ## License
 

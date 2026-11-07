@@ -130,7 +130,11 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 
 ## 6. After the spike (ordered backlog)
 
-1. Project file format (`pocketstage-model` crate): clip-matrix schema (scratchpad R2), serde, versioned
+1. ✅ **DONE** — Project file format (`crates/pocketstage-model`): clip-matrix schema
+   (R2), serde JSON with explicit `version` gate (`SCHEMA_VERSION = 1`, future versions
+   rejected not guessed), full validation invariants, `Project::default_project()` with
+   R8 starter patches, 9 unit tests. CI added (`.github/workflows/ci.yml`:
+   build + clippy -D warnings + fmt check + tests on push/PR).
 2. MIDI I/O + hotplug (`pocketstage-midi`) — then **T1: `midi_probe` tool** (deferred by user decision) to ground-truth the Oxygen 49 MKV CC map; put unit in a known mode first (HUI/template modes change CCs)
 3. Oxygen mapper + pad LED feedback (`pocketstage-oxygen`) — investigate Editor port SysEx for LEDs (task T2)
 4. Web server (`pocketstage-server`): axum REST + WS, single-writer state snapshots

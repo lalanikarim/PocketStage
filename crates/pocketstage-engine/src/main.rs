@@ -18,7 +18,7 @@ use alsa::pcm::{Access, Format, Frames, PCM};
 use alsa::{Direction, ValueOr};
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -56,13 +56,13 @@ struct TimedEvent {
 
 #[derive(Default)]
 struct Stats {
-    cycles: AtomicU64,        // render+write iterations
-    busy_ns: AtomicU64,       // time spent in synth render + interleave (not blocking writes)
-    xruns: AtomicU64,         // ALSA underruns recovered
-    events: AtomicU64,        // MIDI events consumed
-    q_sum_us: AtomicU64,      // engine-internal queue wait: consumed - sent
-    q_max_us: AtomicU64,      // worst queue wait in window
-    feed_max_us: AtomicU64,   // worst feeder jitter (sent - intended) in window
+    cycles: AtomicU64,           // render+write iterations
+    busy_ns: AtomicU64,          // time spent in synth render + interleave (not blocking writes)
+    xruns: AtomicU64,            // ALSA underruns recovered
+    events: AtomicU64,           // MIDI events consumed
+    q_sum_us: AtomicU64,         // engine-internal queue wait: consumed - sent
+    q_max_us: AtomicU64,         // worst queue wait in window
+    feed_max_us: AtomicU64,      // worst feeder jitter (sent - intended) in window
     delay_frames_max: AtomicU64, // max snd_pcm_delay seen in window (output-side queue)
 }
 
@@ -85,7 +85,9 @@ impl Stats {
 
 fn main() {
     // ALSA device selectable: `default` (PipeWire plugin here) or e.g. `plughw:1,0` for raw hardware.
-    let device = std::env::args().nth(1).unwrap_or_else(|| "default".to_string());
+    let device = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "default".to_string());
 
     // ---- FluidSynth setup (main thread; handles move to the audio thread) ----
     let settings = ffi::Settings::new().expect("new_fluid_settings returned null");
@@ -114,7 +116,9 @@ fn main() {
 
             let pcm = open_playback(&device)
                 .unwrap_or_else(|e| panic!("could not open ALSA playback device '{device}': {e}"));
-            let io = pcm.io_checked::<i16>().expect("could not create PCM IO handle");
+            let io = pcm
+                .io_checked::<i16>()
+                .expect("could not create PCM IO handle");
 
             let mut left = vec![0f32; PERIOD_FRAMES];
             let mut right = vec![0f32; PERIOD_FRAMES];
@@ -159,7 +163,10 @@ fn main() {
                 if let Err(e) = io.writei(&out) {
                     a_stats.xruns.fetch_add(1, Ordering::Relaxed);
                     if let Err(re) = pcm.recover(e.errno(), true) {
-                        eprintln!("[audio] unrecoverable ALSA error: {re} (alsa errno {})", e.errno());
+                        eprintln!(
+                            "[audio] unrecoverable ALSA error: {re} (alsa errno {})",
+                            e.errno()
+                        );
                         return;
                     }
                 }
@@ -169,8 +176,12 @@ fn main() {
                 a_stats.busy_ns.fetch_add(busy, Ordering::Relaxed);
 
                 // 4) Sample the output queue depth occasionally (output-side latency).
-                if cycle.is_multiple_of(64) && let Ok(delay) = pcm.delay() {
-                    a_stats.delay_frames_max.fetch_max(delay as u64, Ordering::Relaxed);
+                if cycle.is_multiple_of(64)
+                    && let Ok(delay) = pcm.delay()
+                {
+                    a_stats
+                        .delay_frames_max
+                        .fetch_max(delay as u64, Ordering::Relaxed);
                 }
             }
             // Note: `synth` then `settings` drop here (reverse declaration order), which is the correct teardown order.
@@ -185,17 +196,33 @@ fn main() {
             let window = Duration::from_millis(2000);
             loop {
                 thread::sleep(window);
-                let [cycles, busy_ns, xruns, events, q_sum, q_max, feed_max, delay_max] =
-                    s_stats.snapshot_and_reset();
+                let [
+                    cycles,
+                    busy_ns,
+                    xruns,
+                    events,
+                    q_sum,
+                    q_max,
+                    feed_max,
+                    delay_max,
+                ] = s_stats.snapshot_and_reset();
                 let busy_pct = busy_ns as f64 / (window.as_nanos() as f64) * 100.0;
-                let q_avg = if events > 0 { q_sum as f64 / events as f64 } else { 0.0 };
+                let q_avg = if events > 0 {
+                    q_sum as f64 / events as f64
+                } else {
+                    0.0
+                };
                 // Period cadence: how much of the ideal cycle budget (busy vs period duration).
                 let period_us = PERIOD_FRAMES as f64 * 1e6 / RATE as f64;
                 println!(
                     "[stats] cycles={cycles:5} busy={busy_pct:4.2}% ({:.1} us/{} us period) \
                      events={events:3} queue avg/max={q_avg:6.1}/{q_max:6} us \
                      feeder_jitter_max={feed_max:5} us xruns={xruns} out_queue~{:.1} ms",
-                    if cycles > 0 { busy_ns as f64 / cycles as f64 / 1000.0 } else { 0.0 },
+                    if cycles > 0 {
+                        busy_ns as f64 / cycles as f64 / 1000.0
+                    } else {
+                        0.0
+                    },
                     period_us,
                     delay_max as f64 * 1000.0 / RATE as f64,
                 );
@@ -211,7 +238,11 @@ fn main() {
     let start = Instant::now();
     // Stamp `sent` at enqueue time so engine-side queue latency is separable from feeder wake-up jitter.
     let send = |intended: Instant, event: Event| {
-        let _ = tx.send(TimedEvent { intended, sent: Instant::now(), event });
+        let _ = tx.send(TimedEvent {
+            intended,
+            sent: Instant::now(),
+            event,
+        });
     };
 
     let mut i: u32 = 0;
@@ -223,22 +254,58 @@ fn main() {
 
         // Lead: note on now, note off for the *previous* step's note.
         let key = pattern[(i % pattern.len() as u32) as usize];
-        send(t, Event::NoteOn { chan: LEAD_CH, key, vel: 96 });
+        send(
+            t,
+            Event::NoteOn {
+                chan: LEAD_CH,
+                key,
+                vel: 96,
+            },
+        );
         if i > 0 {
             let prev = pattern[((i - 1) % pattern.len() as u32) as usize];
-            send(t, Event::NoteOff { chan: LEAD_CH, key: prev });
+            send(
+                t,
+                Event::NoteOff {
+                    chan: LEAD_CH,
+                    key: prev,
+                },
+            );
         }
 
         // Drums: kick (GM 36) on every beat (every other eighth).
         if i.is_multiple_of(2) {
-            send(t, Event::NoteOn { chan: DRUM_CH, key: 36, vel: 100 });
-            send(t, Event::NoteOff { chan: DRUM_CH, key: 36 }); // kick is self-decaying
+            send(
+                t,
+                Event::NoteOn {
+                    chan: DRUM_CH,
+                    key: 36,
+                    vel: 100,
+                },
+            );
+            send(
+                t,
+                Event::NoteOff {
+                    chan: DRUM_CH,
+                    key: 36,
+                },
+            ); // kick is self-decaying
         }
 
         // Swap lead program every ~8 s to prove program_change works mid-stream.
         if i > 0 && i.is_multiple_of(32) {
-            let prog = if (i / 32).is_multiple_of(2) { LEAD_PROGRAM } else { 4 }; // saw lead <-> EPiano
-            send(t, Event::ProgramChange { chan: LEAD_CH, program: prog });
+            let prog = if (i / 32).is_multiple_of(2) {
+                LEAD_PROGRAM
+            } else {
+                4
+            }; // saw lead <-> EPiano
+            send(
+                t,
+                Event::ProgramChange {
+                    chan: LEAD_CH,
+                    program: prog,
+                },
+            );
         }
 
         i += 1;
@@ -278,7 +345,9 @@ fn open_playback(device: &str) -> alsa::Result<PCM> {
         }
     } // h/sw guards dropped here so `pcm` can be moved out
 
-    println!("[alsa] opened '{device}': rate={actual_rate} period={actual_period} frames buffer={buf} frames");
+    println!(
+        "[alsa] opened '{device}': rate={actual_rate} period={actual_period} frames buffer={buf} frames"
+    );
     Ok(pcm)
 }
 
@@ -300,6 +369,8 @@ fn try_realtime_priority() {
         println!("[rt] SCHED_FIFO priority 80 acquired");
     } else {
         let err = std::io::Error::last_os_error();
-        println!("[rt] SCHED_FIFO unavailable ({err}) — running with default scheduler (fine for spike)");
+        println!(
+            "[rt] SCHED_FIFO unavailable ({err}) — running with default scheduler (fine for spike)"
+        );
     }
 }
