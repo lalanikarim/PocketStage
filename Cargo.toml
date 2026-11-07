@@ -1,3 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/pocketstage-engine", "crates/pocketstage-model"]
+members = [
+    "crates/pocketstage-engine",
+    "crates/pocketstage-midi",
+    "crates/pocketstage-model",
+]

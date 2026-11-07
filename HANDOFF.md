@@ -135,7 +135,13 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    rejected not guessed), full validation invariants, `Project::default_project()` with
    R8 starter patches, 9 unit tests. CI added (`.github/workflows/ci.yml`:
    build + clippy -D warnings + fmt check + tests on push/PR).
-2. MIDI I/O + hotplug (`pocketstage-midi`) — then **T1: `midi_probe` tool** (deferred by user decision) to ground-truth the Oxygen 49 MKV CC map; put unit in a known mode first (HUI/template modes change CCs)
+2. MIDI I/O + hotplug (`pocketstage-midi`) — 🔄 **IN PROGRESS**: port discovery +
+   streaming parser + **T1 `midi_probe` tool ✅ DONE** (verified live on the MKV:
+   all 3 subdevices discovered, note traffic decoded).
+   Remaining: hotplug monitoring + rawmidi→engine event pump.
+   **T1 session ready to run whenever you are:**
+   `cargo run -p pocketstage-midi --bin midi_probe -- watch | tee probe-$(date +%F).log`
+   (put the MKV in a known mode first — HUI/template modes remap CCs)
 3. Oxygen mapper + pad LED feedback (`pocketstage-oxygen`) — investigate Editor port SysEx for LEDs (task T2)
 4. Web server (`pocketstage-server`): axum REST + WS, single-writer state snapshots
 5. Minimal web UI: project load/save, take list, mixer

@@ -1,0 +1,10 @@
+[package]
+name = "pocketstage-midi"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "PocketStage MIDI I/O: ALSA rawmidi port discovery, byte-stream parsing, probe tooling"
+
+[dependencies]
+alsa = "0.9"
+libc = "0.2"
