@@ -1,0 +1,15 @@
+<!-- Monochrome line-art mark. Uses currentColor so it inherits from CSS / can be re-exported in any single color. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none" stroke="currentColor" stroke-width="14">
+  <!-- white key outlines (C D E F) -->
+  <g>
+    <rect x="132" y="100" width="56" height="108" rx="9"/>
+    <rect x="196" y="100" width="56" height="108" rx="9"/>
+    <rect x="260" y="100" width="56" height="108" rx="9"/>
+    <rect x="324" y="100" width="56" height="108" rx="9"/>
+  </g>
+  <!-- black keys (C# D#), solid -->
+  <rect x="177" y="100" width="30" height="72" rx="7" fill="currentColor" stroke="none"/>
+  <rect x="241" y="100" width="30" height="72" rx="7" fill="currentColor" stroke="none"/>
+  <!-- pocket outline -->
+  <path d="M116 224 H396 V372 Q396 396 372 396 H140 Q116 396 116 372 Z"/>
+</svg>
