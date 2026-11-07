@@ -2,7 +2,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320">
   <!-- mark (pocket keys), scaled to 208px -->
   <g transform="translate(56 56) scale(0.40625)">
-    <g fill="#e8e6e0">
+    <g fill="#e8e6e0" stroke="#16181d" stroke-width="8">
       <rect x="132" y="100" width="56" height="150" rx="9"/>
       <rect x="196" y="100" width="56" height="150" rx="9"/>
       <rect x="260" y="100" width="56" height="150" rx="9"/>
