@@ -52,7 +52,9 @@ PocketStage/            (folder currently named PiDaw)
 ```
 
 - `cargo build` verified working (BUILD_OK).
-- **No real code yet.** Next task is the audio engine spike.
+- **Spike DONE** (see `SPIKE_RESULTS.md`): `src/main.rs` + `src/ffi.rs` implement the
+  full ALSA + FluidSynth-FFI spike with metrics; runs glitch-free, ~1% CPU, 0 xruns.
+  Next task: project file format (`pocketstage-model`) — backlog item 1 below.
 
 ---
 
@@ -78,10 +80,16 @@ aplay -l                                     # playback devices
 
 ---
 
-## 5. NEXT TASK — audio engine spike (highest priority)
+## 5. Audio engine spike — ✅ DONE (results in `SPIKE_RESULTS.md`)
 
 Goal: falsify the riskiest part of the project — clean low-latency audio with
 FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
+
+> **Outcome (2026-11-07):** implemented and validated. Verdict: architecture confirmed
+> (hand-rolled ALSA loop + FluidSynth FFI). 0 xruns, ~1.0–1.4% CPU, event→render ≤ 1
+> period (5.3 ms), SCHED_FIFO denied on desktop yet still glitch-free. Remaining:
+> human audible check (`cargo run --release`); raw `plughw:` + Pi measurements later.
+> Details, numbers, and quirks log: `SPIKE_RESULTS.md`.
 
 ### Plan
 
