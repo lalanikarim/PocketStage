@@ -1,8 +1,4 @@
-<p align="center">
-  <img src="assets/brand/pocketstage.svg" width="128" alt="PocketStage logo: piano keys tucked into a pocket" />
-</p>
-
-# PocketStage
+# <img src="assets/brand/pocketstage.svg" width="40" alt="" /> PocketStage
 
 A portable lite DAW running headless on Linux (Raspberry Pi or laptop). A MIDI
 keyboard (**M-Audio Oxygen 49 MKV**) is the primary live controller; a web UI
