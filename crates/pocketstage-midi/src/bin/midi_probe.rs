@@ -7,6 +7,9 @@
 //!                              USB / Mackie / Editor subdevices)
 //!   midi_probe pump            run the production pump (hotplug + mpsc) and
 //!                              print PumpMessages — smoke test for `spawn_pump`
+//!   midi_probe send <dev> <hex..>  write raw bytes to an OUTPUT subdevice
+//!                              (T2: poke SysEx at the Editor port, e.g.
+//!                              `send hw:3,0,2 F0 00 51 3F 01 F7`)
 //!
 //! Probe session checklist (T1):
 //!   1. Put the unit in a known mode first (MIDI/Advanced — HUI/template modes
@@ -28,8 +31,11 @@ fn main() {
         None => list_ports(),
         Some("watch") => watch(&args[1..]),
         Some("pump") => pump(&args[1..]),
+        Some("send") => send(&args[1..]),
         Some(other) => {
-            eprintln!("unknown command: {other}\nusage: midi_probe [watch|pump <dev> ...]");
+            eprintln!(
+                "unknown command: {other}\nusage: midi_probe [watch|pump <dev> ... | send <dev> <hex..>]"
+            );
             std::process::exit(2);
         }
     }
@@ -154,6 +160,37 @@ fn pump(filter: &[String]) -> ! {
             }
         }
     }
+    std::process::exit(0)
+}
+
+/// Write raw hex bytes to an output subdevice. Rawmidi opens duplex, so
+/// `hw:3,0,2` captured elsewhere still works while we send.
+fn send(args: &[String]) -> ! {
+    if args.len() < 2 {
+        eprintln!("usage: midi_probe send <dev> <hex byte> ...  (e.g. F0 00 51 3F 01 F7)");
+        std::process::exit(2);
+    }
+    let bytes: Vec<u8> = args[1..]
+        .iter()
+        .map(|h| {
+            u8::from_str_radix(h.trim_start_matches("0x"), 16)
+                .unwrap_or_else(|_| panic!("invalid hex byte: {h}"))
+        })
+        .collect();
+    let rm = Rawmidi::new(&args[0], Direction::Playback, false)
+        .unwrap_or_else(|e| panic!("cannot open {} for output: {e}", args[0]));
+    let mut io = rm.io();
+    use std::io::Write;
+    io.write_all(&bytes)
+        .unwrap_or_else(|e| panic!("write failed: {e}"));
+    // Give the host class driver a beat to chew on before we close the port.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    println!(
+        "[send] wrote {} bytes to {}: {:02X?}",
+        bytes.len(),
+        args[0],
+        bytes
+    );
     std::process::exit(0)
 }
 

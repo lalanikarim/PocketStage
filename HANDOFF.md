@@ -3,6 +3,11 @@
 > Created: 2026 – session handoff for continuing work after folder rename.
 > Read this first, then read `specs/brainstorming/scratchpad.md` (the full design brainstorm).
 
+**Status:** spike validated (0 xruns, ~1 % CPU) · model crate + CI merged · MIDI core
+(parser/probe/hotplug/pump) merged · **T1 hardware capture done** → device map at
+`specs/device-maps/oxygen-49-mkv.md`. Next: `pocketstage-oxygen` input mapper (unblocked),
+then the T2 SysEx expedition (LEDs).
+
 ---
 
 ## 1. What PocketStage is (30-second summary)
@@ -142,10 +147,18 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    15 tests, hardware tests mutex-serialized (rawmidi excludes concurrent openers).
    Deferred to when needed: rtrb lock-free ring for the audio-thread consumer,
    ALSA inotify instead of 1 s poll-scan.
-   **T1 session ready to run whenever you are:**
-   `cargo run -p pocketstage-midi --bin midi_probe -- watch | tee probe-$(date +%F).log`
-   (put the MKV in a known mode first — HUI/template modes remap CCs)
-3. Oxygen mapper + pad LED feedback (`pocketstage-oxygen`) — investigate Editor port SysEx for LEDs (task T2)
+   **T1 capture DONE** (sessions in DAW + Preset mode). Distilled map:
+   `specs/device-maps/oxygen-49-mkv.md`; raw logs `/tmp/probe-t1-run1-dawmode.log`,
+   `/tmp/probe-t2-preset.log`. Headlines: controls on **ch13** (knobs CC44-47,62,63,
+   75,76 · faders CC33-41 · fader buttons CC49-56); pads = notes 36-43 ch1; transport
+   = system Start/Stop/Reset messages (NOT CCs); octave/program buttons emit nothing;
+   device streams MIDI clock ~45 msg/s nonstop — the pump must discard TimingClock.
+   Corrected inventory: **9 faders+buttons, 8 knobs, 8 pads** (brainstorm's 16 pads /
+   4 faders was wrong).
+3. Oxygen mapper + pad LED feedback (`pocketstage-oxygen`) — **input mapping unblocked**
+   by the T1 map; still needs Editor-port SysEx for LEDs (T2) plus a ~2 min follow-up
+   probe (fader button #9, per-button transport table, pedal CC, pad bank 2 — listed in
+   the device-map file's open questions)
 4. Web server (`pocketstage-server`): axum REST + WS, single-writer state snapshots
 5. Minimal web UI: project load/save, take list, mixer
 
@@ -171,7 +184,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 ## 8. Open risks / watch-list
 
 - **Pad LED control on MKV** — Editor port exists (good sign) but protocol unverified (task T2). Fallback: blink-free UX via transport buttons + audio cues.
-- **MKV CC map unknown** — published tables unreliable; empirical probe required (T1, deferred by user).
+- ~~MKV CC map unknown~~ — **resolved by T1 capture**; see `specs/device-maps/oxygen-49-mkv.md`.
 - **FluidSynth crate bindings on crates.io are stale** — use hand-written FFI (spike will prove the approach).
 - **Pi performance never measured** — spike CPU% is first datapoint; Pi hardware not yet acquired? (not discussed)
 
@@ -181,3 +194,23 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 
 > Read HANDOFF.md and specs/brainstorming/scratchpad.md, then implement the audio
 > engine spike described in section 5 of HANDOFF.md.
+
+---
+
+## 10. Session log
+
+- **Session 1**: brainstorm → scratchpad; workspace scaffolded.
+- **Session 2**: ALSA + hand-rolled FluidSynth FFI spike; validated 0 xruns / ~1 % CPU;
+  SPIKE_RESULTS.md; MIT license (SPDX text) + GitHub Actions CI green.
+- **Session 3**: `pocketstage-model` (versioned clip-matrix format, 9 tests); repo made
+  public; branch protection on main; edition 2024 migration.
+- **Session 4**: AGENTS.md; `pocketstage-midi` core — port discovery, streaming parser
+  (15 tests), `midi_probe list/watch/pump/send`, hotplug (`ActivePorts` + `diff_ports`),
+  engine event pump (`spawn_pump` → mpsc) wired into demo main.
+- **Session 5**: T1 hardware capture ×2 (first accidentally in DAW mode — became useful
+  routing evidence). Inventory corrections (9 faders, 8 pads) + guide errata. Wrote
+  `specs/device-maps/oxygen-49-mkv.md`. Inputs for the mapper: transport = system
+  real-time messages; controls ch13; non-contiguous knob CCs; discard TimingClock spam.
+- **Housekeeping note (session 5)**: some earlier HANDOFF edits were found missing
+  (prose edits did not persist; cause unknown). This file was reconstructed from git +
+  notes. When prose and git disagree, trust git.
