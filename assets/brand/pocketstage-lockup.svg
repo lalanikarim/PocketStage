@@ -1,0 +1,22 @@
+<!-- PocketStage horizontal lockup: mark + wordmark on a dark banner. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320">
+  <!-- mark (pocket keys), scaled to 208px -->
+  <g transform="translate(56 56) scale(0.40625)">
+    <g fill="#e8e6e0">
+      <rect x="132" y="100" width="56" height="150" rx="9"/>
+      <rect x="196" y="100" width="56" height="150" rx="9"/>
+      <rect x="260" y="100" width="56" height="150" rx="9"/>
+      <rect x="324" y="100" width="56" height="150" rx="9"/>
+    </g>
+    <g fill="#16181d">
+      <rect x="177" y="100" width="30" height="72" rx="7"/>
+      <rect x="241" y="100" width="30" height="72" rx="7"/>
+    </g>
+    <path d="M116 216 H396 V372 Q396 396 372 396 H140 Q116 396 116 372 Z" fill="#23262e"/>
+    <rect x="116" y="216" width="280" height="10" rx="5" fill="#ffb454"/>
+    <line x1="132" y1="246" x2="380" y2="246" stroke="#ffb454" stroke-width="4" stroke-dasharray="10 8" opacity="0.5"/>
+  </g>
+  <!-- wordmark -->
+  <text x="320" y="198" font-family="Fira Sans" font-weight="bold" font-size="128" fill="#e8e6e0">Pocket</text>
+  <text x="735" y="198" font-family="Fira Sans" font-weight="bold" font-size="128" fill="#ffb454">Stage</text>
+</svg>
