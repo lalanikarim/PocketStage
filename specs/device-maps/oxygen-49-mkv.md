@@ -35,7 +35,7 @@ Keys and pads stay on **channel 1**. All values full-range unless noted.
 | Faders 1–9 | **CC33–41**, ch13 | physical order confirmed by sweep order |
 | Fader buttons 1–8 | **CC49–56**, ch13, 0/127 | one press = 127 then 0 |
 | Fader button 9 | **UNKNOWN — open question** (see below) | |
-| Transport ▶ ⏹ ⏺ 🔁 | **System Start (F8) / Stop (FA) / Reset (FF)** on port 0, plus HUI-style notes on port 1 | NOT CCs! per-button mapping needs one more probe |
+| Transport ▶ ⏹ ⏺ 🔁 | **System real-time messages** on port 0: Start `FA`, Stop `FC`, Reset `FF` (per-button table pending probe A2), plus HUI-style notes on port 1 | NOT CCs! |
 | Octave −/+ , program ‹ › | **no MIDI output** (internal remapping) | cannot be used as bindings |
 | Sustain pedal | not captured (pedal was unplugged) | expect CC64 — verify |
 
@@ -54,7 +54,24 @@ Keys and pads stay on **channel 1**. All values full-range unless noted.
 - Keys + pads **still appear on port 0** ch1.
 - We do NOT rely on this mode; it's a fallback surface at most.
 
-## Open questions (next probe, ~2 min)
+## PENDING PROBES
+
+### A — mini-probe (~2 min, hardware + user) — **PENDING**
+
+1. **Fader button 9**: only CC49–56 appeared for 9 buttons — press #9 alone.
+2. **Transport → message table**: which of loop/stop/play/record maps to
+   Start/Stop/Reset (press each once, ≥2 s apart).
+3. **Sustain pedal** CC (plug in, press) — expect CC64.
+4. **Pad bank 2**: SHIFT+pad1 then press pads — do notes shift (+8? channel change?).
+
+### B — T2 SysEx expedition (Editor port, LED write-back) — **PENDING**
+
+`midi_probe send hw:3,0,2 <hex>` is built and ready. Plan: verify the port accepts
+writes, try M-Audio-family SysEx candidates while watching pad LEDs; check if the
+unit replies to any inquiry (identity dump `F0 7E .. F7`). Worst case fallback:
+LED-less UX.
+
+### Old open-questions list (superseded by A/B above)
 
 1. **Fader button 9**: only CC49–56 appeared for 9 buttons — press #9 alone.
 2. **Transport → message table**: which of loop/stop/play/record maps to

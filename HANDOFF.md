@@ -155,10 +155,11 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    device streams MIDI clock ~45 msg/s nonstop — the pump must discard TimingClock.
    Corrected inventory: **9 faders+buttons, 8 knobs, 8 pads** (brainstorm's 16 pads /
    4 faders was wrong).
-3. Oxygen mapper + pad LED feedback (`pocketstage-oxygen`) — **input mapping unblocked**
-   by the T1 map; still needs Editor-port SysEx for LEDs (T2) plus a ~2 min follow-up
-   probe (fader button #9, per-button transport table, pedal CC, pad bank 2 — listed in
-   the device-map file's open questions)
+3. Oxygen mapper (`pocketstage-oxygen`) — **part 1 (input mapping) DONE**: pure
+   `Mapping` (serde, deny_unknown_fields, validated) + `Mapper::map(&Event) -> Option<Action>`
+   from the measured T1 map; 16 unit tests + doctest; `oxygen_demo` bin verified live
+   (silently swallows the clock spam). Engine wiring (pump→mapper→song actions) is the
+   next slice. **Pending**: probe A (4 items) + T2 SysEx expedition → then part 2 (LEDs).
 4. Web server (`pocketstage-server`): axum REST + WS, single-writer state snapshots
 5. Minimal web UI: project load/save, take list, mixer
 
@@ -211,6 +212,11 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   routing evidence). Inventory corrections (9 faders, 8 pads) + guide errata. Wrote
   `specs/device-maps/oxygen-49-mkv.md`. Inputs for the mapper: transport = system
   real-time messages; controls ch13; non-contiguous knob CCs; discard TimingClock spam.
+- **Session 6**: `pocketstage-oxygen` **part 1 (input mapper)** — pure `Mapping`
+  (serde + `deny_unknown_fields`, validated for ranges/duplicate CC claims),
+  `Mapper::map(&Event) -> Option<Action>` built on the measured T1 map, 16 unit
+  tests + doctest, `oxygen_demo` bin verified live against the unit (clock spam
+  correctly silent). Pads = notes 36–43 shadow low keys by design; documented.
 - **Housekeeping note (session 5)**: some earlier HANDOFF edits were found missing
   (prose edits did not persist; cause unknown). This file was reconstructed from git +
   notes. When prose and git disagree, trust git.

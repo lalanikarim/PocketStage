@@ -4,4 +4,5 @@ members = [
     "crates/pocketstage-engine",
     "crates/pocketstage-midi",
     "crates/pocketstage-model",
+    "crates/pocketstage-oxygen",
 ]

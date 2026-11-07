@@ -1,0 +1,15 @@
+[package]
+name = "pocketstage-oxygen"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "M-Audio Oxygen 49 MKV control mapping: measured preset-mode map, mode-aware event mapper (LED feedback pending T2)"
+
+[dependencies]
+pocketstage-midi = { path = "../pocketstage-midi" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "oxygen_demo"
+path = "src/bin/oxygen_demo.rs"

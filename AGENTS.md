@@ -40,7 +40,9 @@ in CI or automated loops; there are no device-free integration tests for it yet.
 |---|---|---|
 | `crates/pocketstage-engine` | audio callback thread, clock, FFI, metrics | `alsa`, `libc`, hand-written FluidSynth FFI |
 | `crates/pocketstage-model` | project data model + versioned file format | serde/serde_json/thiserror **only** — no audio, no MIDI, no I/O side effects |
-| planned: `pocketstage-midi`, `pocketstage-oxygen`, `pocketstage-server` | | |
+| `crates/pocketstage-midi` | port discovery, streaming parser, hotplug, event pump (`spawn_pump` → mpsc) | `alsa`, `libc`; parser is pure |
+| `crates/pocketstage-oxygen` | Oxygen 49 MKV input mapper (measured map → semantic `Action`s) | pure logic + serde; demo bin uses the midi pump. LED feedback pending T2 |
+| planned: `pocketstage-server` | axum REST/WS | |
 
 Rules that keep this architecture intact:
 
