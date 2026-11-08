@@ -105,7 +105,10 @@
   </section>
 
   <section class="card">
-    <h2>Recorded takes</h2>
+    <h2>Recorded takes
+      <button id="cleartakes" class="alt" style="float:right;font-size:11px"
+              title="delete every take from the project">clear all</button>
+    </h2>
     <ul id="takes"><li><em>none yet</em></li></ul>
   </section>
 
@@ -521,6 +524,15 @@ function renderStepEditor() {
   });
   box.append(grid);
 }
+
+$("cleartakes").addEventListener("click", async () => {
+  if (!project) return;
+  const n = (project.project.takes || []).length;
+  if (!n || !confirm(`Delete all ${n} take(s)? This cannot be undone.`)) return;
+  const body = structuredClone(project);
+  body.project.takes = [];
+  await putProject(body, "all takes cleared");
+});
 
 // Remote control: transport + scene chips drive the engine over HTTP —
 // same event path the Oxygen keys take. State comes back via /ws.

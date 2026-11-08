@@ -95,13 +95,17 @@ fn apply_swap(
     project: &mut Project,
     bpm: &mut f64,
     takes: &mut Vec<Take>,
-    mine: &[String],
+    mine: &mut Vec<(String, Instant)>,
     synth: &ffi::Synth,
 ) {
     let mut new = pf.project;
+    // "Mine" only protects a take during the short window between finalize
+    // and store absorption (the feed drains every 250 ms). Beyond that a PUT
+    // deletion — e.g. clear-all — must actually delete, not resurrect.
+    mine.retain(|(_, when)| when.elapsed().as_secs() < 30);
     let mut adopted = std::mem::take(&mut new.takes);
     for t in takes.drain(..) {
-        if mine.contains(&t.name) && !adopted.iter().any(|a| a.name == t.name) {
+        if mine.iter().any(|(n, _)| *n == t.name) && !adopted.iter().any(|a| a.name == t.name) {
             adopted.push(t);
         }
     }
@@ -395,7 +399,7 @@ fn main() {
             // until the take-feed has persisted them (swap-vs-drain race), but
             // boot-seeded takes are purely store-owned and vanish when a PUT
             // drops or mutes them.
-            let mut mine: Vec<String> = Vec::new();
+            let mut mine: Vec<(String, Instant)> = Vec::new();
             // Remote (web) transport/scene commands, translated to Events in
             // step 0 and consumed by the same drain as hardware events.
             let mut remote_ev: std::collections::VecDeque<TimedEvent> = Default::default();
@@ -414,7 +418,7 @@ fn main() {
                     let Ok(cmd) = crx.try_recv() else { break };
                     match cmd {
                         EngineCommand::SetProject(pf) => {
-                            apply_swap(pf, &mut project, &mut bpm, &mut takes, &mine, &synth);
+                            apply_swap(pf, &mut project, &mut bpm, &mut takes, &mut mine, &synth);
                             // A PUT may shrink the scene list; a dangling
                             // active index would play nothing / wrong column.
                             let dangling_active =
@@ -526,7 +530,7 @@ fn main() {
                                         // Hand the finalized take to the HTTP layer
                                         // (clone + try_send: user-initiated, rare).
                                         let _ = take_feed.send(take.clone());
-                                        mine.push(take.name.clone());
+                                        mine.push((take.name.clone(), Instant::now()));
                                         takes.push(take);
                                     }
                                     a_stats.live.recording.store(false, Ordering::Relaxed);
@@ -565,7 +569,7 @@ fn main() {
                                         };
                                         a_stats.live.takes.fetch_add(1, Ordering::Relaxed);
                                         let _ = take_feed.send(take.clone());
-                                        mine.push(take.name.clone());
+                                        mine.push((take.name.clone(), Instant::now()));
                                         takes.push(take);
                                     }
                                     a_stats.live.recording.store(false, Ordering::Relaxed);
