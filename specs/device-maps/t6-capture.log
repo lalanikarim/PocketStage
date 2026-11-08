@@ -1,0 +1,20 @@
+[watch] opened hw:1,0,0
+[watch] opened hw:1,0,1
+[watch] opened hw:1,0,2
+[watch] move controls now — Ctrl+C to stop
+
+== 4 mode toggles from known PRESET start (DAW,PRESET,DAW,PRESET):
+[ 81.593s] hw:1,0,1  cc          ch0 cc113 val127
+[ 81.792s] hw:1,0,1  cc          ch0 cc113 val  0
+[ 86.062s] hw:1,0,1  cc          ch0 cc112 val127
+[ 86.240s] hw:1,0,1  cc          ch0 cc112 val  0
+[ 89.694s] hw:1,0,1  cc          ch0 cc113 val127
+[ 89.905s] hw:1,0,1  cc          ch0 cc113 val  0
+[ 92.771s] hw:1,0,1  cc          ch0 cc112 val127
+[ 92.995s] hw:1,0,1  cc          ch0 cc112 val  0
+
+== fader1 down (cc33 124->0) / knob1 left (cc44 82->0) / fader1 up (cc33 1->127) / knob1 right (cc44 1->127), port 0 ch12, first+last lines each:
+[108.642s] hw:1,0,0  cc          ch12 cc 33 val124
+[109.132s] hw:1,0,0  cc          ch12 cc 33 val  0
+[111.391s] hw:1,0,0  cc          ch12 cc 44 val 82
+[117.642s] hw:1,0,0  cc          ch12 cc 44 val127

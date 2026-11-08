@@ -46,13 +46,38 @@ Keys and pads stay on **channel 1**. All values full-range unless noted.
   external clock source later (tempo/sync button changes this).
 - `Reset` (FF) observed around transport presses and port opens. Device also
   sends active-sensing on the HUI port periodically.
-- On opening the HUI port, device pushed CC112/113 val 127→0 bursts (state sync?).
+- ~~On opening the HUI port, device pushed CC112/113 val 127→0 bursts (state
+  sync?)~~ — did **not** reproduce in the T6 session: ports opened clean. The
+  earlier "bursts" were almost certainly echoes of real mode presses.
 
-## DAW mode (DAW LED lit) — for reference only
+## T6 — MODE DETECTION: VERIFIED ✅ (session 8, attended capture)
+
+The DAW and PRESET buttons each emit a **momentary pulse on the HUI port
+(`hw:*,0,1`)** when pressed — two distinct signals, no state tracking needed:
+
+| press | observed on HUI port | meaning |
+|---|---|---|
+| **DAW button** | `cc ch0 cc113 val127 → (≈200 ms) val0` | unit switched **into DAW mode** |
+| **PRESET button** | `cc ch0 cc112 val127 → (≈200 ms) val0` | unit switched **into PRESET mode** |
+
+Capture: 4 presses from a known PRESET start → exactly `113, 112, 113, 112`,
+lockstep with the toggles, nothing else on any port. Mode signals appear ONLY
+on the HUI port; keys/pads/faders keep flowing on port 0 regardless.
+
+Mapper implications (unblocks D11 mode system v2):
+- `ModeChanged(Daw)` / `ModeChanged(Preset)` from cc113/cc112 rising edges
+  (val 127; swallow the falling 0 of the pair).
+- Initial mode at engine boot is **unknown until the first toggle** — assume
+  PRESET (the documented fallback); a mismatch self-heals on first press.
+- Fader 1 (`ch13 cc33`) and knob 1 (`ch13 cc44`) confirmed flowing on port 0
+  in PRESET mode, consistent with the T1 map.
+
+## DAW mode (DAW LED lit)
 
 - Controls route to **port 1** (Mackie/HUI): observed CC16–23 among others.
 - Keys + pads **still appear on port 0** ch1.
-- We do NOT rely on this mode; it's a fallback surface at most.
+- Per D11 this is the *manage* surface: mode entry is now detected via cc113
+  (above), and it stops recording but never touches playback (D15).
 
 ## PROBES A/B/C — DONE (session 7). Results:
 

@@ -29,8 +29,10 @@ D11–D16, full spec in scratchpad R11.
 master clock (metronome fires ONLY while recording — D16); Stop finalizes
 (wait for Play); Play loops takes at max(loop_bars, rounded-up take length).
 Live-verified: record → stop → play back loop. `transport=… takes=N` in stats.
-**Next:** the mode-gated layer of R11 (PRESET drums-pads / DAW selectors) —
-blocked by T6 probe (see §8). Unblocked alternatives: web server slice.
+**T6 VERIFIED ✅ (session 8, attended):** DAW button = `cc113` pulse, PRESET
+button = `cc112` pulse, both on the HUI port — two distinct edge signals, mode
+is fully trackable (see device map §T6). **The R11 mode-gated layer is now
+unblocked** (PRESET drums-pads / DAW selectors / record-stop-on-entry).
 Remaining hardware work: pedal CC check (needs a pedal).
 
 ---
@@ -214,8 +216,9 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    metronome only while recording, Stop finalizes + waits for Play, loop =
    max(loop_bars, rounded-up take); live-verified). **Remaining:** the
    mode-gated layer — PRESET drum-kit pads (D12) + DAW note-selectors with
-   audition (D13) + record-stop on entering DAW (D15). **Blocked by T6**
-   (cc113 mode-detection probe; ~5 min attended session).
+   audition (D13) + record-stop on entering DAW (D15). T6 ✅ VERIFIED —
+   cc113/cc112 pulses on the HUI port detect mode switches unambiguously;
+   implement next.
 5. Web server (`pocketstage-server`) — **slices 1+2 DONE (session 8)**: axum
    REST crate + `ProjectStore`; **slice 2: router now embedded in the engine**
    (`spawn_engine_server`, own thread + tokio runtime, engine stays async-free).
@@ -279,11 +282,12 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   keys go missing, check the unit's octave/preset state first. Note the lowest 16
   keys (C2–G3 at oct 0) are *always* pad-shadowed by design; making the pad window
   configurable is the open fix if that ever matters.
-- **Mode detection unverified (T6, BLOCKING for record slice)** — the whole D11
-  mode system gates on tracking the unit's DAW/PRESET state. Evidence: toggling the
-  button emitted `cc ch0 cc113 val127→0` on the HUI port in one T2 capture. Needs a
-  ~5 min attended probe (toggle both directions ×3, check port-open burst confusion,
-  startup announcement). Fallback: assume PRESET until first observed toggle.
+- ~~**Mode detection unverified (T6, BLOCKING for record slice)**~~ —
+  **RESOLVED session 8:** attended capture confirmed DAW button → `cc ch0
+  cc113 val127→0` pulse, PRESET button → `cc ch0 cc112 val127→0` pulse, HUI
+  port only, perfect lockstep over 4 toggles, no port-open bursts (earlier
+  "burst" was echo of real presses). Initial mode still unknown at boot —
+  assume PRESET; self-heals on first toggle. Full table in device map §T6.
 - **Fader 9 button collision** — heuristic (bare 127→0) could misfire only if someone
   moves that fader top-to-bottom between two MIDI samples; effectively impossible at
   USB rates, but it's a known theoretical edge.
