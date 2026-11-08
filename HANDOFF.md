@@ -9,7 +9,12 @@ A/B/C** — 47 tests green. Device ground truth: `specs/device-maps/oxygen-49-mk
 **T2 SysEx expedition DONE — inconclusive:** pad LEDs are local momentary state,
 not host-controllable (no reply to any inquiry; notes on ports 0/2 don't move
 them, both modes) → **LED-less UX fallback adopted**.
-**Next slice:** wire pump → oxygen mapper → engine (play pads/keys for real).
+**Engine wiring DONE:** pump → per-port mappers → synth. Keys play the lead
+voice live (verified with headphones), pads fire a kick placeholder,
+transport prints state. `--demo` flag keeps the hardware-free arpeggio;
+`POCKETSTAGE_DEVICE` env var overrides the ALSA device.
+**Next slice:** transport → real engine state (play/stop actually doing something),
+then pads → clip launching.
 Remaining hardware work: pedal CC check (needs a pedal).
 
 ---
@@ -46,7 +51,8 @@ PocketStage/
 ├── specs/device-maps/oxygen-49-mkv.md  # GROUND TRUTH controller map (T1 + probes A/B/C)
 ├── .github/workflows/ci.yml            # build + clippy -D warnings + fmt + tests
 └── crates/
-    ├── pocketstage-engine/   ALSA + hand-rolled FluidSynth FFI spike, pump consumer, metrics
+    ├── pocketstage-engine/   ALSA + hand-rolled FluidSynth FFI; live MIDI (pump →
+    │                         oxygen mappers → synth), --demo mode, metrics
     ├── pocketstage-model/    versioned clip-matrix project format (serde), 9 tests
     ├── pocketstage-midi/     port discovery, streaming parser, hotplug, spawn_pump → mpsc;
     │                         bin: midi_probe (list/watch/pump/send)
@@ -160,8 +166,11 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    36–51 = logical pads 1–16 via banks; knob order [44,45,46,47,62,63,75,76];
    shared-button faders [9]) + stateful `Mapper::map(&Event, &mut Vec<Action>)`
    (tap-detector; one Mapper **per source port** — see oxygen_demo). 24 tests.
-   **Next slice: engine wiring** — pump → per-port mappers → song actions
-   (keys→synth, pads→clip launch later, transport→play/stop/record/loop).
+   **Engine wiring ✅ DONE (session 8)** — pump → per-port mappers → engine:
+   keys→lead voice (live-verified), pads→kick placeholder, transport prints
+   state. `--demo` = scripted arpeggio (no hardware); device selectable via arg
+   or `POCKETSTAGE_DEVICE`. **Next:** transport → real play/stop state, then
+   pads → clip launching.
    **T2 DONE (session 8), inconclusive**: LEDs are local momentary state;
    Editor port silent both ways; no host-controllable LED protocol found →
    LED-less UX fallback adopted. Part 2 (LED feedback) is therefore **dropped
@@ -252,6 +261,15 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   Side confirmation: a top-row pad press emitted key 40, exactly matching the
   device map (bank 1: bottom row 36–39, top row 40–43) — no state drift.
   Findings in the device-map file.
+  Then **engine wiring**: `pocketstage-engine` now consumes `spawn_pump` →
+  per-port Oxygen mappers (music + HUI) → synth events. Keys drive the lead
+  voice (live-verified with headphones through the CX1970), pads fire a kick
+  placeholder, transport prints state. Fixed two real bugs found during live
+  testing: `PumpHandle` was dropped immediately (its Drop shuts the pump down —
+  process exited silently) and an audio-thread panic left the binary limping
+  (now exits the process). Added `--demo` mode (scripted arpeggio, no hardware)
+  and `POCKETSTAGE_DEVICE`. Master gain set to 0.05 for live levels. 47 tests,
+  all gates green.
 - **Housekeeping note (session 5)**: some earlier HANDOFF edits were found missing
   (prose edits did not persist; cause unknown). This file was reconstructed from git +
   notes. When prose and git disagree, trust git.

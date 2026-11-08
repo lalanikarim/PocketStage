@@ -111,6 +111,7 @@ Rules that keep this architecture intact:
 ## Current status snapshot
 
 See `HANDOFF.md` §6 for the authoritative ordered backlog. As of this writing:
-audio spike ✅ validated, `pocketstage-model` ✅ done with tests, CI ✅ green;
-next up is `pocketstage-midi` (ALSA rawmidi I/O + hotplug), with the deferred
-`midi_probe` tool (task T1) available as a quick hardware-session task.
+audio spike ✅ validated, `pocketstage-model` ✅, `pocketstage-midi` ✅ (incl.
+`midi_probe`), `pocketstage-oxygen` input mapper ✅ (probes A/B/C + T2 done),
+engine wiring ✅ (live keys→synth verified); next up is transport → real
+play/stop state and pads → clip launching, then the web server.

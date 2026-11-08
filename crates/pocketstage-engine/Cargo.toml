@@ -7,3 +7,5 @@ license = "MIT"
 [dependencies]
 alsa = "0.9"
 libc = "0.2"
+pocketstage-midi = { path = "../pocketstage-midi" }
+pocketstage-oxygen = { path = "../pocketstage-oxygen" }

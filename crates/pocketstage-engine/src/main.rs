@@ -1,21 +1,27 @@
-//! PocketStage — audio engine spike (HANDOFF §5).
+//! PocketStage — audio engine (spike validated; now wired to real MIDI).
 //!
-//! Falsifiable question: can we get clean, low-latency audio on Linux from a
-//! hand-rolled ALSA blocking-write loop driven by FluidSynth via hand-written
-//! FFI, with sane CPU headroom?
-//!
-//! Architecture preview (mirrors the final design, scratchpad R5):
+//! Architecture (scratchpad R5):
 //!   * One FluidSynth instance, owned exclusively by the audio thread.
-//!   * Events arrive over an mpsc channel (scripted feeder here later; real
-//!     MIDI in a later crate). No locks on the hot path.
+//!   * Single writer: everything else sends `Event`s across an mpsc channel;
+//!     no locks, no allocation on the render path.
 //!   * ALSA S16LE stereo, 256-frame periods x 3 @ 48 kHz, underrun recovery.
 //!
-//! Run:  cargo run --release --bin pocketstage-engine   (Ctrl+C to stop)
+//! Event sources:
+//!   * default: live MIDI — `spawn_pump` → per-port Oxygen mappers (music +
+//!     HUI) → engine events. Keys drive the lead voice; pads fire a kick on
+//!     the drum channel (clip launching comes later); transport prints state.
+//!   * `--demo`: scripted arpeggio feeder, no hardware needed (spike mode).
+//!
+//! Run:  cargo run --release -p pocketstage-engine            (live MIDI)
+//!       cargo run --release -p pocketstage-engine -- --demo  (no hardware)
+//! ALSA device: positional arg > `POCKETSTAGE_DEVICE` env var > `default`.
 
 mod ffi;
 
 use alsa::pcm::{Access, Format, Frames, PCM};
 use alsa::{Direction, ValueOr};
+use pocketstage_midi::{PumpMessage, spawn_pump};
+use pocketstage_oxygen::{Action, Mapper, default_mapping, hui_mapping};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
@@ -84,15 +90,24 @@ impl Stats {
 // --------------------------------------------------------------------- main
 
 fn main() {
-    // ALSA device selectable: `default` (PipeWire plugin here) or e.g. `plughw:1,0` for raw hardware.
-    let device = std::env::args()
-        .nth(1)
+    // Args: optional ALSA device and `--demo` to run the scripted feeder
+    // instead of live MIDI. Device precedence: positional arg > POCKETSTAGE_DEVICE
+    // > "default" (PipeWire plugin on the dev box; plain ALSA on the Pi).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let demo = args.iter().any(|a| a == "--demo");
+    let device = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .cloned()
+        .or_else(|| std::env::var("POCKETSTAGE_DEVICE").ok())
         .unwrap_or_else(|| "default".to_string());
 
     // ---- FluidSynth setup (main thread; handles move to the audio thread) ----
     let settings = ffi::Settings::new().expect("new_fluid_settings returned null");
     settings.set_num("synth.sample-rate", RATE as f64);
-    settings.set_num("synth.gain", 0.7); // default master gain is 0.2 — too quiet for a test
+    // FluidSynth's default master gain is 0.2; we run well below that —
+    // per-listener loudness is the CX1970 / PipeWire stream volume's job.
+    settings.set_num("synth.gain", 0.05);
     let synth = ffi::Synth::new(&settings).expect("new_fluid_synth returned null");
 
     match synth.load_soundfont(SF2_PATH) {
@@ -114,8 +129,15 @@ fn main() {
         .spawn(move || {
             try_realtime_priority();
 
-            let pcm = open_playback(&device)
-                .unwrap_or_else(|e| panic!("could not open ALSA playback device '{device}': {e}"));
+            // Fail the whole process, not just this thread: with no audio
+            // thread the rest of the binary would feed a dead synth forever.
+            let pcm = match open_playback(&device) {
+                Ok(pcm) => pcm,
+                Err(e) => {
+                    eprintln!("could not open ALSA playback device '{device}': {e}");
+                    std::process::exit(1);
+                }
+            };
             let io = pcm
                 .io_checked::<i16>()
                 .expect("could not create PCM IO handle");
@@ -230,9 +252,20 @@ fn main() {
         })
         .expect("failed to spawn stats thread");
 
-    // ---- scripted note feeder (no MIDI hardware required) -------------------
+    // ---- event source: live MIDI (default) or scripted demo (--demo) --------
+    if demo {
+        run_demo_feeder(tx);
+    } else {
+        run_live_midi(tx);
+    }
+}
+
+/// Scripted note feeder, no MIDI hardware required (~2-bar arpeggio loop at
+/// 120 BPM + kick on every beat). Kept so the audio path stays testable
+/// without the unit plugged in.
+fn run_demo_feeder(tx: mpsc::Sender<TimedEvent>) {
     // ~2-bar arpeggio loop at 120 BPM (eighth notes) + kick on every beat.
-    println!("[feeder] arpeggio @ 120 BPM — Ctrl+C to stop");
+    println!("[feeder] demo arpeggio @ 120 BPM — Ctrl+C to stop");
     let pattern: [i32; 8] = [60, 64, 67, 71, 72, 71, 67, 64]; // C maj arpeggio, eighth notes
     let step = Duration::from_millis(250);
     let start = Instant::now();
@@ -310,6 +343,105 @@ fn main() {
 
         i += 1;
     }
+}
+
+/// Live MIDI source: `spawn_pump` → per-port Oxygen mappers → engine events.
+///
+/// One mapper per source port (the HUI subdevice is the only place
+/// loop/record are distinguishable — probe A2). Runs on the main thread; the
+/// audio thread stays untouched. Keys drive the lead voice, pads fire a kick
+/// on the drum channel until clip launching exists, transport prints state.
+fn run_live_midi(tx: mpsc::Sender<TimedEvent>) {
+    for m in [default_mapping(), hui_mapping()] {
+        if let Err(e) = m.validate() {
+            eprintln!("internal default mapping invalid: {e}");
+            std::process::exit(1);
+        }
+    }
+    let mut music = Mapper::new(default_mapping());
+    let mut hui = Mapper::new(hui_mapping());
+
+    let (mtx, mrx) = mpsc::channel::<PumpMessage>();
+    // Keep the handle alive for as long as we consume — dropping it shuts the
+    // pump down (its Drop impl signals + joins).
+    let _pump = match spawn_pump(mtx, None) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("cannot start MIDI pump: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    println!("[midi] live — put the unit in preset mode (DAW LED unlit); Ctrl+C to stop");
+    loop {
+        match mrx.recv() {
+            Ok(PumpMessage::Midi(m)) => {
+                let mut out = Vec::new();
+                if m.port.ends_with(",1") {
+                    hui.map(&m.event, &mut out);
+                } else {
+                    music.map(&m.event, &mut out);
+                }
+                for action in out {
+                    match action {
+                        Action::Key { note, on, velocity } => {
+                            let event = if on {
+                                Event::NoteOn {
+                                    chan: LEAD_CH,
+                                    key: note as i32,
+                                    vel: velocity as i32,
+                                }
+                            } else {
+                                Event::NoteOff {
+                                    chan: LEAD_CH,
+                                    key: note as i32,
+                                }
+                            };
+                            send_event(&tx, m.received, event);
+                        }
+                        // Pads → audible kick until clip launching exists.
+                        Action::Pad { on, velocity, .. } if on => {
+                            send_event(
+                                &tx,
+                                m.received,
+                                Event::NoteOn {
+                                    chan: DRUM_CH,
+                                    key: 36,
+                                    vel: velocity as i32,
+                                },
+                            );
+                            send_event(
+                                &tx,
+                                m.received,
+                                Event::NoteOff {
+                                    chan: DRUM_CH,
+                                    key: 36,
+                                },
+                            );
+                        }
+                        Action::Play => println!("[transport] play"),
+                        Action::Stop => println!("[transport] stop"),
+                        Action::LoopToggle => println!("[transport] loop toggle"),
+                        Action::Record => println!("[transport] record"),
+                        _ => {} // faders/knobs/mod/pitch: no engine effect yet
+                    }
+                }
+            }
+            Ok(PumpMessage::PortConnected(p)) => println!("[midi] [+] {p}"),
+            Ok(PumpMessage::PortDisconnected(p)) => println!("[midi] [-] {p}"),
+            Err(_) => break, // pump gone — shut down
+        }
+    }
+}
+
+/// Enqueue an event for the audio thread, stamping `sent` at enqueue time so
+/// queue latency stays separable from source-side jitter.
+fn send_event(tx: &mpsc::Sender<TimedEvent>, received: Instant, event: Event) {
+    let _ = tx.send(TimedEvent {
+        intended: received,
+        sent: Instant::now(),
+        event,
+    });
 }
 
 // ------------------------------------------------------------------ helpers
