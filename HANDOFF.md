@@ -241,9 +241,14 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    locks/alloc); finalized takes stream back over a take-feed channel and are
    appended to the stored project → **recordings survive reboot** (engine seeds
    its live takes from the file at boot). Verified: demo session's Take 1 (64
-   events) landed in the JSON; after restart WS immediately shows it. Remaining:
-   slice 4 minimal web UI (project + take list).
-6. Minimal web UI: project load/save, take list, mixer
+   events) landed in the JSON; after restart WS immediately shows it.
+   **Slice 4 DONE (session 8): minimal web UI** — `GET /` serves a single
+   embedded file (`crates/pocketstage-server/web/index.html`, vanilla JS, no
+   asset pipeline): live transport/bpm/bar:beat/scene/mode/takes from /ws
+   (auto-reconnect), recorded-take list (re-fetched when the take count
+   changes), project editor (name/bpm/loop bars + raw JSON escape hatch) via
+   GET/PUT /api/project. Mixer view deferred until FX exist.
+6. Web UI follow-ups (deferred): mixer view, per-scene/clip editing widgets
 
 ---
 

@@ -114,13 +114,10 @@ Rules that keep this architecture intact:
 
 See `HANDOFF.md` §6 for the authoritative ordered backlog. As of this writing:
 audio spike ✅, `pocketstage-model` ✅, `pocketstage-midi` ✅ (incl.
-`midi_probe`), `pocketstage-oxygen` input mapper ✅ (probes A/B/C + T2 done),
-engine wiring ✅, transport/master clock ✅, scene launching via pads ✅,
-recording core ✅ (takes: capture on ⏺, metronome only while recording, loop
-on Play — all live-verified); web control plane slices 1–2 ✅ (axum REST
-embedded in the engine via EngineCommand channel; project boots from
-~/.pocketstage/project.json). Next up: the mode-gated layer of R11 (drum-kit
-pads / DAW selectors) — blocked by the T6 cc113 mode-detection probe (~5 min
-attended); web slices 1–3 ✅ (`/ws` status push; takes persist to the project file and
-survive reboot). Next up: the mode-gated layer of R11 — blocked by the T6
-cc113 probe; unblocked next: web slice 4 (minimal UI) or overdub UX.
+`midi_probe`), `pocketstage-oxygen` mapper + T6 mode detection ✅,
+engine: transport/clock ✅, scene launching ✅, recording core ✅ (D16),
+mode system v2 ✅ (D11–D15: PRESET perform / DAW manage), same-key retrigger
+via per-pad channels ✅ (D17); `pocketstage-server` slices 1–4 ✅ — axum REST
+store embedded in the engine (EngineCommand channel), `/ws` status push, takes
+persist across reboot, minimal web UI at `GET /`. Next: mixer/FX views,
+overdub layering, SEQ/MIX modes, Pi hardware validation, pedal CC check.

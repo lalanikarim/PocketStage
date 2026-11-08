@@ -107,6 +107,22 @@ async fn call(app: axum::Router, req: Request<Body>) -> (StatusCode, String) {
 }
 
 #[tokio::test]
+async fn index_serves_the_ui() {
+    let path = temp_path("index");
+    cleanup(&path);
+    let app = router(test_state(&path));
+    let (status, body) = call(
+        app,
+        Request::builder().uri("/").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("PocketStage"));
+    // The UI's API contract — keep these endpoints in sync with the page.
+    assert!(body.contains("/api/project") && body.contains("/ws"));
+}
+
+#[tokio::test]
 async fn http_round_trip() {
     let path = temp_path("http");
     cleanup(&path);

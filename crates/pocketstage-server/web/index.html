@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" width=device-width,initial-scale=1>
+<title>PocketStage</title>
+<style>
+  :root { --bg:#111417; --card:#1b1f24; --ink:#e6e9ec; --dim:#8a939d;
+          --acc:#3ddc84; --rec:#ff5b5b; --play:#4da3ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--ink); }
+  header { display:flex; align-items:center; gap:10px; padding:14px 18px; }
+  h1 { font-size:17px; margin:0; letter-spacing:.06em; text-transform:uppercase; }
+  .dot { width:10px; height:10px; border-radius:50%; background:#555; }
+  .dot.on { background:var(--acc); }
+  main { padding:0 18px 28px; display:grid; gap:14px; max-width:760px; }
+  .card { background:var(--card); border-radius:10px; padding:14px 16px; }
+  h2 { font-size:12px; margin:0 0 10px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; }
+  #transport { font-size:26px; font-weight:700; margin-bottom:8px; }
+  #transport.playing { color:var(--play); } #transport.recording { color:var(--rec); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(90px,1fr)); gap:8px; }
+  .cell b { display:block; font-size:19px; }
+  .cell span { color:var(--dim); font-size:11px; text-transform:uppercase; }
+  ul { list-style:none; margin:0; padding:0; }
+  li { display:flex; justify-content:space-between; padding:6px 2px; border-bottom:1px solid #2a2f35; }
+  li:last-child { border:0; }
+  label { display:block; color:var(--dim); font-size:11px; text-transform:uppercase; margin-top:8px; }
+  input, textarea { width:100%; background:#0d1013; color:var(--ink); border:1px solid #2c3238;
+                    border-radius:6px; padding:7px 9px; font:inherit; }
+  textarea { min-height:200px; font:12px/1.45 ui-monospace,monospace; margin-top:8px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; }
+  .row > div { flex:1; min-width:110px; }
+  button { background:var(--acc); color:#0b0d0f; border:0; border-radius:6px;
+           padding:9px 18px; font-weight:700; cursor:pointer; margin-top:12px; }
+  button.alt { background:#2c3238; color:var(--ink); font-weight:400; }
+  #msg { margin-top:8px; min-height:18px; font-size:12px; color:var(--dim); }
+  #msg.err { color:var(--rec); }
+</style>
+</head>
+<body>
+<header><h1>PocketStage</h1><span class="dot" id="conn"></span></header>
+<main>
+  <section class="card">
+    <div id="transport">—</div>
+    <div class="grid">
+      <div class="cell"><b id="l-bpm">–</b><span>bpm</span></div>
+      <div class="cell"><b id="l-pos">–</b><span>bar : beat</span></div>
+      <div class="cell"><b id="l-scene">–</b><span>scene</span></div>
+      <div class="cell"><b id="l-mode">–</b><span>mode</span></div>
+      <div class="cell"><b id="l-takes">–</b><span>takes</span></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Recorded takes</h2>
+    <ul id="takes"><li><em>none yet</em></li></ul>
+  </section>
+
+  <section class="card">
+    <h2>Project</h2>
+    <label>name</label><input id="p-name">
+    <div class="row">
+      <div><label>bpm</label><input id="p-bpm" type="number" step="0.1" min="20" max="300"></div>
+      <div><label>loop bars</label><input id="p-loop" type="number" step="1" min="1" max="64"></div>
+    </div>
+    <button id="save">Save</button>
+    <button id="toggle" class="alt" type="button">raw JSON ▸</button>
+    <textarea id="raw" hidden spellcheck="false"></textarea>
+    <div id="msg"></div>
+  </section>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let project = null;          // last ProjectFile fetched from the server
+let liveTakes = -1;          // take count seen in the latest WS frame (array)
+
+function msg(text, isErr) {
+  const el = $("msg");
+  el.textContent = text || "";
+  el.className = isErr ? "err" : "";
+}
+
+function renderProject(pf) {
+  project = pf;
+  $("p-name").value = pf.project.name;
+  $("p-bpm").value = pf.project.bpm;
+  $("p-loop").value = pf.project.loop_bars;
+  if (!$("raw").hidden) $("raw").value = JSON.stringify(pf, null, 2);
+  const ul = $("takes");
+  ul.innerHTML = "";
+  const takes = pf.project.takes || [];
+  if (!takes.length) { ul.innerHTML = "<li><em>none yet</em></li>"; return; }
+  for (const t of takes) {
+    const li = document.createElement("li");
+    li.innerHTML = `<span>${t.name}</span><span>${t.events.length} events</span>`;
+    ul.appendChild(li);
+  }
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("/api/project");
+    renderProject(await r.json());
+    msg("");
+  } catch (e) { msg("project fetch failed: " + e, true); }
+}
+
+async function save() {
+  if (!project) return;
+  let body;
+  if (!$("raw").hidden) {
+    try { body = JSON.parse($("raw").value); }
+    catch (e) { msg("raw JSON does not parse: " + e, true); return; }
+  } else {
+    body = structuredClone(project);
+    body.project.name = $("p-name").value.trim() || "Untitled";
+    body.project.bpm = parseFloat($("p-bpm").value);
+    body.project.loop_bars = parseInt($("p-loop").value, 10);
+  }
+  try {
+    const r = await fetch("/api/project", { method: "PUT",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
+    if (!r.ok) { msg("rejected: " + (await r.text()), true); return; }
+    msg("saved — engine applies at next safe point");
+    refresh();
+  } catch (e) { msg("save failed: " + e, true); }
+}
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onopen = () => $("conn").classList.add("on");
+  ws.onclose = () => { $("conn").classList.remove("on"); setTimeout(connect, 1000); };
+  ws.onmessage = (ev) => {
+    const f = JSON.parse(ev.data);
+    if (f.type !== "status") return;
+    const t = $("transport");
+    t.textContent = f.transport.toUpperCase();
+    t.className = f.transport;
+    $("l-bpm").textContent = f.bpm;
+    $("l-pos").textContent = f.bar + " : " + f.beat;
+    $("l-scene").textContent = f.scene || "–";
+    $("l-mode").textContent = f.mode;
+    const n = Array.isArray(f.takes) ? f.takes.length : 0;
+    $("l-takes").textContent = n;
+    if (n !== liveTakes) { liveTakes = n; refresh(); } // new take -> re-fetch list
+  };
+}
+
+$("save").addEventListener("click", save);
+$("toggle").addEventListener("click", () => {
+  const raw = $("raw");
+  raw.hidden = !raw.hidden;
+  if (!raw.hidden && project) raw.value = JSON.stringify(project, null, 2);
+});
+connect();
+refresh();
+</script>
+</body>
+</html>

@@ -252,6 +252,7 @@ pub struct Status {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(index))
         .route("/api/health", get(health))
         .route("/api/project", get(get_project).put(put_project))
         .route("/ws", get(ws_upgrade))
@@ -297,6 +298,14 @@ pub fn spawn_engine_server(state: AppState, addr: std::net::SocketAddr) -> Resul
         })
         .map_err(|e| e.to_string())?;
     hr.recv().map_err(|e| e.to_string())?
+}
+
+/// Minimal control-plane UI — single file, embedded at compile time, no
+/// asset pipeline (vanilla JS; talks to /api/project + /ws like any client).
+const INDEX_HTML: &str = include_str!("../web/index.html");
+
+async fn index() -> axum::response::Html<&'static str> {
+    axum::response::Html(INDEX_HTML)
 }
 
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
