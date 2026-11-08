@@ -26,9 +26,11 @@ use alsa::pcm::{Access, Format, Frames, PCM};
 use alsa::{Direction, ValueOr};
 use pocketstage_midi::{PumpMessage, spawn_pump};
 use pocketstage_model::{
-    Clip, Pattern, Project, Quantize, RecordedEvent, STEPS_PER_BAR, StepNote, Take,
+    Clip, Pattern, ProjectFile, Quantize, RecordedEvent, SCHEMA_VERSION, STEPS_PER_BAR, StepNote,
+    Take,
 };
 use pocketstage_oxygen::{Action, Mapper, default_mapping, hui_mapping};
+use pocketstage_server::{AppState, EngineCommand, ProjectStore};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
@@ -100,6 +102,8 @@ struct Stats {
     active_scene: std::sync::atomic::AtomicU8,
     recording: std::sync::atomic::AtomicBool,
     takes: std::sync::atomic::AtomicU8,
+    /// Live project swaps via HTTP (cumulative).
+    project_updates: std::sync::atomic::AtomicU64,
 }
 
 impl Stats {
@@ -147,13 +151,27 @@ fn main() {
             std::process::exit(1);
         }
     }
-    // ---- boot project (placeholder until project loading exists) ---------
-    let mut project = Project::default_project();
+    // ---- boot project: load from the store (single source of truth) ------
+    // Same file the HTTP control plane reads/writes; PUTs hot-swap the live
+    // project via EngineCommand. Precedence: POCKETSTAGE_PROJECT > ~/.pocketstage.
+    let project_path = std::env::var("POCKETSTAGE_PROJECT").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        format!("{home}/.pocketstage/project.json")
+    });
+    let store = Arc::new(
+        ProjectStore::open_or_default(&project_path).unwrap_or_else(|e| {
+            eprintln!("[init] cannot open project '{project_path}': {e}");
+            std::process::exit(1);
+        }),
+    );
+    let fresh_project = !store.file_exists();
+    let mut project = store.get().project;
     if let Err(e) = project.validate() {
         eprintln!("[init] internal default project invalid: {e}");
         std::process::exit(1);
     }
-    // Demo content so pads 1–2 have audible scenes out of the box.
+    // Demo content so pads 1–2 have audible scenes — only for a brand-new
+    // project, never stamped over a user's saved work.
     let bass_eighths: [(usize, u8, u8); 8] = [
         (0, 36, 100),
         (2, 36, 80),
@@ -164,24 +182,55 @@ fn main() {
         (12, 36, 100),
         (14, 36, 80),
     ]; // C2 on every eighth
-    project.tracks[0].clips[0] = Some(demo_clip(
-        "Piano I",
-        &[(0, 60, 90), (4, 60, 80), (8, 60, 90), (12, 60, 80)], // C4 quarters
-    ));
-    project.tracks[3].clips[0] = Some(demo_clip("Bass I", &bass_eighths));
-    project.tracks[1].clips[1] = Some(demo_clip(
-        "E.Piano I",
-        &[(0, 60, 90), (4, 64, 90), (8, 67, 90), (12, 72, 90)], // C-E-G-C quarters
-    ));
-    project.tracks[3].clips[1] = Some(demo_clip("Bass II", &bass_eighths));
+    if fresh_project && project.tracks.len() >= 4 {
+        project.tracks[0].clips[0] = Some(demo_clip(
+            "Piano I",
+            &[(0, 60, 90), (4, 60, 80), (8, 60, 90), (12, 60, 80)], // C4 quarters
+        ));
+        project.tracks[3].clips[0] = Some(demo_clip("Bass I", &bass_eighths));
+        project.tracks[1].clips[1] = Some(demo_clip(
+            "E.Piano I",
+            &[(0, 60, 90), (4, 64, 90), (8, 67, 90), (12, 72, 90)], // C-E-G-C quarters
+        ));
+        project.tracks[3].clips[1] = Some(demo_clip("Bass II", &bass_eighths));
+        // Persist immediately: the store stays the single source of truth,
+        // so GET /api/project matches what is live from t=0.
+        if let Err(e) = store.replace(ProjectFile {
+            version: SCHEMA_VERSION,
+            project: project.clone(),
+        }) {
+            eprintln!("[init] warning: could not seed demo project: {e}");
+        }
+    } else if !project.tracks.is_empty() {
+        println!("[init] loaded saved project (no demo stamping)");
+    }
     println!(
-        "[init] boot project: {} bpm, {} tracks — scenes 1-2 carry demo content",
+        "[init] boot project '{}' from {}: {} bpm, {} tracks",
+        project.name,
+        store.path().display(),
         project.bpm,
         project.tracks.len()
     );
 
     let (tx, rx) = mpsc::channel::<TimedEvent>();
+    // HTTP → audio-thread command lane (single writer: the server only ever
+    // *requests* state changes; the drain loop applies them — R5).
+    let (ctx, crx) = mpsc::channel::<EngineCommand>();
     let stats = Arc::new(Stats::default());
+
+    // ---- embedded HTTP control plane (own thread + tokio runtime) ---------
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(7777);
+    let http_state = AppState {
+        store: Arc::clone(&store),
+        engine: Some(ctx),
+    };
+    match pocketstage_server::spawn_engine_server(http_state, ([0, 0, 0, 0], port).into()) {
+        Ok(()) => println!("[server] control plane on http://0.0.0.0:{port} (LAN-trusted)"),
+        Err(e) => eprintln!("[server] NOT started ({e}) — audio unaffected"),
+    }
 
     // ---- audio thread -------------------------------------------------------
     let a_stats = Arc::clone(&stats);
@@ -213,7 +262,7 @@ fn main() {
                 synth.program_change(t as i32, track.instrument.gm_program as i32);
             }
 
-            let bpm = project.bpm;
+            let mut bpm = project.bpm;
             let mut cycle: u64 = 0;
             let mut total_samples: u64 = 0; // frames rendered so far (master clock domain)
             let mut playing_since: Option<u64> = None; // sample index where Play fired
@@ -226,6 +275,19 @@ fn main() {
             let mut recording: Option<(u64, Vec<RecordedEvent>)> = None;
             let mut takes: Vec<Take> = Vec::new();
             loop {
+                // 0) HTTP commands. Payloads are store-validated; the swap +
+                // dealloc runs here (user-initiated, rare) — deliberate
+                // exception to the audio-thread no-allocation rule.
+                if let Ok(EngineCommand::SetProject(pf)) = crx.try_recv() {
+                    project = pf.project;
+                    bpm = project.bpm;
+                    for (t, track) in project.tracks.iter().enumerate() {
+                        synth.program_change(t as i32, track.instrument.gm_program as i32);
+                    }
+                    a_stats
+                        .project_updates
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 // 1) Drain pending MIDI events (bounded per cycle — writes stay timely).
                 for _ in 0..64 {
                     match rx.try_recv() {
@@ -568,7 +630,7 @@ fn main() {
                     "[stats] cycles={cycles:5} busy={busy_pct:4.2}% ({:.1} us/{} us period) \
                      events={events:3} queue avg/max={q_avg:6.1}/{q_max:6} us \
                      feeder_jitter_max={feed_max:5} us xruns={xruns} out_queue~{:.1} ms \
-                     transport={} pos={bar}.{beat} scene={} takes={}",
+                     transport={} pos={bar}.{beat} scene={} takes={} swaps={}",
                     if cycles > 0 {
                         busy_ns as f64 / cycles as f64 / 1000.0
                     } else {
@@ -585,6 +647,7 @@ fn main() {
                     },
                     scene_str,
                     s_stats.takes.load(Ordering::Relaxed),
+                    s_stats.project_updates.load(Ordering::Relaxed),
                 );
             }
         })

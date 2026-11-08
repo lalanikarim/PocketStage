@@ -51,7 +51,9 @@ Rules that keep this architecture intact:
   audio thread. (See scratchpad R5.)
 - **Audio-thread discipline:** no allocation, no locks, no syscalls that can
   block in the render loop (`main.rs`, the `ps-audio` thread). Events arrive
-  via `mpsc::try_recv`, bounded per cycle.
+  via `mpsc::try_recv`, bounded per cycle. Documented exception:
+  `EngineCommand::SetProject` (HTTP project swap) assigns + deallocates in the
+  drain loop — user-initiated and rare; keep everything else alloc-free.
 - **FluidSynth is hand-written FFI** (`engine/src/ffi.rs`) on purpose — the
   crates.io bindings are stale/abandoned. Do not add a FluidSynth crate. Only
   extend `ffi.rs` with new declarations as needed.
@@ -115,6 +117,8 @@ audio spike ✅, `pocketstage-model` ✅, `pocketstage-midi` ✅ (incl.
 `midi_probe`), `pocketstage-oxygen` input mapper ✅ (probes A/B/C + T2 done),
 engine wiring ✅, transport/master clock ✅, scene launching via pads ✅,
 recording core ✅ (takes: capture on ⏺, metronome only while recording, loop
-on Play — all live-verified). Next up: the mode-gated layer of R11 (drum-kit
+on Play — all live-verified); web control plane slices 1–2 ✅ (axum REST
+embedded in the engine via EngineCommand channel; project boots from
+~/.pocketstage/project.json). Next up: the mode-gated layer of R11 (drum-kit
 pads / DAW selectors) — blocked by the T6 cc113 mode-detection probe (~5 min
-attended); unblocked alternative: the web server.
+attended); unblocked next: web slice 3 (WS state snapshots) + take saving.

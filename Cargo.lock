@@ -292,6 +292,7 @@ dependencies = [
  "pocketstage-midi",
  "pocketstage-model",
  "pocketstage-oxygen",
+ "pocketstage-server",
 ]
 
 [[package]]

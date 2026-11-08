@@ -1,12 +1,12 @@
-//! Standalone control-plane server (dev convenience; the engine will embed
-//! the same router once it grows the command channel).
+//! Standalone control-plane server: file CRUD without a live engine (the
+//! engine embeds the same router in the real deployment).
 //!
 //! Env: `POCKETSTAGE_PROJECT` project file path (default `project.pocketstage.json`)
 //!      `PORT`                   listen port (default `7777`)
 
 use std::sync::Arc;
 
-use pocketstage_server::{ProjectStore, router};
+use pocketstage_server::{AppState, ProjectStore, router};
 
 #[tokio::main]
 async fn main() {
@@ -27,7 +27,11 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("cannot bind :{port}: {e}"));
     println!("[server] listening on http://0.0.0.0:{port} (LAN-trusted, no auth in v0.1)");
-    axum::serve(listener, router(store))
+    let state = AppState {
+        store,
+        engine: None,
+    };
+    axum::serve(listener, router(state))
         .await
         .expect("axum serve");
 }

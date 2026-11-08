@@ -10,3 +10,4 @@ libc = "0.2"
 pocketstage-midi = { path = "../pocketstage-midi" }
 pocketstage-model = { path = "../pocketstage-model" }
 pocketstage-oxygen = { path = "../pocketstage-oxygen" }
+pocketstage-server = { path = "../pocketstage-server" }

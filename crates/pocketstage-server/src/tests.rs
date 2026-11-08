@@ -9,7 +9,7 @@ use tower::ServiceExt; // oneshot
 
 use pocketstage_model::{Project, ProjectFile, SCHEMA_VERSION};
 
-use crate::{ProjectStore, router};
+use crate::{AppState, EngineCommand, ProjectStore, router};
 
 fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("ps-server-test-{name}.json"))
@@ -91,6 +91,13 @@ fn replace_creates_missing_parent_dirs() {
 
 // ------------------------------------------------------------------ HTTP
 
+fn test_state(path: &std::path::Path) -> AppState {
+    AppState {
+        store: std::sync::Arc::new(ProjectStore::open_or_default(path).unwrap()),
+        engine: None,
+    }
+}
+
 async fn call(app: axum::Router, req: Request<Body>) -> (StatusCode, String) {
     let res = app.oneshot(req).await.unwrap();
     let status = res.status();
@@ -104,9 +111,7 @@ async fn call(app: axum::Router, req: Request<Body>) -> (StatusCode, String) {
 async fn http_round_trip() {
     let path = temp_path("http");
     cleanup(&path);
-    let app = router(std::sync::Arc::new(
-        ProjectStore::open_or_default(&path).unwrap(),
-    ));
+    let app = router(test_state(&path));
 
     // health
     let (status, body) = call(
@@ -170,5 +175,51 @@ async fn http_round_trip() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(!body.is_empty());
+    cleanup(&path);
+}
+
+#[tokio::test]
+async fn put_forwards_valid_project_to_engine_channel() {
+    let path = temp_path("engine-cmd");
+    cleanup(&path);
+    let (tx, rx) = std::sync::mpsc::channel::<EngineCommand>();
+    let app = router(AppState {
+        store: std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap()),
+        engine: Some(tx),
+    });
+
+    // Invalid payload → 400 and NOTHING reaches the engine.
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("PUT")
+            .uri("/api/project")
+            .body(Body::from(r#"{"version":1,"project":{"name":"x","loop_bars":0,"tracks":[],"scenes":[{"name":"A"}]}}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(rx.try_recv().is_err());
+
+    // Valid payload → 204 and the engine receives SetProject.
+    let mut pf = ProjectFile {
+        version: SCHEMA_VERSION,
+        project: Project::default_project(),
+    };
+    pf.project.name = "Live".into();
+    let (status, _) = call(
+        app,
+        Request::builder()
+            .method("PUT")
+            .uri("/api/project")
+            .body(Body::from(serde_json::to_vec(&pf).unwrap()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    match rx.try_recv() {
+        Ok(EngineCommand::SetProject(got)) => assert_eq!(got.project.name, "Live"),
+        other => panic!("expected SetProject, got {other:?}"),
+    }
     cleanup(&path);
 }

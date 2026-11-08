@@ -216,11 +216,18 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    mode-gated layer — PRESET drum-kit pads (D12) + DAW note-selectors with
    audition (D13) + record-stop on entering DAW (D15). **Blocked by T6**
    (cc113 mode-detection probe; ~5 min attended session).
-5. Web server (`pocketstage-server`) — **slice 1 DONE (session 8)**: axum REST
-   crate, `ProjectStore` (validated PUT → atomic tmp+rename disk write; model
-   version gate reused), standalone binary (`PORT`, `POCKETSTAGE_PROJECT`).
-   Remaining: slice 2 embed in engine + command channel; slice 3 WS state
-   snapshots; slice 4 minimal web UI (project + take list).
+5. Web server (`pocketstage-server`) — **slices 1+2 DONE (session 8)**: axum
+   REST crate + `ProjectStore`; **slice 2: router now embedded in the engine**
+   (`spawn_engine_server`, own thread + tokio runtime, engine stays async-free).
+   PUT → store-validated → `EngineCommand::SetProject` on an mpsc lane the
+   audio-thread drain loop applies at its safe point (single writer intact, R5;
+   swap+dealloc in audio thread is a documented, user-initiated exception).
+   Engine boots its project from `POCKETSTAGE_PROJECT` (default
+   `~/.pocketstage/project.json`) — boot-project placeholder killed; demo
+   content only stamped on a brand-new project and persisted immediately.
+   Stats show `swaps=N`. Verified live: PUT → 204, swaps=1, bpm change audible,
+   0 xruns. Remaining: slice 3 WS state snapshots (+ take mirroring into the
+   saved project); slice 4 minimal web UI (project + take list).
 6. Minimal web UI: project load/save, take list, mixer
 
 ---
@@ -374,7 +381,22 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   channel in slice 2; this slice keeps the seam (the store) testable alone.
   Smoke-tested live: health OK, default project served, invalid `loop_bars=99`
   → 400 with reason, valid PUT → 204 + on-disk JSON. 4 new tests (60 total),
-  all gates green.
+  all gates green. Bug found via the live server: first save into a fresh
+  `~/.pocketstage` failed ENOENT → `create_dir_all(parent)` before the atomic
+  write (+ regression test).
+- **Web server slice 2 (engine embedding)**: `EngineCommand` enum +
+  `spawn_engine_server` (dedicated thread, own tokio runtime — engine stays
+  async-free; bind errors surface to caller so a port clash can't kill audio).
+  PUT persists first, then commands the engine; the audio-thread drain loop
+  applies `SetProject` at its safe point: swap project, re-read bpm, re-apply
+  track programs (scene/pattern data is read at launch time → new content
+  goes live on next scene launch). Single writer intact — server never touches
+  engine state directly. Engine now boots from the store
+  (`POCKETSTAGE_PROJECT` > `~/.pocketstage/project.json`); demo content only
+  on fresh projects and persisted immediately so GET matches live from t=0.
+  Stats: `swaps=N`. Live E2E: PUT rename+bpm → 204, swaps=1, disk updated,
+  0 xruns. +1 test (engine-channel forwarding; invalid PUTs never reach the
+  engine). 61 tests total.
   Then slices A+B (unblocked parts of the recording design): **A — model prep**
   (`Track::channel` override, `loop_bars` floor + validation, `Take::loop_ticks`
   / `events_at` / sorted-invariant, `RecordedEvent::tick()`; +5 tests) and
