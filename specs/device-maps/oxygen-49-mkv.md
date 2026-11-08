@@ -28,16 +28,16 @@ Keys and pads stay on **channel 1**. All values full-range unless noted.
 | Control | Messages | Notes |
 |---|---|---|
 | Keys (49) | Note On/Off, ch1 | octave buttons shift internally |
-| Pads 1–8 | Notes **36–43** (C1–G1), ch1, velocity-sensitive | bank button = SHIFT+pad1 |
+| Pads (8 physical) | Notes **36–51** = logical pads 1–16, ch1, velocity-sensitive | 2×4 rows; SHIFT+pad1 → 36–43, SHIFT+pad2 → 44–51 (probe C) |
 | Mod wheel | CC1, ch1 | full sweep confirmed |
 | Pitch lever | Pitch Bend, ch1, center 0x2000 | |
 | Knobs 1–8 | **CC44, 45, 46, 47, 62, 63, 75, 76** (in physical order), ch13 | non-contiguous numbering! |
 | Faders 1–9 | **CC33–41**, ch13 | physical order confirmed by sweep order |
 | Fader buttons 1–8 | **CC49–56**, ch13, 0/127 | one press = 127 then 0 |
-| Fader button 9 | **UNKNOWN — open question** (see below) | |
-| Transport ▶ ⏹ ⏺ 🔁 | **System real-time messages** on port 0: Start `FA`, Stop `FC`, Reset `FF` (per-button table pending probe A2), plus HUI-style notes on port 1 | NOT CCs! |
+| Fader button 9 | **CC41 — collides with fader 9 position** | bare 127→0 pair; mapper tap-detects (probe B) |
+| Transport ▶ ⏹ ⏺ 🔁 | HUI notes on port :1 (86/93/94/95) + system Start/Stop/Reset on port 0 | see probe table below — play vs record ONLY distinguishable via HUI notes |
 | Octave −/+ , program ‹ › | **no MIDI output** (internal remapping) | cannot be used as bindings |
-| Sustain pedal | not captured (pedal was unplugged) | expect CC64 — verify |
+| Sustain pedal | deferred — no pedal on hand at test time | expect CC64 — verify someday |
 
 ### Always-on behaviors (both modes)
 
@@ -54,15 +54,31 @@ Keys and pads stay on **channel 1**. All values full-range unless noted.
 - Keys + pads **still appear on port 0** ch1.
 - We do NOT rely on this mode; it's a fallback surface at most.
 
+## PROBES A/B/C — DONE (session 7). Results:
+
+1. **Fader button 9 (probe B)**: sends **CC41 val127→val0 — collides with
+   fader 9's position CC** (verified against a full sweep; button pairs contain
+   no intermediate values, sweeps can't skip numbers). Mapper detects the bare
+   `127→0` pattern → `Action::FaderButtonTap{9}` and swallows the position jumps.
+2. **Transport table (probe A2 — identical in Preset AND DAW mode)**:
+   | button | port :1 HUI note | port 0 system message |
+   |---|---|---|
+   | 🔁 loop | 86 (D6) | *nothing* |
+   | ⏹ stop | 93 (A6) | Stop `FC` |
+   | ▶ play | 94 (A#6) | Start `FA` + Reset·Reset |
+   | ⏺ record | 95 (B6) | Start `FA` + Reset·Reset — **same as play!** |
+   ⇒ Engine must listen to port `:1` notes to distinguish loop & record.
+   `Mapping::transport_notes` + `hui_mapping()` implement this per-port.
+3. **Sustain pedal**: DEFERRED — user has no pedal on hand. Expect CC64.
+4. **Pad banks (probes A2/C)**: physical layout 2 rows × 4; top row = higher notes.
+   | | bottom row | top row |
+   |---|---|---|
+   | SHIFT+pad1 bank (“pads 1–8”) | 36–39 | 40–43 |
+   | SHIFT+pad2 bank (“pads 9–16”) | 44–47 | 48–51 |
+   Default state = bank 1. ⇒ **logical pads 1–16 = notes 36–51**, mapper default
+   `pad_count: 16`. (Notes 44–51 shadow low piano keys — accepted tradeoff.)
+
 ## PENDING PROBES
-
-### A — mini-probe (~2 min, hardware + user) — **PENDING**
-
-1. **Fader button 9**: only CC49–56 appeared for 9 buttons — press #9 alone.
-2. **Transport → message table**: which of loop/stop/play/record maps to
-   Start/Stop/Reset (press each once, ≥2 s apart).
-3. **Sustain pedal** CC (plug in, press) — expect CC64.
-4. **Pad bank 2**: SHIFT+pad1 then press pads — do notes shift (+8? channel change?).
 
 ### B — T2 SysEx expedition (Editor port, LED write-back) — **PENDING**
 
@@ -80,7 +96,7 @@ LED-less UX.
 4. **Pad bank 2**: SHIFT+pad1 then press pads — do notes shift (+8? channel change?).
 5. T2: SysEx on port 2 (LED write-back protocol).
 
-## Implications for `pocketstage-oxygen`
+## Implications for `pocketstage-oxygen` (all implemented in part 1 unless noted)
 
 - Default map must be **mode-aware and channel-tolerant** (controls ch13 by
   factory here, user can change per preset) → match CC numbers across channels,

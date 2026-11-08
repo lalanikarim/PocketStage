@@ -22,7 +22,10 @@ pub struct Mapping {
     pub control_any_channel: bool,
     /// Channel of the keys, pads, mod wheel and pitch lever.
     pub keys_channel: u8,
-    /// First pad note (pad 1). Measured: 36 (C1), pads ascend chromatically.
+    /// First pad note (logical pad 1). Measured: 36; pads ascend chromatically.
+    /// With **16** logical pads the two hardware banks map to:
+    /// notes 36–43 = SHIFT+pad1 bank, 44–51 = SHIFT+pad2 bank.
+    /// (Caveat: notes 44–51 are also low piano keys — shadowed by design.)
     pub pad_note_base: u8,
     pub pad_count: u8,
     /// Mod-wheel CC on the keys channel.
@@ -33,10 +36,48 @@ pub struct Mapping {
     /// First fader CC (fader 1); faders ascend.
     pub fader_base_cc: u8,
     pub fader_count: u8,
-    /// First fader-button CC; measured only 8 for 9 physical buttons —
-    /// button #9 is pending probe A1, so the default count stays 8.
+    /// First fader-button CC; measured only 8 for 9 physical buttons:
+    /// **button #9 collides with fader 9 — it also sends CC41** (probe A1).
+    /// Keep this count at 8 unless you enjoy ambiguity.
     pub fader_button_base_cc: u8,
     pub fader_button_count: u8,
+    /// Fader indices whose BUTTON shares the fader's position CC (probe B:
+    /// factory collision on #9 — the button sends bare 127/0 pairs on CC41).
+    /// The mapper detects `127→0` with no intermediate values and reports
+    /// [`Action::FaderButtonTap`] instead of corrupting the fader position.
+    #[serde(default = "shared_button_faders_default")]
+    pub shared_button_faders: Vec<u8>,
+    /// Transport buttons mirrored as notes on the Mackie/HUI port (port :1).
+    /// Enabled only for events arriving from that port — these note numbers
+    /// are ordinary top-octave keys on the music port! `None` by default.
+    #[serde(default)]
+    pub transport_notes: Option<TransportNotes>,
+}
+
+fn shared_button_faders_default() -> Vec<u8> {
+    vec![9]
+}
+
+/// Note numbers the transport buttons emit on the HUI port (probe A2):
+/// loop 86, stop 93, play 94, record 95 — all ch1, vel 127.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransportNotes {
+    pub loop_note: u8,
+    pub stop_note: u8,
+    pub play_note: u8,
+    pub record_note: u8,
+}
+
+impl Default for TransportNotes {
+    fn default() -> Self {
+        Self {
+            loop_note: 86,
+            stop_note: 93,
+            play_note: 94,
+            record_note: 95,
+        }
+    }
 }
 
 /// Factory-default map as measured on the real unit (see module docs).
@@ -46,13 +87,25 @@ pub fn default_mapping() -> Mapping {
         control_any_channel: false,
         keys_channel: 1,
         pad_note_base: 36,
-        pad_count: 8,
+        pad_count: 16,
         mod_wheel_cc: 1,
         knobs: vec![44, 45, 46, 47, 62, 63, 75, 76],
         fader_base_cc: 33,
         fader_count: 9,
         fader_button_base_cc: 49,
         fader_button_count: 8,
+        shared_button_faders: vec![9],
+        transport_notes: None,
+    }
+}
+
+/// Mapping for events arriving on the **HUI port** (:1): transport notes are
+/// live there; nothing else from that port should ever map (the HUI port also
+/// carries Mackie broadcasts we ignore).
+pub fn hui_mapping() -> Mapping {
+    Mapping {
+        transport_notes: Some(TransportNotes::default()),
+        ..default_mapping()
     }
 }
 
@@ -113,6 +166,23 @@ impl Mapping {
                 self.fader_button_base_cc + i,
                 &format!("fader button {}", i + 1),
             )?;
+        }
+        if let Some(tn) = &self.transport_notes {
+            for (note, what) in [
+                (tn.loop_note, "loop"),
+                (tn.stop_note, "stop"),
+                (tn.play_note, "play"),
+                (tn.record_note, "record"),
+            ] {
+                if !(24..=108).contains(&note) {
+                    return Err(format!("transport {what} note {note} out of range"));
+                }
+            }
+        }
+        for &idx in &self.shared_button_faders {
+            if idx == 0 || idx > self.fader_count {
+                return Err(format!("shared-button fader index {idx} out of range"));
+            }
         }
         Ok(())
     }

@@ -159,7 +159,9 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    `Mapping` (serde, deny_unknown_fields, validated) + `Mapper::map(&Event) -> Option<Action>`
    from the measured T1 map; 16 unit tests + doctest; `oxygen_demo` bin verified live
    (silently swallows the clock spam). Engine wiring (pump→mapper→song actions) is the
-   next slice. **Pending**: probe A (4 items) + T2 SysEx expedition → then part 2 (LEDs).
+   next slice. Probes A/B/C done (pad banks, transport-via-HUI, fader-9 button
+   collision — see device-map file). **Remaining**: T2 SysEx expedition (+ pedal CC
+   check when a pedal exists) → then part 2 (LEDs).
 4. Web server (`pocketstage-server`): axum REST + WS, single-writer state snapshots
 5. Minimal web UI: project load/save, take list, mixer
 
@@ -217,6 +219,14 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   `Mapper::map(&Event) -> Option<Action>` built on the measured T1 map, 16 unit
   tests + doctest, `oxygen_demo` bin verified live against the unit (clock spam
   correctly silent). Pads = notes 36–43 shadow low keys by design; documented.
+- **Session 7**: probes A/B/C on the unit (three recording runs; one wasted on
+  accidental DAW mode — still produced routing evidence). Findings baked into
+  `pocketstage-oxygen`: pad banks = notes 36–51 → logical pads 1–16 (mapper
+  `pad_count: 16`); transport needs the HUI port (loop emits nothing else;
+  record ≡ play on port 0) → `transport_notes`/`hui_mapping()` + per-port mappers
+  in oxygen_demo; fader button 9 collides with fader 9's CC41 → buffering
+  tap-detector (`FaderButtonTap`). 24 oxygen tests (47 workspace-wide), all gates
+  green, demo verified live. Pedal probe deferred (no hardware).
 - **Housekeeping note (session 5)**: some earlier HANDOFF edits were found missing
   (prose edits did not persist; cause unknown). This file was reconstructed from git +
   notes. When prose and git disagree, trust git.

@@ -13,18 +13,22 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use pocketstage_midi::{PumpMessage, spawn_pump};
-use pocketstage_oxygen::{Mapper, default_mapping};
+use pocketstage_oxygen::{Mapper, default_mapping, hui_mapping};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let filter = if args.is_empty() { None } else { Some(args) };
 
-    let mapping = default_mapping();
-    if let Err(e) = mapping.validate() {
-        eprintln!("internal default mapping invalid: {e}");
-        std::process::exit(1);
+    // Per-port mappers: the HUI subdevice (device_string ends in ",1") is the
+    // only place loop/record are distinguishable (probe A2).
+    for m in [default_mapping(), hui_mapping()] {
+        if let Err(e) = m.validate() {
+            eprintln!("internal default mapping invalid: {e}");
+            std::process::exit(1);
+        }
     }
-    let mapper = Mapper::new(mapping);
+    let mut music = Mapper::new(default_mapping());
+    let mut hui = Mapper::new(hui_mapping());
 
     let (tx, rx) = mpsc::channel();
     let _pump = match spawn_pump(tx, filter) {
@@ -39,7 +43,14 @@ fn main() {
     loop {
         match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(PumpMessage::Midi(m)) => {
-                if let Some(action) = mapper.map(&m.event) {
+                let is_hui_port = m.port.ends_with(",1");
+                let mut out = Vec::new();
+                if is_hui_port {
+                    hui.map(&m.event, &mut out);
+                } else {
+                    music.map(&m.event, &mut out);
+                }
+                for action in out {
                     println!("{:<10} {action:?}", m.port);
                 }
             }
