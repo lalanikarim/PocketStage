@@ -187,5 +187,130 @@ fn optional_fields_have_sane_defaults() {
     assert_eq!(t.instrument.gm_program, 0);
     assert_eq!(t.instrument.soundfont, None);
     assert_eq!(t.color, [200, 200, 200]);
+    assert_eq!(file.project.loop_bars, 4); // D16 default
+    assert_eq!(t.channel, None); // D3: channel = track index
     file.validate().unwrap();
+}
+
+// --------------------------------------------------- slice A: record prep
+
+#[test]
+fn track_channel_override_and_default() {
+    let mut p = Project::default_project();
+    assert_eq!(p.track_channel(2), 2); // D3 default: index
+    p.tracks[1].channel = Some(9); // explicit drum routing
+    assert_eq!(p.track_channel(1), 9);
+    p.validate().unwrap();
+
+    p.tracks[1].channel = Some(16);
+    assert_eq!(
+        p.validate().unwrap_err(),
+        ValidationError::ChannelOutOfRange {
+            track: "E.Piano".into(),
+            channel: 16
+        }
+    );
+}
+
+#[test]
+fn loop_bars_validation() {
+    let mut p = Project::default_project();
+    for good in LOOP_BARS_RANGE.clone() {
+        p.loop_bars = good;
+        p.validate().unwrap();
+    }
+    p.loop_bars = 0;
+    assert!(matches!(
+        p.validate(),
+        Err(ValidationError::LoopBarsOutOfRange(0))
+    ));
+    p.loop_bars = 17;
+    assert!(matches!(
+        p.validate(),
+        Err(ValidationError::LoopBarsOutOfRange(17))
+    ));
+}
+
+#[test]
+fn take_loop_ticks_floor_and_roundup() {
+    let short = Take {
+        name: "short".into(),
+        events: vec![RecordedEvent::NoteOn {
+            tick: 3,
+            channel: 0,
+            pitch: 60,
+            velocity: 90,
+        }],
+    };
+    // Take under the floor -> project loop_bars (4 bars = 64 ticks).
+    assert_eq!(short.loop_ticks(4), 64);
+
+    let long = Take {
+        name: "long".into(),
+        events: vec![RecordedEvent::NoteOff {
+            tick: 70, // into bar 5 (ticks 64..80)
+            channel: 0,
+            pitch: 60,
+        }],
+    };
+    // Longer than the floor -> rounds up to whole bars, never truncates.
+    assert_eq!(long.loop_ticks(2), 80);
+    assert_eq!(long.loop_ticks(8), 128); // floor still wins when bigger
+}
+
+#[test]
+fn take_events_at_uses_sorted_window() {
+    let t = Take {
+        name: "w".into(),
+        events: vec![
+            RecordedEvent::NoteOn {
+                tick: 0,
+                channel: 0,
+                pitch: 60,
+                velocity: 90,
+            },
+            RecordedEvent::NoteOff {
+                tick: 4,
+                channel: 0,
+                pitch: 60,
+            },
+            RecordedEvent::NoteOn {
+                tick: 4,
+                channel: 1,
+                pitch: 64,
+                velocity: 80,
+            },
+        ],
+    };
+    assert!(t.is_sorted());
+    assert_eq!(t.events_at(0).len(), 1);
+    assert_eq!(t.events_at(4).len(), 2);
+    assert_eq!(t.events_at(5).len(), 0);
+    assert_eq!(t.events_at(3).len(), 0);
+}
+
+#[test]
+fn unsorted_take_is_rejected() {
+    let mut p = Project::default_project();
+    p.takes.push(Take {
+        name: "bad".into(),
+        events: vec![
+            RecordedEvent::NoteOn {
+                tick: 8,
+                channel: 0,
+                pitch: 60,
+                velocity: 90,
+            },
+            RecordedEvent::NoteOn {
+                tick: 2,
+                channel: 0,
+                pitch: 62,
+                velocity: 90,
+            },
+        ],
+    });
+    assert_eq!(
+        p.validate().unwrap_err(),
+        ValidationError::UnsortedTake { take: "bad".into() }
+    );
 }

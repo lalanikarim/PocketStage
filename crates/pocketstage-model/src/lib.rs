@@ -21,6 +21,10 @@ pub const MAX_SCENES: usize = 8;
 pub const STEPS_PER_BAR: usize = 16;
 /// R2: pattern length in bars, 1..=4.
 pub const MAX_PATTERN_BARS: u8 = 4;
+/// Take loop floor in bars (D16): `loop_bars` is the *minimum* loop length —
+/// a longer recorded take rounds up to whole bars instead of truncating.
+/// Set via the B-key override in DAW mode (R11); range covers sane settings.
+pub const LOOP_BARS_RANGE: std::ops::RangeInclusive<u8> = 1..=16;
 
 // ------------------------------------------------------------------- errors
 
@@ -61,6 +65,16 @@ pub enum ValidationError {
     VelocityOutOfRange(u8),
     #[error("gm_program {0} out of range 0..=127")]
     ProgramOutOfRange(u8),
+    #[error("track '{track}' channel override {channel} out of range 0..=15")]
+    ChannelOutOfRange { track: String, channel: u8 },
+    #[error(
+        "loop_bars {0} out of range {min}..={max}",
+        min = LOOP_BARS_RANGE.start(),
+        max = LOOP_BARS_RANGE.end()
+    )]
+    LoopBarsOutOfRange(u8),
+    #[error("take '{take}' events not sorted by tick")]
+    UnsortedTake { take: String },
 }
 
 // ---------------------------------------------------------------- top level
@@ -119,12 +133,21 @@ impl ProjectFile {
 }
 
 /// A PocketStage project: fixed tempo, clip matrix, recorded takes.
+///
+/// Schema note: fields added since v1 (`loop_bars`, `Track::channel`) are
+/// optional with defaults — old files parse unchanged and new files stay
+/// readable by older builds (unknown fields ignored), so `SCHEMA_VERSION`
+/// stays at 1.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
     /// Tempo in BPM. Fixed per project in v0.1 (R2).
     #[serde(default = "default_bpm")]
     pub bpm: f64,
+    /// Minimum take loop length in bars (D16). Recorded takes shorter than
+    /// this still loop at `loop_bars`; longer ones round up to whole bars.
+    #[serde(default = "default_loop_bars")]
+    pub loop_bars: u8,
     pub tracks: Vec<Track>,
     /// Vertical slices: launching a scene plays every non-empty clip in that
     /// column (quantized per [`Scene::quantize`], D5).
@@ -136,6 +159,10 @@ pub struct Project {
 
 fn default_bpm() -> f64 {
     120.0
+}
+
+fn default_loop_bars() -> u8 {
+    4
 }
 
 impl Project {
@@ -151,6 +178,7 @@ impl Project {
         Project {
             name: "Untitled".into(),
             bpm: default_bpm(),
+            loop_bars: default_loop_bars(),
             tracks: starters
                 .iter()
                 .map(|(name, program, color)| Track {
@@ -161,6 +189,7 @@ impl Project {
                         gm_program: *program,
                     },
                     clips: vec![None; MAX_SCENES],
+                    channel: None,
                 })
                 .collect(),
             scenes: (1..=MAX_SCENES)
@@ -171,6 +200,12 @@ impl Project {
                 .collect(),
             takes: Vec::new(),
         }
+    }
+
+    /// Internal synth channel for track `index`: the override if set, else
+    /// the track index itself (D3). Panics only on out-of-bounds index.
+    pub fn track_channel(&self, index: usize) -> u8 {
+        self.tracks[index].channel.unwrap_or(index as u8)
     }
 
     /// Validate all invariants the engine relies on (see HANDOFF/scratchpad R2).
@@ -187,6 +222,9 @@ impl Project {
         if !(20.0..=300.0).contains(&self.bpm) {
             return Err(ValidationError::BpmOutOfRange(self.bpm));
         }
+        if !LOOP_BARS_RANGE.contains(&self.loop_bars) {
+            return Err(ValidationError::LoopBarsOutOfRange(self.loop_bars));
+        }
         for track in &self.tracks {
             if track.clips.len() != self.scenes.len() {
                 return Err(ValidationError::ClipSlotMismatch {
@@ -200,11 +238,24 @@ impl Project {
                     track.instrument.gm_program,
                 ));
             }
+            if let Some(ch) = track.channel
+                && ch > 15
+            {
+                return Err(ValidationError::ChannelOutOfRange {
+                    track: track.name.clone(),
+                    channel: ch,
+                });
+            }
             for clip in track.clips.iter().flatten() {
                 validate_pattern(&clip.pattern)?;
             }
         }
         for take in &self.takes {
+            if !take.is_sorted() {
+                return Err(ValidationError::UnsortedTake {
+                    take: take.name.clone(),
+                });
+            }
             for ev in &take.events {
                 // Strict: hand-edited project files must not smuggle bad pitches.
                 if let RecordedEvent::NoteOff { pitch, .. } | RecordedEvent::NoteOn { pitch, .. } =
@@ -255,6 +306,10 @@ pub struct Track {
     /// One slot per scene (column); `None` = empty cell ("don't change" on
     /// scene launch — R2).
     pub clips: Vec<Option<Clip>>,
+    /// Explicit internal-channel routing; `None` = track index (D3). Needed
+    /// for a GM drum track, which must sit on channel 9.
+    #[serde(default)]
+    pub channel: Option<u8>,
 }
 
 fn default_color() -> [u8; 3] {
@@ -329,6 +384,50 @@ pub struct Take {
     /// grid keeps storage tiny and needs no tempo math on playback — project
     /// bpm is fixed in v0.1).
     pub events: Vec<RecordedEvent>,
+}
+
+impl Take {
+    /// Playback loop length in ticks for this take given the project floor:
+    /// max(loop_bars, whole bars covered by the take). Never truncates — a
+    /// long take loops at its own (rounded-up) length.
+    pub fn loop_ticks(&self, loop_bars: u8) -> u32 {
+        let last = self
+            .events
+            .iter()
+            .map(|e| match e {
+                RecordedEvent::NoteOn { tick, .. }
+                | RecordedEvent::NoteOff { tick, .. }
+                | RecordedEvent::ProgramChange { tick, .. } => *tick,
+            })
+            .max()
+            .unwrap_or(0);
+        let bars = (last.div_ceil(STEPS_PER_BAR as u32)).max(1);
+        (bars.max(loop_bars as u32) * STEPS_PER_BAR as u32).max(1)
+    }
+
+    /// Events exactly at `tick` (take-local coordinates). Relies on the
+    /// sorted-by-tick invariant (enforced by [`Project::validate`]).
+    pub fn events_at(&self, tick: u32) -> &[RecordedEvent] {
+        let start = self.events.partition_point(|e| e.tick() < tick);
+        let end = self.events.partition_point(|e| e.tick() <= tick);
+        &self.events[start..end]
+    }
+
+    /// Sorted-by-tick invariant check.
+    pub fn is_sorted(&self) -> bool {
+        self.events.windows(2).all(|w| w[0].tick() <= w[1].tick())
+    }
+}
+
+impl RecordedEvent {
+    /// The tick position, shared accessor across variants.
+    pub fn tick(&self) -> u32 {
+        match self {
+            RecordedEvent::NoteOn { tick, .. }
+            | RecordedEvent::NoteOff { tick, .. }
+            | RecordedEvent::ProgramChange { tick, .. } => *tick,
+        }
+    }
 }
 
 /// Minimal event set for takes in v0.1 (MIDI-only recording).
