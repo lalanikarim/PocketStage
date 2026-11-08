@@ -216,7 +216,11 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    mode-gated layer — PRESET drum-kit pads (D12) + DAW note-selectors with
    audition (D13) + record-stop on entering DAW (D15). **Blocked by T6**
    (cc113 mode-detection probe; ~5 min attended session).
-5. Web server (`pocketstage-server`): axum REST + WS, single-writer state snapshots
+5. Web server (`pocketstage-server`) — **slice 1 DONE (session 8)**: axum REST
+   crate, `ProjectStore` (validated PUT → atomic tmp+rename disk write; model
+   version gate reused), standalone binary (`PORT`, `POCKETSTAGE_PROJECT`).
+   Remaining: slice 2 embed in engine + command channel; slice 3 WS state
+   snapshots; slice 4 minimal web UI (project + take list).
 6. Minimal web UI: project load/save, take list, mixer
 
 ---
@@ -361,6 +365,16 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   selectors). Key discovery: one T2 capture shows the DAW toggle emitting
   cc113 on the HUI port → mode is detectable; verification deferred as **T6,
   blocking** for the mode layer.
+- **Web server slice 1**: new crate `pocketstage-server` (axum 0.8). Surface:
+  `ProjectStore` (open-or-default load through the model's version gate,
+  validated PUTs persisted atomically tmp+rename, poisoned-mutex recovery),
+  routes `GET /api/health`, `GET/PUT /api/project`, standalone binary
+  (`PORT`=7777, `POCKETSTAGE_PROJECT` file path). Deliberately *not* wired to
+  the engine yet — single-writer R5 means embedding happens via a command
+  channel in slice 2; this slice keeps the seam (the store) testable alone.
+  Smoke-tested live: health OK, default project served, invalid `loop_bars=99`
+  → 400 with reason, valid PUT → 204 + on-disk JSON. 4 new tests (60 total),
+  all gates green.
   Then slices A+B (unblocked parts of the recording design): **A — model prep**
   (`Track::channel` override, `loop_bars` floor + validation, `Take::loop_ticks`
   / `events_at` / sorted-invariant, `RecordedEvent::tick()`; +5 tests) and
