@@ -20,6 +20,7 @@ fn sample_project() -> Project {
     });
     p.takes.push(Take {
         name: "take 1".into(),
+        muted: false,
         events: vec![
             RecordedEvent::NoteOn {
                 tick: 0,
@@ -235,6 +236,7 @@ fn loop_bars_validation() {
 fn take_loop_ticks_floor_and_roundup() {
     let short = Take {
         name: "short".into(),
+        muted: false,
         events: vec![RecordedEvent::NoteOn {
             tick: 3,
             channel: 0,
@@ -247,6 +249,7 @@ fn take_loop_ticks_floor_and_roundup() {
 
     let long = Take {
         name: "long".into(),
+        muted: false,
         events: vec![RecordedEvent::NoteOff {
             tick: 70, // into bar 5 (ticks 64..80)
             channel: 0,
@@ -262,6 +265,7 @@ fn take_loop_ticks_floor_and_roundup() {
 fn take_events_at_uses_sorted_window() {
     let t = Take {
         name: "w".into(),
+        muted: false,
         events: vec![
             RecordedEvent::NoteOn {
                 tick: 0,
@@ -294,6 +298,7 @@ fn unsorted_take_is_rejected() {
     let mut p = Project::default_project();
     p.takes.push(Take {
         name: "bad".into(),
+        muted: false,
         events: vec![
             RecordedEvent::NoteOn {
                 tick: 8,
@@ -349,6 +354,30 @@ fn mixer_values_round_trip_and_validate() {
     };
     let json = file.to_json_pretty().unwrap();
     let back = ProjectFile::from_json_str(&json).unwrap();
+    assert_eq!(back.project, p);
+}
+
+#[test]
+fn take_muted_defaults_false_and_round_trips() {
+    let json = r#"{
+        "version": 1,
+        "project": {
+            "name": "MuteTest",
+            "tracks": [{ "name": "T1", "instrument": {}, "clips": [null] }],
+            "scenes": [{ "name": "A" }],
+            "takes": [{ "name": "t", "events": [] }]
+        }
+    }"#;
+    let file = ProjectFile::from_json_str(json).unwrap();
+    assert!(!file.project.takes[0].muted);
+
+    let mut p = sample_project();
+    p.takes[0].muted = true;
+    let file = ProjectFile {
+        version: SCHEMA_VERSION,
+        project: p.clone(),
+    };
+    let back = ProjectFile::from_json_str(&file.to_json_pretty().unwrap()).unwrap();
     assert_eq!(back.project, p);
 }
 

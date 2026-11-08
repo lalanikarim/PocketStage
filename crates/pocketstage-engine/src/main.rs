@@ -347,6 +347,11 @@ fn main() {
             // Takes persisted in the project (earlier sessions) are live from
             // t=0; new finalizes append to the file via the take feed.
             let mut takes: Vec<Take> = std::mem::take(&mut project.takes);
+            // Names of takes finalized *this boot*: they survive a project swap
+            // until the take-feed has persisted them (swap-vs-drain race), but
+            // boot-seeded takes are purely store-owned and vanish when a PUT
+            // drops or mutes them.
+            let mut mine: Vec<String> = Vec::new();
             a_stats
                 .live
                 .takes
@@ -358,6 +363,18 @@ fn main() {
                 if let Ok(EngineCommand::SetProject(pf)) = crx.try_recv() {
                     project = pf.project;
                     bpm = project.bpm;
+                    // Adopt the incoming take state (order + mute flags; a PUT
+                    // can also delete takes). Un-persisted takes finalized this
+                    // boot are kept until the store has absorbed them.
+                    let mut adopted = std::mem::take(&mut project.takes);
+                    for t in takes.drain(..) {
+                        let keep_unsaved =
+                            mine.contains(&t.name) && !adopted.iter().any(|a| a.name == t.name);
+                        if keep_unsaved {
+                            adopted.push(t);
+                        }
+                    }
+                    takes = adopted;
                     for (t, track) in project.tracks.iter().enumerate() {
                         apply_track_voice(&synth, t as i32, track);
                     }
@@ -434,11 +451,13 @@ fn main() {
                                         let take = Take {
                                             name: format!("Take {}", takes.len() + 1),
                                             events: evs,
+                                            muted: false,
                                         };
                                         a_stats.live.takes.fetch_add(1, Ordering::Relaxed);
                                         // Hand the finalized take to the HTTP layer
                                         // (clone + try_send: user-initiated, rare).
                                         let _ = take_feed.send(take.clone());
+                                        mine.push(take.name.clone());
                                         takes.push(take);
                                     }
                                     a_stats.live.recording.store(false, Ordering::Relaxed);
@@ -473,9 +492,11 @@ fn main() {
                                         let take = Take {
                                             name: format!("Take {}", takes.len() + 1),
                                             events: evs,
+                                            muted: false,
                                         };
                                         a_stats.live.takes.fetch_add(1, Ordering::Relaxed);
                                         let _ = take_feed.send(take.clone());
+                                        mine.push(take.name.clone());
                                         takes.push(take);
                                     }
                                     a_stats.live.recording.store(false, Ordering::Relaxed);
@@ -628,6 +649,9 @@ fn main() {
                             let mut k = ts0.ceil() as u64;
                             while (k as f64) < ts1 {
                                 for take in &takes {
+                                    if take.muted {
+                                        continue; // kept but silent (take mgmt)
+                                    }
                                     let lt = take.loop_ticks(project.loop_bars) as u64;
                                     for ev in take.events_at((k % lt) as u32) {
                                         match *ev {

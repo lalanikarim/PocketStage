@@ -418,6 +418,9 @@ pub struct Take {
     /// grid keeps storage tiny and needs no tempo math on playback — project
     /// bpm is fixed in v0.1).
     pub events: Vec<RecordedEvent>,
+    /// Silent during take playback (kept, not deleted — additive field, v1-safe).
+    #[serde(default)]
+    pub muted: bool,
 }
 
 impl Take {

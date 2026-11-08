@@ -156,9 +156,51 @@ function renderProject(pf) {
   if (!takes.length) { ul.innerHTML = "<li><em>none yet</em></li>"; return; }
   for (const t of takes) {
     const li = document.createElement("li");
-    li.innerHTML = `<span>${t.name}</span><span>${t.events.length} events</span>`;
+
+    const label = document.createElement("span");
+    label.textContent = t.name + (t.muted ? " (muted)" : "");
+    if (t.muted) label.style.color = "var(--dim)";
+
+    const mute = document.createElement("input");
+    mute.type = "checkbox"; mute.checked = !!t.muted; mute.title = "mute take";
+    mute.style.marginRight = "8px";
+    mute.addEventListener("input", () => {
+      t.muted = mute.checked; markDirty();
+      label.textContent = t.name + (t.muted ? " (muted)" : "");
+      label.style.color = t.muted ? "var(--dim)" : "";
+    });
+
+    const del = document.createElement("button");
+    del.className = "alt"; del.textContent = "\u2715"; del.title = "delete take";
+    del.style.margin = "0 0 0 8px"; del.style.padding = "2px 9px";
+    del.addEventListener("click", async () => {
+      if (!confirm(`Delete ${t.name}? This cannot be undone.`)) return;
+      const body = structuredClone(project);
+      body.project.takes = body.project.takes.filter((x) => x.name !== t.name);
+      await putProject(body, "take deleted");
+    });
+
+    const count = document.createElement("span");
+    count.textContent = `${t.events.length} events`;
+
+    const left = document.createElement("span");
+    left.append(mute, label);
+    li.append(left, count, del);
+    li.style.display = "flex"; li.style.alignItems = "center";
+    li.style.justifyContent = "space-between";
     ul.appendChild(li);
   }
+}
+
+async function putProject(body, okMsg) {
+  try {
+    const r = await fetch("/api/project", { method: "PUT",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
+    if (!r.ok) { msg("rejected: " + (await r.text()), true); return; }
+    dirty = false; setSave();
+    msg(okMsg);
+    refresh();
+  } catch (e) { msg("save failed: " + e, true); }
 }
 
 async function refresh() {
@@ -181,14 +223,7 @@ async function save() {
     body.project.bpm = parseFloat($("p-bpm").value);
     body.project.loop_bars = parseInt($("p-loop").value, 10);
   }
-  try {
-    const r = await fetch("/api/project", { method: "PUT",
-      headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
-    if (!r.ok) { msg("rejected: " + (await r.text()), true); return; }
-    dirty = false; setSave();
-    msg("saved — engine applies at next safe point");
-    refresh();
-  } catch (e) { msg("save failed: " + e, true); }
+  await putProject(body, "saved — engine applies at next safe point");
 }
 
 function connect() {

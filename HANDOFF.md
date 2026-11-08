@@ -254,7 +254,12 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    (per-track gain/pan sliders + mute, dirty-flag Save). No new endpoints —
    mixer edits ride PUT /api/project. Live-verified: PUT → 204, swaps=1,
    xruns=0.
-7. Web UI follow-ups (deferred): per-scene/clip editing widgets, FX sends
+7. **Take management DONE (session 8)**: `Take.muted` (additive, v1-safe) —
+   engine skips muted takes on replay; project swaps adopt incoming take
+   state (mute flags + deletions) while keeping this boot's un-persisted
+   takes until the store absorbs them (swap-vs-drain race). Web takes list:
+   mute checkbox (dirty-flag Save) + ✕ delete (confirm → immediate PUT).
+8. Web UI follow-ups (deferred): per-scene/clip editing widgets, FX sends
 
 ---
 

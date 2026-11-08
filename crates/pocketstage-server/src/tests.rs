@@ -256,6 +256,7 @@ fn drain_takes_appends_to_stored_project() {
 
     let take = pocketstage_model::Take {
         name: "Take 1".into(),
+        muted: false,
         events: vec![pocketstage_model::RecordedEvent::NoteOn {
             tick: 0,
             channel: 0,
