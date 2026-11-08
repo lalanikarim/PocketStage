@@ -137,6 +137,8 @@ pub struct LiveStatus {
     pub active_scene: AtomicU8,
     /// Finalized take count this boot.
     pub takes: AtomicU8,
+    /// Unit front-panel mode tracked from DAW/PRESET button pulses (D11/T6).
+    pub daw_mode: AtomicBool,
 }
 
 // ----------------------------------------------------------------- routes
@@ -226,6 +228,11 @@ impl AppState {
                     0 => None,
                     n => Some(n),
                 },
+                mode: if live.daw_mode.load(Ordering::Relaxed) {
+                    "daw"
+                } else {
+                    "preset"
+                },
             },
             pf.project.takes.iter().map(|t| t.name.clone()).collect(),
         )
@@ -239,6 +246,8 @@ pub struct Status {
     pub bar: u32,
     pub beat: u32,
     pub scene: Option<u8>,
+    /// "preset" | "daw" (D11).
+    pub mode: &'static str,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -317,6 +326,7 @@ async fn ws_pump(mut socket: WebSocket, state: AppState) {
             "bar": status.bar,
             "beat": status.beat,
             "scene": status.scene,
+            "mode": status.mode,
             "takes": takes,
         });
         let text = match serde_json::to_string(&frame) {

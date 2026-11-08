@@ -564,3 +564,94 @@ fn shared_button_fader_index_validated() {
     m.shared_button_faders = vec![10]; // only 9 faders exist
     assert!(m.validate().is_err());
 }
+
+// ---- T6: DAW/PRESET mode pulses on the HUI port (device map §T6) ----
+
+#[test]
+fn t6_mode_pulses_map_on_hui_port() {
+    let mut m = hui();
+    assert_eq!(
+        map(
+            &mut m,
+            Event::ControlChange {
+                channel: 0,
+                control: 113,
+                value: 127
+            }
+        ),
+        vec![Action::ModeChanged(Mode::Daw)]
+    );
+    // Falling edge of the pulse is swallowed.
+    assert!(
+        map(
+            &mut m,
+            Event::ControlChange {
+                channel: 0,
+                control: 113,
+                value: 0
+            }
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        map(
+            &mut m,
+            Event::ControlChange {
+                channel: 0,
+                control: 112,
+                value: 127
+            }
+        ),
+        vec![Action::ModeChanged(Mode::Preset)]
+    );
+    assert!(
+        map(
+            &mut m,
+            Event::ControlChange {
+                channel: 0,
+                control: 112,
+                value: 0
+            }
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn t6_mode_ccs_ignored_on_music_port() {
+    let mut m = std_mapper();
+    assert!(
+        map(
+            &mut m,
+            Event::ControlChange {
+                channel: 0,
+                control: 113,
+                value: 127
+            }
+        )
+        .is_empty()
+    );
+    assert!(
+        map(
+            &mut m,
+            Event::ControlChange {
+                channel: 0,
+                control: 112,
+                value: 127
+            }
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn mapping_json_old_files_still_parse_without_mode_ccs() {
+    let mut v: serde_json::Value =
+        serde_json::from_str(&default_mapping().to_json_string()).unwrap();
+    let obj = v.as_object_mut().unwrap();
+    obj.remove("mode_daw_cc");
+    obj.remove("mode_preset_cc");
+    let m = Mapping::from_json_str(&v.to_string()).unwrap();
+    assert_eq!(m.mode_daw_cc, 113);
+    assert_eq!(m.mode_preset_cc, 112);
+}

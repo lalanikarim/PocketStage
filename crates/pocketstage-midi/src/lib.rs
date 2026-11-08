@@ -729,9 +729,12 @@ mod tests {
     fn active_ports_lives_without_hardware() {
         let _serial = HW_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Zero or N ports — constructing and polling must neither panic nor block.
+        // Note: rawmidi subdevices are single-reader; while the engine runs it
+        // owns the physical ports, so opens here may legitimately fail. The
+        // invariant is "opened ⊆ present", never ghost handles for absent ports.
         let mut active = ActivePorts::new(None, Duration::from_millis(10));
         let msgs = active.poll();
-        assert_eq!(active.open_count(), list_input_ports().len());
+        assert!(active.open_count() <= list_input_ports().len());
         // Without a real unplug during the call, no spurious disconnects.
         assert!(msgs.iter().all(|m| matches!(m, PumpMessage::Midi(_))));
     }

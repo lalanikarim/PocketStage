@@ -45,8 +45,21 @@ pub enum Action {
     /// ⏺ — **only** observable via HUI note 95; on the music port it is
     /// indistinguishable from Play (both send Start + Reset·Reset).
     Record,
+    /// The unit's DAW/PRESET button was pressed — the device switched into
+    /// that mode (T6: momentary cc113/cc112 pulses on the HUI port). Emitted
+    /// on the rising edge only.
+    ModeChanged(Mode),
     /// System Reset (`FF`) — observed around transport presses.
     SystemReset,
+}
+
+/// The unit's front-panel mode (D11: PRESET = perform, DAW = manage).
+/// Engine boot assumes [`Mode::Preset`] — the device state is unknowable
+/// until the first toggle arrives; it self-heals on that press (T6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Preset,
+    Daw,
 }
 
 /// Maps decoded events to [`Action`]s through a [`Mapping`]. Stateful only for
@@ -155,6 +168,22 @@ impl Mapper {
     }
 
     fn cc(&mut self, channel: u8, control: u8, value: u8, out: &mut Vec<Action>) {
+        // Mode-switch pulses (T6): DAW/PRESET buttons on the HUI port only
+        // (transport_notes marks that mapping), keys channel, momentary
+        // 127→0 — rising edge decides, the trailing 0 is swallowed.
+        if self.m.transport_notes.is_some()
+            && Self::on_channel(channel, self.m.keys_channel)
+            && value >= 64
+        {
+            if control == self.m.mode_daw_cc {
+                out.push(Action::ModeChanged(Mode::Daw));
+                return;
+            }
+            if control == self.m.mode_preset_cc {
+                out.push(Action::ModeChanged(Mode::Preset));
+                return;
+            }
+        }
         // Shared-button fader? Its position CC needs the tap detector.
         if let Some(idx) = self.shared_button_fader_for(channel, control) {
             if let Some(pending_idx) = self.pending_tap.take() {

@@ -6,6 +6,10 @@
 //! moved to the audio thread and never touched from anywhere else (single-writer).
 
 #![allow(non_camel_case_types)]
+// Lab examples pull this file in via #[path] and use only a subset of the
+// declarations, so "never used" warnings there are expected noise — the
+// engine binary itself uses everything it declares.
+#![allow(dead_code)]
 
 use std::ffi::CString;
 use std::os::raw::{c_char, c_double, c_int};
@@ -46,6 +50,12 @@ unsafe extern "C" {
         synth: *mut fluid_synth_t,
         chan: c_int,
         program: c_int,
+    ) -> c_int;
+    pub fn fluid_synth_all_sounds_off(synth: *mut fluid_synth_t, chan: c_int) -> c_int;
+    pub fn fluid_synth_set_channel_type(
+        synth: *mut fluid_synth_t,
+        chan: c_int,
+        type_: c_int,
     ) -> c_int;
     pub fn fluid_synth_all_notes_off(synth: *mut fluid_synth_t, chan: c_int) -> c_int;
     pub fn fluid_synth_write_float(
@@ -140,6 +150,22 @@ impl Synth {
     #[inline]
     pub fn all_notes_off(&self, chan: i32) {
         unsafe { fluid_synth_all_notes_off(self.0, chan) };
+    }
+
+    /// Immediately kill every voice on a channel (CC120 semantics). Unlike
+    /// note-off this also stops one-shot samples that have no release stage —
+    /// lab-proven instant. Used for same-pad retriggers; each pad owns its
+    /// own channel, so collateral cuts are impossible.
+    #[inline]
+    pub fn all_sounds_off(&self, chan: i32) {
+        unsafe { fluid_synth_all_sounds_off(self.0, chan) };
+    }
+
+    /// Mark a channel percussive (resolves to bank 128 presets regardless of
+    /// GM mode) — required for drum notes on channels other than 9.
+    #[inline]
+    pub fn set_channel_type_drum(&self, chan: i32) {
+        unsafe { fluid_synth_set_channel_type(self.0, chan, 1) }; // CHANNEL_TYPE_DRUM
     }
 
     /// Renders `frames` audio frames into separate L / R float buffers (0..=1 stride).

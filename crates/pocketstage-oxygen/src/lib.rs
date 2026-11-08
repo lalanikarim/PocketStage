@@ -25,7 +25,7 @@
 mod mapper;
 mod mapping;
 
-pub use mapper::{Action, Mapper};
+pub use mapper::{Action, Mapper, Mode};
 pub use mapping::{Mapping, TransportNotes, default_mapping, hui_mapping};
 
 #[cfg(test)]

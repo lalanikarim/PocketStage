@@ -52,6 +52,22 @@ pub struct Mapping {
     /// are ordinary top-octave keys on the music port! `None` by default.
     #[serde(default)]
     pub transport_notes: Option<TransportNotes>,
+    /// CC of the **DAW button** pulse on the HUI port (T6: keys channel,
+    /// momentary 127→0). Only consulted when `transport_notes` is set.
+    #[serde(default = "mode_daw_cc_default")]
+    pub mode_daw_cc: u8,
+    /// CC of the **PRESET button** pulse on the HUI port (T6). Only consulted
+    /// when `transport_notes` is set.
+    #[serde(default = "mode_preset_cc_default")]
+    pub mode_preset_cc: u8,
+}
+
+fn mode_daw_cc_default() -> u8 {
+    113
+}
+
+fn mode_preset_cc_default() -> u8 {
+    112
 }
 
 fn shared_button_faders_default() -> Vec<u8> {
@@ -96,12 +112,14 @@ pub fn default_mapping() -> Mapping {
         fader_button_count: 8,
         shared_button_faders: vec![9],
         transport_notes: None,
+        mode_daw_cc: mode_daw_cc_default(),
+        mode_preset_cc: mode_preset_cc_default(),
     }
 }
 
-/// Mapping for events arriving on the **HUI port** (:1): transport notes are
-/// live there; nothing else from that port should ever map (the HUI port also
-/// carries Mackie broadcasts we ignore).
+/// Mapping for events arriving on the **HUI port** (:1): transport notes and
+/// the DAW/PRESET mode pulses (T6) are live there; nothing else from that
+/// port should ever map (it also carries Mackie broadcasts we ignore).
 pub fn hui_mapping() -> Mapping {
     Mapping {
         transport_notes: Some(TransportNotes::default()),
@@ -166,6 +184,12 @@ impl Mapping {
                 self.fader_button_base_cc + i,
                 &format!("fader button {}", i + 1),
             )?;
+        }
+        if self.mode_daw_cc == 0 || self.mode_daw_cc > 119 {
+            return Err("mode_daw_cc must be 1..=119".into());
+        }
+        if self.mode_preset_cc == 0 || self.mode_preset_cc > 119 {
+            return Err("mode_preset_cc must be 1..=119".into());
         }
         if let Some(tn) = &self.transport_notes {
             for (note, what) in [

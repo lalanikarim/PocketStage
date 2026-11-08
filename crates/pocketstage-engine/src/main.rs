@@ -29,7 +29,7 @@ use pocketstage_model::{
     Clip, Pattern, ProjectFile, Quantize, RecordedEvent, SCHEMA_VERSION, STEPS_PER_BAR, StepNote,
     Take,
 };
-use pocketstage_oxygen::{Action, Mapper, default_mapping, hui_mapping};
+use pocketstage_oxygen::{Action, Mapper, Mode, default_mapping, hui_mapping};
 use pocketstage_server::{AppState, EngineCommand, LiveStatus, ProjectStore};
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,8 +46,42 @@ const SF2_PATH: &str = "/usr/share/sounds/sf2/FluidR3_GM.sf2";
 
 /// Keys play track 1's voice (D3: track N → internal channel N).
 const LEAD_CH: i32 = 0;
-/// GM drum channel (channel 10 in MIDI land, index 9) — metronome ticks.
-const DRUM_CH: i32 = 9;
+/// Metronome tick channel. Shares with pad 1 (kick): striking the kick
+/// cuts the current click — the same collision the old single-drum-channel
+/// layout had, and harmless for a 30 ms click.
+const TICK_CH: i32 = 8;
+/// Each pad owns one channel (pad 1..8 → 8..=15). All Sound Off is
+/// per-channel, so per-pad channels make same-pad retrigger kills surgical
+/// (D17). One-shot GM samples ignore note-off AND live attenuation edits
+/// (lab-proven, see examples/retrigger_lab.rs); CC120 is the only reliable kill.
+const PAD_CH_BASE: i32 = 8;
+/// Channels reserved for pads/ticks (as opposed to lead/scene tracks on 0..=7).
+#[inline]
+fn is_pad_channel(chan: i32) -> bool {
+    (TICK_CH..=15).contains(&chan)
+}
+
+/// Fixed 8-hit GM kit for PRESET-mode pads (D12): kick snare rim clap chh ohh tom crash.
+/// JSON-reassignable kits are on the roadmap; constants until then.
+const DRUM_KIT: [u8; 8] = [36, 38, 37, 39, 42, 46, 47, 49];
+
+/// Curated patch browser for DAW mode (D13): slot = pitch % 12. Letter B
+/// (slot 11) is the settings key, so there are eleven patches.
+const PATCHES: [(u8, &str); 11] = [
+    (0, "Grand Piano"),
+    (4, "Electric Piano"),
+    (6, "Harpsichord"),
+    (11, "Vibraphone"),
+    (19, "Church Organ"),
+    (24, "Nylon Guitar"),
+    (29, "Overdrive Guitar"),
+    (32, "Acoustic Bass"),
+    (38, "Synth Bass 1"),
+    (48, "Strings"),
+    (65, "Alto Sax"),
+];
+/// Letter B → loop-length settings key instead of a patch slot.
+const SETTINGS_KEY_SLOT: u8 = 11;
 
 // ------------------------------------------------------------------- events
 
@@ -73,6 +107,16 @@ enum Event {
     /// ⏺ — start capturing a take (starts the clock if stopped); metronome
     /// runs only while recording (D16).
     StartRecording,
+    /// D15: entering DAW mode finalizes any live take but leaves playback,
+    /// scene, and sounding notes completely alone.
+    StopRecording,
+    /// D13: DAW-mode selector — the perform voice (lead channel) takes a new
+    /// GM program; the pressed key itself is forwarded as an audition.
+    SetLeadProgram {
+        program: u8,
+    },
+    /// D13 settings key (letter B in DAW mode): cycle loop_bars 2→4→8→16→2.
+    CycleLoopBars,
 }
 
 /// An event plus the wall-clock time it was *intended* to fire. The audio
@@ -146,6 +190,12 @@ fn main() {
             eprintln!("[init] {e}");
             std::process::exit(1);
         }
+    }
+    // Pads + metronome live on channels 8..=15; mark them percussive so GM
+    // drum presets resolve there regardless of GM mode (channels other than 9
+    // would otherwise get melodic bank-0 presets).
+    for ch in TICK_CH..=15 {
+        synth.set_channel_type_drum(ch);
     }
     // ---- boot project: load from the store (single source of truth) ------
     // Same file the HTTP control plane reads/writes; PUTs hot-swap the live
@@ -306,6 +356,17 @@ fn main() {
                             a_stats.feed_max_us.fetch_max(feed_us, Ordering::Relaxed);
                             match te.event {
                                 Event::NoteOn { chan, key, vel } => {
+                                    // Per-key retrigger (D17): a strike resets
+                                    // the previous voice of this exact key;
+                                    // other keys stay fully polyphonic.
+                                    // Pads: All Sound Off on their private
+                                    // channel (one-shots ignore note-off).
+                                    // Leads: note-off works (release stage).
+                                    if is_pad_channel(chan) {
+                                        synth.all_sounds_off(chan);
+                                    } else {
+                                        synth.note_off(chan, key);
+                                    }
                                     synth.note_on(chan, key, vel);
                                     // Take capture: everything sounding while
                                     // recording is stamped on the master clock.
@@ -381,6 +442,33 @@ fn main() {
                                         recording = Some((base, Vec::new()));
                                         a_stats.live.recording.store(true, Ordering::Relaxed);
                                     }
+                                }
+                                Event::StopRecording => {
+                                    // D15: finalize the take if one is live;
+                                    // playback, scene and held notes untouched.
+                                    if let Some((_base, evs)) = recording.take()
+                                        && !evs.is_empty()
+                                    {
+                                        let take = Take {
+                                            name: format!("Take {}", takes.len() + 1),
+                                            events: evs,
+                                        };
+                                        a_stats.live.takes.fetch_add(1, Ordering::Relaxed);
+                                        let _ = take_feed.send(take.clone());
+                                        takes.push(take);
+                                    }
+                                    a_stats.live.recording.store(false, Ordering::Relaxed);
+                                }
+                                Event::SetLeadProgram { program } => {
+                                    synth.program_change(LEAD_CH, program as i32);
+                                }
+                                Event::CycleLoopBars => {
+                                    project.loop_bars = match project.loop_bars {
+                                        2 => 4,
+                                        4 => 8,
+                                        8 => 16,
+                                        _ => 2,
+                                    };
                                 }
                                 Event::LaunchScene { index } => {
                                     let q =
@@ -468,8 +556,8 @@ fn main() {
                             if recording.is_some() {
                                 // Accent the downbeat; kick self-decays.
                                 let vel: i32 = if p.is_multiple_of(4) { 110 } else { 70 };
-                                synth.note_on(DRUM_CH, 36, vel);
-                                synth.note_off(DRUM_CH, 36);
+                                synth.note_on(TICK_CH, 36, vel);
+                                synth.note_off(TICK_CH, 36);
                             }
                             p += 1;
                         }
@@ -527,11 +615,22 @@ fn main() {
                                                 pitch,
                                                 velocity,
                                                 ..
-                                            } => synth.note_on(
-                                                channel as i32,
-                                                pitch as i32,
-                                                velocity as i32,
-                                            ),
+                                            } => {
+                                                // Same retrigger semantics on
+                                                // take replay as live input:
+                                                // cuts last loop's still-
+                                                // ringing strikes.
+                                                if is_pad_channel(channel as i32) {
+                                                    synth.all_sounds_off(channel as i32);
+                                                } else {
+                                                    synth.note_off(channel as i32, pitch as i32);
+                                                }
+                                                synth.note_on(
+                                                    channel as i32,
+                                                    pitch as i32,
+                                                    velocity as i32,
+                                                )
+                                            }
                                             RecordedEvent::NoteOff { channel, pitch, .. } => {
                                                 synth.note_off(channel as i32, pitch as i32)
                                             }
@@ -670,7 +769,7 @@ fn main() {
     if demo {
         run_demo_feeder(tx);
     } else {
-        run_live_midi(tx);
+        run_live_midi(tx, Arc::clone(&stats));
     }
 }
 
@@ -745,7 +844,7 @@ fn run_demo_feeder(tx: mpsc::Sender<TimedEvent>) {
 /// loop/record are distinguishable — probe A2). Runs on the main thread; the
 /// audio thread stays untouched. Keys drive track 1's voice, pads 1–8 launch
 /// scenes, transport drives the master clock.
-fn run_live_midi(tx: mpsc::Sender<TimedEvent>) {
+fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>) {
     for m in [default_mapping(), hui_mapping()] {
         if let Err(e) = m.validate() {
             eprintln!("internal default mapping invalid: {e}");
@@ -766,7 +865,10 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>) {
         }
     };
 
-    println!("[midi] live — put the unit in preset mode (DAW LED unlit); Ctrl+C to stop");
+    // D11: PRESET = perform (keys + drum pads), DAW = manage (scenes + patch
+    // browser). Boot assumption; self-heals on the first DAW/PRESET press.
+    let mut mode = Mode::Preset;
+    println!("[midi] live — PRESET perform / DAW manage (D11); Ctrl+C to stop");
     loop {
         match mrx.recv() {
             Ok(PumpMessage::Midi(m)) => {
@@ -778,7 +880,27 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>) {
                 }
                 for action in out {
                     match action {
+                        // Keys: PRESET plays the perform voice; DAW turns the
+                        // whole keyboard into a patch browser (D13) — every
+                        // note selects via pitch % 12 and auditions it live.
                         Action::Key { note, on, velocity } => {
+                            if on && mode == Mode::Daw {
+                                let slot = note % 12;
+                                if slot == SETTINGS_KEY_SLOT {
+                                    println!("[daw] B — cycle loop length");
+                                    send_event(&tx, m.received, Event::CycleLoopBars);
+                                } else {
+                                    let (prog, name) = PATCHES[slot as usize];
+                                    println!("[daw] select #{slot} {name} (gm {prog})");
+                                    send_event(
+                                        &tx,
+                                        m.received,
+                                        Event::SetLeadProgram { program: prog },
+                                    );
+                                }
+                            }
+                            // Notes always sound (perform in PRESET, audition
+                            // in DAW); the keyboard's own note-off releases.
                             let event = if on {
                                 Event::NoteOn {
                                     chan: LEAD_CH,
@@ -793,15 +915,59 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>) {
                             };
                             send_event(&tx, m.received, event);
                         }
-                        // Pads 1–8 launch scenes (R2: pad N = scene N).
-                        Action::Pad { index, on, .. } if on && (1..=8).contains(&index) => {
-                            send_event(
-                                &tx,
-                                m.received,
-                                Event::LaunchScene {
-                                    index: (index - 1) as usize,
-                                },
-                            );
+                        // Pads: PRESET = fixed drum kit (D12); DAW = scene
+                        // launching (R2: pad N = scene N).
+                        Action::Pad {
+                            index,
+                            on,
+                            velocity,
+                        } if (1..=8).contains(&index) => match mode {
+                            Mode::Preset => {
+                                let key = DRUM_KIT[(index - 1) as usize] as i32;
+                                // One channel per pad so retriggers kill only this pad.
+                                let chan = PAD_CH_BASE + (index - 1) as i32;
+                                let event = if on {
+                                    Event::NoteOn {
+                                        chan,
+                                        key,
+                                        vel: velocity.max(1) as i32,
+                                    }
+                                } else {
+                                    Event::NoteOff { chan, key }
+                                };
+                                send_event(&tx, m.received, event);
+                            }
+                            Mode::Daw => {
+                                if on {
+                                    send_event(
+                                        &tx,
+                                        m.received,
+                                        Event::LaunchScene {
+                                            index: (index - 1) as usize,
+                                        },
+                                    );
+                                }
+                            }
+                        },
+                        Action::ModeChanged(new_mode) => {
+                            if new_mode != mode {
+                                mode = new_mode;
+                                stats
+                                    .live
+                                    .daw_mode
+                                    .store(new_mode == Mode::Daw, Ordering::Relaxed);
+                                println!(
+                                    "[mode] {}",
+                                    match new_mode {
+                                        Mode::Daw => "DAW — manage (pads=scenes, keys=patches)",
+                                        Mode::Preset => "PRESET — perform (keys+drums)",
+                                    }
+                                );
+                                if new_mode == Mode::Daw {
+                                    // D15: recording stops here; playback never does.
+                                    send_event(&tx, m.received, Event::StopRecording);
+                                }
+                            }
                         }
                         Action::Play => {
                             println!("[transport] play");
@@ -818,7 +984,7 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>) {
                             println!("[transport] record");
                             send_event(&tx, m.received, Event::StartRecording);
                         }
-                        _ => {} // faders/knobs/mod/pitch: no engine effect yet
+                        _ => {} // faders/knobs/mod/pitch/pads 9–16: no engine effect yet
                     }
                 }
             }

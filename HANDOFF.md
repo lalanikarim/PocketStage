@@ -33,6 +33,12 @@ Live-verified: record → stop → play back loop. `transport=… takes=N` in st
 button = `cc112` pulse, both on the HUI port — two distinct edge signals, mode
 is fully trackable (see device map §T6). **The R11 mode-gated layer is now
 unblocked** (PRESET drums-pads / DAW selectors / record-stop-on-entry).
+**Mode system v2 IMPLEMENTED (session 8):** PRESET = keys + fixed 8-hit kit on
+pads (D12); DAW = pads→scenes, keys→patch browser with audition (D13), B-key
+cycles loop length; entering DAW finalizes any recording (D15). Mode ships in
+the WS frame (`"mode"`). **Same-key retrigger (D17):** striking a pad/key now
+resets its previous voice instead of stacking — one channel per pad (8..=15)
++ All Sound Off; see lab findings in §8. Live-verified with headphones.
 Remaining hardware work: pedal CC check (needs a pedal).
 
 ---
@@ -261,10 +267,23 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D14 | Fader buttons reserved as channel selectors (MIX era); never scenes/instrument select. Program ‹ › / octave buttons emit no MIDI | ✅ |
 | D15 | Entering DAW mode stops recording (finalizes take), NEVER touches playback; transport owns playback | ✅ |
 | D16 | Recording = multi-channel Take capture; `loop_bars` project setting; Stop → wait for Play; metronome only while armed/recording, never captured | ✅ |
+| D17 | Hardware-drum retrigger feel: same key/pad struck again RESETS its previous voice (different keys stay polyphonic). Pads own private channels 8..=15 (metronome shares ch8 with kick); kill = per-channel All Sound Off — one-shot GM voices ignore note-off AND live GEN_ATTENUATION edits (lab: `engine/examples/retrigger_lab.rs`) | ✅ |
 
 ---
 
 ## 8. Open risks / watch-list
+
+- **FluidSynth one-shot voices are unkillable by note-off or live gen edits**
+  (session 8 lab): FluidR3 percussion ignores note-off (plays to natural end),
+  `fluid_voice_gen_set(GEN_ATTENUATION)` + `update_param` writes the value but
+  never reaches the mixer, and `fluid_voice_get_id` returns 0 for all voices.
+  **Only CC120 All Sound Off kills instantly — per CHANNEL**, hence D17's
+  one-channel-per-pad layout. Old takes recorded before D17 sit on ch9 (now
+  pad 2's channel): they still sound right (drum pitch follows the note), only
+  their retrigger grouping is off; re-record to migrate.
+- **rawmidi subdevices are single-reader**: while the engine runs, no other
+  process can open the Oxygen ports (`active_ports` test asserts ⊆ present,
+  not ==, because of this). Stop the engine before running device probes.
 
 - ~~**Pad LED control on MKV**~~ — **T2 done (session 8), inconclusive**: LEDs are
   local momentary state (off-while-pressed), Editor port silent to all inquiries,
