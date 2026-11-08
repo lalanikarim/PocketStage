@@ -162,6 +162,22 @@ function renderMixer(pf) {
     pan.value = t.pan ?? 0; pan.title = "pan L..R";
     const pval = document.createElement("span"); pval.className = "mval";
 
+    // FX sends: 0..1 sliders (CC91/CC93 in the engine). Empty default =
+    // soundfont value; slider position 0 doubles as "off" once touched.
+    const mkSend = (key, title) => {
+      const s = document.createElement("input");
+      s.type = "range"; s.min = 0; s.max = 1; s.step = 0.01;
+      s.value = t[key] ?? 0; s.title = title;
+      s.style.width = "70px";
+      const v = document.createElement("span"); v.className = "mval";
+      const upd = () => { v.textContent = title.split(" ")[0] + " " + (+s.value).toFixed(2); };
+      upd();
+      s.addEventListener("input", () => { t[key] = +s.value; markDirty(); upd(); });
+      return [s, v];
+    };
+    const [rev, revv] = mkSend("reverb", "rev send");
+    const [cho, chov] = mkSend("chorus", "cho send");
+
     const labels = () => {
       gval.textContent = (+gain.value).toFixed(2);
       pval.textContent = (+pan.value).toFixed(2);
@@ -175,7 +191,7 @@ function renderMixer(pf) {
       markDirty();
     });
 
-    row.append(name, mute, gain, gval, pan, pval);
+    row.append(name, mute, gain, gval, pan, pval, rev, revv, cho, chov);
     box.appendChild(row);
   }
 }

@@ -263,7 +263,12 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    record + /api/scene/{1..8} push EngineCommands; the audio thread maps
    them onto ordinary Events and they run through the SAME drain as
    hardware (web click == key press, one code path). UI live card gained
-   ▶ ⏹ ⏺ + S1–S8 chips. Next web items: clip matrix/step editor, FX sends
+   ▶ ⏹ ⏺ + S1–S8 chips.
+8b. **Clip matrix DONE (session 8)**: tracks×scenes grid in the web UI;
+    click to create/select clips, step editor (paint pitch, 1/2/4 bars,
+    delete) edits patterns via the dirty-flag PUT path; refresh() now
+    refuses to clobber unsaved edits. Remaining web items: FX sends,
+    scene/track CRUD widgets, overdub UX pass
 
 ---
 

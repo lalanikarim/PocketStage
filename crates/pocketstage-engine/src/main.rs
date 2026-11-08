@@ -77,6 +77,13 @@ fn apply_track_voice(synth: &ffi::Synth, chan: i32, track: &Track) {
         .round()
         .clamp(0.0, 127.0) as i32;
     synth.cc(chan, 10, pan);
+    // FX sends: None = leave the soundfont's own preset value untouched.
+    if let Some(v) = track.reverb {
+        synth.cc(chan, 91, (v * 127.0).round() as i32);
+    }
+    if let Some(v) = track.chorus {
+        synth.cc(chan, 93, (v * 127.0).round() as i32);
+    }
 }
 
 /// Apply a store-validated project swap to the audio thread's state.

@@ -79,6 +79,8 @@ pub enum ValidationError {
     GainOutOfRange { track: String, gain: f64 },
     #[error("track '{track}' pan {pan} out of range -1..=1")]
     PanOutOfRange { track: String, pan: f64 },
+    #[error("track '{track}' fx send {send} out of range 0..=1")]
+    SendOutOfRange { track: String, send: f64 },
 }
 
 // ---------------------------------------------------------------- top level
@@ -197,6 +199,8 @@ impl Project {
                     gain: None,
                     pan: None,
                     mute: false,
+                    reverb: None,
+                    chorus: None,
                 })
                 .collect(),
             scenes: (1..=MAX_SCENES)
@@ -260,6 +264,16 @@ impl Project {
                     track: track.name.clone(),
                     gain: g,
                 });
+            }
+            for s in [track.reverb, track.chorus] {
+                if let Some(v) = s
+                    && !(0.0..=1.0).contains(&v)
+                {
+                    return Err(ValidationError::SendOutOfRange {
+                        track: track.name.clone(),
+                        send: v,
+                    });
+                }
             }
             if let Some(p) = track.pan
                 && !(-1.0..=1.0).contains(&p)
@@ -344,6 +358,13 @@ pub struct Track {
     /// Mute this track (CC7=0 regardless of `gain`).
     #[serde(default)]
     pub mute: bool,
+    /// Reverb send 0..=1; `None` = soundfont default. Applied as CC91
+    /// (`round(v × 127)`) on the track's channel.
+    #[serde(default)]
+    pub reverb: Option<f64>,
+    /// Chorus send 0..=1; `None` = soundfont default. Applied as CC93.
+    #[serde(default)]
+    pub chorus: Option<f64>,
 }
 
 fn default_color() -> [u8; 3] {

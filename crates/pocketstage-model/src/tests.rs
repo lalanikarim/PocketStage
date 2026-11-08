@@ -396,3 +396,21 @@ fn mixer_range_checks() {
         ValidationError::PanOutOfRange { .. }
     ));
 }
+
+#[test]
+fn fx_sends_default_none_and_validate_range() {
+    let mut p = Project::default_project();
+    assert_eq!(p.tracks[0].reverb, None);
+    assert_eq!(p.tracks[0].chorus, None);
+    p.validate().unwrap();
+
+    p.tracks[0].reverb = Some(0.4);
+    p.tracks[0].chorus = Some(1.0);
+    p.validate().unwrap();
+    let json = serde_json::to_string(&p).unwrap();
+    let back: Project = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, p);
+
+    p.tracks[0].chorus = Some(1.5);
+    assert!(p.validate().is_err());
+}
