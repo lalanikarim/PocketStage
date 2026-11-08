@@ -11,10 +11,14 @@ not host-controllable (no reply to any inquiry; notes on ports 0/2 don't move
 them, both modes) → **LED-less UX fallback adopted**.
 **Engine wiring DONE:** pump → per-port mappers → synth. Keys play the lead
 voice live (verified with headphones), pads fire a kick placeholder,
-transport prints state. `--demo` flag keeps the hardware-free arpeggio;
-`POCKETSTAGE_DEVICE` env var overrides the ALSA device.
-**Next slice:** transport → real engine state (play/stop actually doing something),
-then pads → clip launching.
+`--demo` flag keeps the hardware-free arpeggio, `POCKETSTAGE_DEVICE` env var
+overrides the ALSA device.
+**Transport/clock DONE:** Play/Stop drive a real master clock in the engine —
+sample-accurate playhead at project BPM (120 default), accented beat ticks
+while playing, `transport=… pos=bar.beat` in stats. Live-verified (ticks on
+play, reset on stop). Pure clock math in `engine/src/clock.rs` (3 tests).
+**Next slice:** pads → clip launching (quantized to next bar per D5, consuming
+the new clock).
 Remaining hardware work: pedal CC check (needs a pedal).
 
 ---
@@ -177,10 +181,11 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    shared-button faders [9]) + stateful `Mapper::map(&Event, &mut Vec<Action>)`
    (tap-detector; one Mapper **per source port** — see oxygen_demo). 24 tests.
    **Engine wiring ✅ DONE (session 8)** — pump → per-port mappers → engine:
-   keys→lead voice (live-verified), pads→kick placeholder, transport prints
-   state. `--demo` = scripted arpeggio (no hardware); device selectable via arg
-   or `POCKETSTAGE_DEVICE`. **Next:** transport → real play/stop state, then
-   pads → clip launching.
+   keys→lead voice (live-verified), pads→kick placeholder. `--demo` = scripted
+   arpeggio (no hardware); device selectable via arg or `POCKETSTAGE_DEVICE`.
+   **Transport/clock ✅ DONE** — Play/Stop drive a sample-accurate master clock
+   (`clock.rs`, pure + tested): accented beat ticks while playing, position in
+   stats, live-verified. **Next:** pads → clip launching (D5 bar quantization).
    **T2 DONE (session 8), inconclusive**: LEDs are local momentary state;
    Editor port silent both ways; no host-controllable LED protocol found →
    LED-less UX fallback adopted. Part 2 (LED feedback) is therefore **dropped
@@ -280,6 +285,13 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   (now exits the process). Added `--demo` mode (scripted arpeggio, no hardware)
   and `POCKETSTAGE_DEVICE`. Master gain set to 0.05 for live levels. 47 tests,
   all gates green.
+  Then **transport/clock**: Play/Stop now drive a real master clock in the
+  engine — sample-accurate playhead (`engine/src/clock.rs`, pure math, 3 new
+  tests), accented kick tick on each beat boundary while playing (downbeat
+  louder), `transport=… pos=bar.beat` in the stats line. Demo mode starts the
+  clock too (scripted kicks removed — the clock owns the drum now). Live-
+  verified: ticks at 120 BPM on play, position counting bars, reset on stop,
+  keys layering over ticks, 0 xruns. 50 tests, all gates green.
 - **Housekeeping note (session 5)**: some earlier HANDOFF edits were found missing
   (prose edits did not persist; cause unknown). This file was reconstructed from git +
   notes. When prose and git disagree, trust git.

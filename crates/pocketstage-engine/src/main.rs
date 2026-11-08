@@ -9,13 +9,15 @@
 //! Event sources:
 //!   * default: live MIDI — `spawn_pump` → per-port Oxygen mappers (music +
 //!     HUI) → engine events. Keys drive the lead voice; pads fire a kick on
-//!     the drum channel (clip launching comes later); transport prints state.
+//!     the drum channel (clip launching comes later); transport drives the
+//!     master clock (accented beat ticks while playing, position in stats).
 //!   * `--demo`: scripted arpeggio feeder, no hardware needed (spike mode).
 //!
 //! Run:  cargo run --release -p pocketstage-engine            (live MIDI)
 //!       cargo run --release -p pocketstage-engine -- --demo  (no hardware)
 //! ALSA device: positional arg > `POCKETSTAGE_DEVICE` env var > `default`.
 
+mod clock;
 mod ffi;
 
 use alsa::pcm::{Access, Format, Frames, PCM};
@@ -41,13 +43,30 @@ const LEAD_CH: i32 = 0;
 const DRUM_CH: i32 = 9;
 /// GM program for the lead: 81 = "Lead 2 (sawtooth)".
 const LEAD_PROGRAM: i32 = 81;
+/// Project tempo. Fixed per project in v0.1; will come from the loaded
+/// project's `bpm` once project loading exists.
+const BPM: u32 = 120;
 
 // ------------------------------------------------------------------- events
 
 enum Event {
-    NoteOn { chan: i32, key: i32, vel: i32 },
-    NoteOff { chan: i32, key: i32 },
-    ProgramChange { chan: i32, program: i32 },
+    NoteOn {
+        chan: i32,
+        key: i32,
+        vel: i32,
+    },
+    NoteOff {
+        chan: i32,
+        key: i32,
+    },
+    ProgramChange {
+        chan: i32,
+        program: i32,
+    },
+    /// Transport: start playback — master clock runs from the current sample.
+    Play,
+    /// Transport: stop playback — clock halts; position restarts on next play.
+    Stop,
 }
 
 /// An event plus the wall-clock time it was *intended* to fire. The audio
@@ -70,6 +89,9 @@ struct Stats {
     q_max_us: AtomicU64,         // worst queue wait in window
     feed_max_us: AtomicU64,      // worst feeder jitter (sent - intended) in window
     delay_frames_max: AtomicU64, // max snd_pcm_delay seen in window (output-side queue)
+    // Transport *levels* (read by the stats thread, never reset):
+    playing: std::sync::atomic::AtomicBool,
+    pos_beats_x1000: std::sync::atomic::AtomicU32,
 }
 
 impl Stats {
@@ -147,6 +169,8 @@ fn main() {
             let mut out = vec![0i16; PERIOD_FRAMES * 2]; // interleaved
 
             let mut cycle: u64 = 0;
+            let mut total_samples: u64 = 0; // frames rendered so far (master clock domain)
+            let mut playing_since: Option<u64> = None; // sample index where Play fired
             loop {
                 // 1) Drain pending MIDI events (bounded per cycle — writes stay timely).
                 for _ in 0..64 {
@@ -164,9 +188,45 @@ fn main() {
                                 Event::ProgramChange { chan, program } => {
                                     synth.program_change(chan, program)
                                 }
+                                Event::Play => {
+                                    if playing_since.is_none() {
+                                        playing_since = Some(total_samples);
+                                    }
+                                }
+                                Event::Stop => playing_since = None,
                             }
                         }
                         Err(_) => break,
+                    }
+                }
+
+                // 1b) Master clock: fire beat ticks for every beat boundary the
+                // playhead reaches inside this period (bounded — a 256-frame
+                // period spans ~1% of a beat at 120 BPM; the loop runs ≤1x).
+                match playing_since {
+                    Some(start) => {
+                        let b0 = clock::beats_elapsed(total_samples - start, RATE, BPM);
+                        let b1 = clock::beats_elapsed(
+                            total_samples + PERIOD_FRAMES as u64 - start,
+                            RATE,
+                            BPM,
+                        );
+                        let mut p = b0.ceil() as u64; // first beat position reached this period
+                        while (p as f64) < b1 {
+                            // Accent the downbeat; the kick self-decays (on+off now).
+                            let vel: i32 = if p.is_multiple_of(4) { 110 } else { 70 };
+                            synth.note_on(DRUM_CH, 36, vel);
+                            synth.note_off(DRUM_CH, 36);
+                            p += 1;
+                        }
+                        a_stats.playing.store(true, Ordering::Relaxed);
+                        a_stats
+                            .pos_beats_x1000
+                            .store((b1 * 1000.0) as u32, Ordering::Relaxed);
+                    }
+                    None => {
+                        a_stats.playing.store(false, Ordering::Relaxed);
+                        a_stats.pos_beats_x1000.store(0, Ordering::Relaxed);
                     }
                 }
 
@@ -193,6 +253,7 @@ fn main() {
                     }
                 }
 
+                total_samples += PERIOD_FRAMES as u64;
                 cycle += 1;
                 a_stats.cycles.fetch_add(1, Ordering::Relaxed);
                 a_stats.busy_ns.fetch_add(busy, Ordering::Relaxed);
@@ -236,10 +297,15 @@ fn main() {
                 };
                 // Period cadence: how much of the ideal cycle budget (busy vs period duration).
                 let period_us = PERIOD_FRAMES as f64 * 1e6 / RATE as f64;
+                let playing = s_stats.playing.load(Ordering::Relaxed);
+                let (bar, beat) = clock::bar_beat(
+                    s_stats.pos_beats_x1000.load(Ordering::Relaxed) as f64 / 1000.0,
+                );
                 println!(
                     "[stats] cycles={cycles:5} busy={busy_pct:4.2}% ({:.1} us/{} us period) \
                      events={events:3} queue avg/max={q_avg:6.1}/{q_max:6} us \
-                     feeder_jitter_max={feed_max:5} us xruns={xruns} out_queue~{:.1} ms",
+                     feeder_jitter_max={feed_max:5} us xruns={xruns} out_queue~{:.1} ms \
+                     transport={} pos={bar}.{beat}",
                     if cycles > 0 {
                         busy_ns as f64 / cycles as f64 / 1000.0
                     } else {
@@ -247,6 +313,7 @@ fn main() {
                     },
                     period_us,
                     delay_max as f64 * 1000.0 / RATE as f64,
+                    if playing { "playing" } else { "stopped" },
                 );
             }
         })
@@ -261,10 +328,9 @@ fn main() {
 }
 
 /// Scripted note feeder, no MIDI hardware required (~2-bar arpeggio loop at
-/// 120 BPM + kick on every beat). Kept so the audio path stays testable
-/// without the unit plugged in.
+/// 120 BPM; beat ticks come from the master clock). Kept so the audio path
+/// stays testable without the unit plugged in.
 fn run_demo_feeder(tx: mpsc::Sender<TimedEvent>) {
-    // ~2-bar arpeggio loop at 120 BPM (eighth notes) + kick on every beat.
     println!("[feeder] demo arpeggio @ 120 BPM — Ctrl+C to stop");
     let pattern: [i32; 8] = [60, 64, 67, 71, 72, 71, 67, 64]; // C maj arpeggio, eighth notes
     let step = Duration::from_millis(250);
@@ -277,6 +343,9 @@ fn run_demo_feeder(tx: mpsc::Sender<TimedEvent>) {
             event,
         });
     };
+
+    // Start the master clock so beat ticks are audible alongside the arpeggio.
+    send(start, Event::Play);
 
     let mut i: u32 = 0;
     loop {
@@ -306,24 +375,7 @@ fn run_demo_feeder(tx: mpsc::Sender<TimedEvent>) {
             );
         }
 
-        // Drums: kick (GM 36) on every beat (every other eighth).
-        if i.is_multiple_of(2) {
-            send(
-                t,
-                Event::NoteOn {
-                    chan: DRUM_CH,
-                    key: 36,
-                    vel: 100,
-                },
-            );
-            send(
-                t,
-                Event::NoteOff {
-                    chan: DRUM_CH,
-                    key: 36,
-                },
-            ); // kick is self-decaying
-        }
+        // (Drum ticks are the master clock's job now — see the audio loop.)
 
         // Swap lead program every ~8 s to prove program_change works mid-stream.
         if i > 0 && i.is_multiple_of(32) {
@@ -350,7 +402,8 @@ fn run_demo_feeder(tx: mpsc::Sender<TimedEvent>) {
 /// One mapper per source port (the HUI subdevice is the only place
 /// loop/record are distinguishable — probe A2). Runs on the main thread; the
 /// audio thread stays untouched. Keys drive the lead voice, pads fire a kick
-/// on the drum channel until clip launching exists, transport prints state.
+/// on the drum channel until clip launching exists, transport drives the
+/// master clock.
 fn run_live_midi(tx: mpsc::Sender<TimedEvent>) {
     for m in [default_mapping(), hui_mapping()] {
         if let Err(e) = m.validate() {
@@ -419,10 +472,20 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>) {
                                 },
                             );
                         }
-                        Action::Play => println!("[transport] play"),
-                        Action::Stop => println!("[transport] stop"),
-                        Action::LoopToggle => println!("[transport] loop toggle"),
-                        Action::Record => println!("[transport] record"),
+                        Action::Play => {
+                            println!("[transport] play");
+                            send_event(&tx, m.received, Event::Play);
+                        }
+                        Action::Stop => {
+                            println!("[transport] stop");
+                            send_event(&tx, m.received, Event::Stop);
+                        }
+                        Action::LoopToggle => {
+                            println!("[transport] loop toggle (flag only — no behavior yet)")
+                        }
+                        Action::Record => {
+                            println!("[transport] record (no-op — MIDI capture is a later slice)")
+                        }
                         _ => {} // faders/knobs/mod/pitch: no engine effect yet
                     }
                 }
