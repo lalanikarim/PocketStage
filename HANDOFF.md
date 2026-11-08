@@ -281,6 +281,10 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   one-channel-per-pad layout. Old takes recorded before D17 sit on ch9 (now
   pad 2's channel): they still sound right (drum pitch follows the note), only
   their retrigger grouping is off; re-record to migrate.
+- **`fluid_synth_set_channel_type` does not re-resolve presets** (session 8
+  lab `engine/examples/drum_chan_lab.rs`): the channel keeps playing its
+  melodic default until `bank_select(128)` + `program_change(0)` force it onto
+  the GM kit. Engine boot does all three per pad channel.
 - **rawmidi subdevices are single-reader**: while the engine runs, no other
   process can open the Oxygen ports (`active_ports` test asserts ⊆ present,
   not ==, because of this). Stop the engine before running device probes.

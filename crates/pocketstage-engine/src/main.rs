@@ -191,11 +191,14 @@ fn main() {
             std::process::exit(1);
         }
     }
-    // Pads + metronome live on channels 8..=15; mark them percussive so GM
-    // drum presets resolve there regardless of GM mode (channels other than 9
-    // would otherwise get melodic bank-0 presets).
+    // Pads + metronome live on channels 8..=15; make them percussion. Note:
+    // set_channel_type alone does NOT re-resolve the channel's preset — the
+    // bank_select + program_change pair is what actually lands them on the
+    // GM drum kit (lab: examples/drum_chan_lab.rs).
     for ch in TICK_CH..=15 {
         synth.set_channel_type_drum(ch);
+        synth.bank_select(ch, 128); // GM percussion bank
+        synth.program_change(ch, 0);
     }
     // ---- boot project: load from the store (single source of truth) ------
     // Same file the HTTP control plane reads/writes; PUTs hot-swap the live

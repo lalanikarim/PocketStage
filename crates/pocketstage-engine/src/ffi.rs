@@ -51,6 +51,7 @@ unsafe extern "C" {
         chan: c_int,
         program: c_int,
     ) -> c_int;
+    pub fn fluid_synth_bank_select(synth: *mut fluid_synth_t, chan: c_int, bank: c_int) -> c_int;
     pub fn fluid_synth_all_sounds_off(synth: *mut fluid_synth_t, chan: c_int) -> c_int;
     pub fn fluid_synth_set_channel_type(
         synth: *mut fluid_synth_t,
@@ -150,6 +151,13 @@ impl Synth {
     #[inline]
     pub fn all_notes_off(&self, chan: i32) {
         unsafe { fluid_synth_all_notes_off(self.0, chan) };
+    }
+
+    /// Select the bank subsequent program changes on `chan` resolve against
+    /// (GM: 128 = percussion, 0..127 = melodic).
+    #[inline]
+    pub fn bank_select(&self, chan: i32, bank: i32) {
+        unsafe { fluid_synth_bank_select(self.0, chan, bank) };
     }
 
     /// Immediately kill every voice on a channel (CC120 semantics). Unlike
