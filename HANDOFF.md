@@ -24,9 +24,13 @@ Boot project = `Project::default_project()` + demo patterns in scenes 1–2
 (placeholder until project loading). Live-verified: all 8 pads, keys layering,
 0 xruns. Pure clock math in `engine/src/clock.rs` (4 tests).
 **Design pass (session 8):** mode system v2 + recording workflow decided —
-D11–D16, full spec in scratchpad R11. **Next slice: recording** (was: web
-server; the live-jam flow won). Blocked by T6 probe (see §8).
-**Then:** web server (`pocketstage-server`) — project load/save first.
+D11–D16, full spec in scratchpad R11.
+**Recording core DONE:** ⏺ captures keys into multi-channel takes on the
+master clock (metronome fires ONLY while recording — D16); Stop finalizes
+(wait for Play); Play loops takes at max(loop_bars, rounded-up take length).
+Live-verified: record → stop → play back loop. `transport=… takes=N` in stats.
+**Next:** the mode-gated layer of R11 (PRESET drums-pads / DAW selectors) —
+blocked by T6 probe (see §8). Unblocked alternatives: web server slice.
 Remaining hardware work: pedal CC check (needs a pedal).
 
 ---
@@ -204,11 +208,14 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    LED-less UX fallback adopted. Part 2 (LED feedback) is therefore **dropped
    unless** M-Audio/community SysEx docs surface later.
    **Remaining hardware tasks**: pedal CC verify when a pedal exists.
-4. **Recording slice** (design complete — scratchpad R11, D11–D16): mode system v2
-   (PRESET = keys+drums+record; DAW = note-selectors/audition + scene pads), take
-   capture/playback on the master clock, metronome gated to record state, per-track
-   `channel` override + `loop_bars` in the model. **Blocked by T6** (cc113 mode-
-   detection probe — evidence exists from a T2 capture; ~5 min attended session).
+4. **Recording slice** (scratchpad R11, D11–D16) — **core DONE (session 8)**:
+   model prep ✅ (`Track::channel` override, `loop_bars`, take helpers — commit
+   1398123); engine capture/playback ✅ (⏺ → tick-stamped multi-channel takes,
+   metronome only while recording, Stop finalizes + waits for Play, loop =
+   max(loop_bars, rounded-up take); live-verified). **Remaining:** the
+   mode-gated layer — PRESET drum-kit pads (D12) + DAW note-selectors with
+   audition (D13) + record-stop on entering DAW (D15). **Blocked by T6**
+   (cc113 mode-detection probe; ~5 min attended session).
 5. Web server (`pocketstage-server`): axum REST + WS, single-writer state snapshots
 6. Minimal web UI: project load/save, take list, mixer
 
@@ -353,7 +360,18 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   metronome only while recording. Fader buttons stay reserved (channel
   selectors). Key discovery: one T2 capture shows the DAW toggle emitting
   cc113 on the HUI port → mode is detectable; verification deferred as **T6,
-  blocking** for the record slice.
+  blocking** for the mode layer.
+  Then slices A+B (unblocked parts of the recording design): **A — model prep**
+  (`Track::channel` override, `loop_bars` floor + validation, `Take::loop_ticks`
+  / `events_at` / sorted-invariant, `RecordedEvent::tick()`; +5 tests) and
+  **B — engine take capture & playback**: ⏺ (HUI note 95 → `StartRecording`)
+  captures key events into tick-stamped multi-channel takes inside the audio
+  thread (clock + event stream share one owner — stamping needs no atomics);
+  metronome now fires ONLY while recording (D16); Stop finalizes and waits for
+  Play; Play loops takes at max(loop_bars, rounded-up take length) under live
+  keys; stats show `transport=… takes=N`; `--demo` scripts a full
+  record→stop→playback session. Live-verified with headphones (record → stop →
+  loop). 56 tests, all gates green.
 - **Housekeeping note (session 5)**: some earlier HANDOFF edits were found missing
   (prose edits did not persist; cause unknown). This file was reconstructed from git +
   notes. When prose and git disagree, trust git.

@@ -25,7 +25,9 @@ mod ffi;
 use alsa::pcm::{Access, Format, Frames, PCM};
 use alsa::{Direction, ValueOr};
 use pocketstage_midi::{PumpMessage, spawn_pump};
-use pocketstage_model::{Clip, Pattern, Project, Quantize, STEPS_PER_BAR, StepNote};
+use pocketstage_model::{
+    Clip, Pattern, Project, Quantize, RecordedEvent, STEPS_PER_BAR, StepNote, Take,
+};
 use pocketstage_oxygen::{Action, Mapper, default_mapping, hui_mapping};
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -66,6 +68,9 @@ enum Event {
     LaunchScene {
         index: usize,
     },
+    /// ⏺ — start capturing a take (starts the clock if stopped); metronome
+    /// runs only while recording (D16).
+    StartRecording,
 }
 
 /// An event plus the wall-clock time it was *intended* to fire. The audio
@@ -93,6 +98,8 @@ struct Stats {
     pos_beats_x1000: std::sync::atomic::AtomicU32,
     /// Active scene, stored 1-based; 0 = none.
     active_scene: std::sync::atomic::AtomicU8,
+    recording: std::sync::atomic::AtomicBool,
+    takes: std::sync::atomic::AtomicU8,
 }
 
 impl Stats {
@@ -212,6 +219,12 @@ fn main() {
             let mut playing_since: Option<u64> = None; // sample index where Play fired
             let mut active_scene: Option<usize> = None;
             let mut pending_launch: Option<(usize, Quantize)> = None; // (scene, quantize)
+            // Recording (D16): (base step, events with take-local ticks).
+            // Capture happens in the drain loop — the audio thread owns both
+            // the clock and the event stream, so stamping is exact and needs
+            // no atomics or main-thread changes.
+            let mut recording: Option<(u64, Vec<RecordedEvent>)> = None;
+            let mut takes: Vec<Take> = Vec::new();
             loop {
                 // 1) Drain pending MIDI events (bounded per cycle — writes stay timely).
                 for _ in 0..64 {
@@ -224,20 +237,80 @@ fn main() {
                             a_stats.q_max_us.fetch_max(q_us, Ordering::Relaxed);
                             a_stats.feed_max_us.fetch_max(feed_us, Ordering::Relaxed);
                             match te.event {
-                                Event::NoteOn { chan, key, vel } => synth.note_on(chan, key, vel),
-                                Event::NoteOff { chan, key } => synth.note_off(chan, key),
+                                Event::NoteOn { chan, key, vel } => {
+                                    synth.note_on(chan, key, vel);
+                                    // Take capture: everything sounding while
+                                    // recording is stamped on the master clock.
+                                    if let Some((base, evs)) = recording.as_mut()
+                                        && let Some(start) = playing_since
+                                    {
+                                        let step =
+                                            clock::steps_elapsed(total_samples - start, RATE, bpm)
+                                                as u64;
+                                        evs.push(RecordedEvent::NoteOn {
+                                            tick: step.saturating_sub(*base) as u32,
+                                            channel: chan as u8,
+                                            pitch: key as u8,
+                                            velocity: vel as u8,
+                                        });
+                                    }
+                                }
+                                Event::NoteOff { chan, key } => {
+                                    synth.note_off(chan, key);
+                                    if let Some((base, evs)) = recording.as_mut()
+                                        && let Some(start) = playing_since
+                                    {
+                                        let step =
+                                            clock::steps_elapsed(total_samples - start, RATE, bpm)
+                                                as u64;
+                                        evs.push(RecordedEvent::NoteOff {
+                                            tick: step.saturating_sub(*base) as u32,
+                                            channel: chan as u8,
+                                            pitch: key as u8,
+                                        });
+                                    }
+                                }
                                 Event::Play => {
                                     if playing_since.is_none() {
                                         playing_since = Some(total_samples);
                                     }
                                 }
                                 Event::Stop => {
+                                    // Finalize any live take first (D15: stop
+                                    // means silent; playback waits for Play).
+                                    if let Some((_base, evs)) = recording.take()
+                                        && !evs.is_empty()
+                                    {
+                                        let take = Take {
+                                            name: format!("Take {}", takes.len() + 1),
+                                            events: evs,
+                                        };
+                                        a_stats.takes.fetch_add(1, Ordering::Relaxed);
+                                        // (Project mirroring lands with save/load; the
+                                        // audio-thread `takes` vec is the live truth.)
+                                        takes.push(take);
+                                    }
+                                    a_stats.recording.store(false, Ordering::Relaxed);
                                     playing_since = None;
                                     active_scene = None;
                                     pending_launch = None;
                                     a_stats.active_scene.store(0, Ordering::Relaxed);
                                     for t in 0..project.tracks.len() as i32 {
                                         synth.all_notes_off(t);
+                                    }
+                                }
+                                Event::StartRecording => {
+                                    if recording.is_none() {
+                                        if playing_since.is_none() {
+                                            playing_since = Some(total_samples);
+                                        }
+                                        let base = clock::steps_elapsed(
+                                            total_samples - playing_since.unwrap_or(total_samples),
+                                            RATE,
+                                            bpm,
+                                        ) as u64;
+                                        recording = Some((base, Vec::new()));
+                                        a_stats.recording.store(true, Ordering::Relaxed);
                                     }
                                 }
                                 Event::LaunchScene { index } => {
@@ -316,10 +389,14 @@ fn main() {
                                     }
                                 }
                             }
-                            // Accent the downbeat; the kick self-decays (on+off now).
-                            let vel: i32 = if p.is_multiple_of(4) { 110 } else { 70 };
-                            synth.note_on(DRUM_CH, 36, vel);
-                            synth.note_off(DRUM_CH, 36);
+                            // Metronome (D16): fires ONLY while recording —
+                            // never during plain playback, never captured.
+                            if recording.is_some() {
+                                // Accent the downbeat; kick self-decays.
+                                let vel: i32 = if p.is_multiple_of(4) { 110 } else { 70 };
+                                synth.note_on(DRUM_CH, 36, vel);
+                                synth.note_off(DRUM_CH, 36);
+                            }
                             p += 1;
                         }
 
@@ -349,6 +426,48 @@ fn main() {
                                                 n.pitch as i32,
                                                 n.velocity as i32,
                                             );
+                                        }
+                                    }
+                                }
+                                k += 1;
+                            }
+                        }
+
+                        // Take playback (D16): finalized takes loop once
+                        // recording is off (no overdub in v0.1).
+                        if recording.is_none() {
+                            let ts0 = clock::steps_elapsed(total_samples - start, RATE, bpm);
+                            let ts1 = clock::steps_elapsed(
+                                total_samples + PERIOD_FRAMES as u64 - start,
+                                RATE,
+                                bpm,
+                            );
+                            let mut k = ts0.ceil() as u64;
+                            while (k as f64) < ts1 {
+                                for take in &takes {
+                                    let lt = take.loop_ticks(project.loop_bars) as u64;
+                                    for ev in take.events_at((k % lt) as u32) {
+                                        match *ev {
+                                            RecordedEvent::NoteOn {
+                                                channel,
+                                                pitch,
+                                                velocity,
+                                                ..
+                                            } => synth.note_on(
+                                                channel as i32,
+                                                pitch as i32,
+                                                velocity as i32,
+                                            ),
+                                            RecordedEvent::NoteOff { channel, pitch, .. } => {
+                                                synth.note_off(channel as i32, pitch as i32)
+                                            }
+                                            RecordedEvent::ProgramChange {
+                                                channel,
+                                                program,
+                                                ..
+                                            } => {
+                                                synth.program_change(channel as i32, program as i32)
+                                            }
                                         }
                                     }
                                 }
@@ -444,11 +563,12 @@ fn main() {
                 } else {
                     format!("S{scene}")
                 };
+                let recording = s_stats.recording.load(Ordering::Relaxed);
                 println!(
                     "[stats] cycles={cycles:5} busy={busy_pct:4.2}% ({:.1} us/{} us period) \
                      events={events:3} queue avg/max={q_avg:6.1}/{q_max:6} us \
                      feeder_jitter_max={feed_max:5} us xruns={xruns} out_queue~{:.1} ms \
-                     transport={} pos={bar}.{beat} scene={}",
+                     transport={} pos={bar}.{beat} scene={} takes={}",
                     if cycles > 0 {
                         busy_ns as f64 / cycles as f64 / 1000.0
                     } else {
@@ -456,8 +576,15 @@ fn main() {
                     },
                     period_us,
                     delay_max as f64 * 1000.0 / RATE as f64,
-                    if playing { "playing" } else { "stopped" },
+                    if recording {
+                        "recording"
+                    } else if playing {
+                        "playing"
+                    } else {
+                        "stopped"
+                    },
                     scene_str,
+                    s_stats.takes.load(Ordering::Relaxed),
                 );
             }
         })
@@ -518,6 +645,16 @@ fn run_demo_feeder(tx: mpsc::Sender<TimedEvent>) {
                     key: prev,
                 },
             );
+        }
+
+        // Scripted recording session (hardware-free E2E for D16): record a
+        // slice of the arpeggio, stop, then play it back looping under the
+        // still-running feeder.
+        match i {
+            16 => send(t, Event::StartRecording), // 4 s in: ⏺ (metronome on)
+            48 => send(t, Event::Stop),           // 12 s: finalize take, silent
+            52 => send(t, Event::Play),           // 13 s: take loops (no ticks)
+            _ => {}
         }
 
         // (Drum ticks + scene patterns are the audio loop's job now.)
@@ -602,7 +739,8 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>) {
                             println!("[transport] loop toggle (flag only — no behavior yet)")
                         }
                         Action::Record => {
-                            println!("[transport] record (no-op — MIDI capture is a later slice)")
+                            println!("[transport] record");
+                            send_event(&tx, m.received, Event::StartRecording);
                         }
                         _ => {} // faders/knobs/mod/pitch: no engine effect yet
                     }
