@@ -42,6 +42,25 @@
   #msg { margin-top:8px; min-height:18px; font-size:12px; color:var(--dim); }
   #msg.err { color:var(--rec); }
   #remote button.rec { color:var(--rec); }
+  #matrix { overflow-x:auto; }
+  .mxrow { display:flex; gap:4px; align-items:center; margin-bottom:4px; }
+  .mxname { width:120px; font-size:12px; color:var(--dim); overflow:hidden;
+            white-space:nowrap; text-overflow:ellipsis; }
+  .mxhead { width:34px; text-align:center; font-size:11px; color:var(--dim); }
+  .mxcell { width:34px; height:26px; border:1px solid #333; border-radius:4px;
+            background:#1c1c1c; cursor:pointer; font-size:10px; color:#666;
+            display:flex; align-items:center; justify-content:center; }
+  .mxcell.on { background:var(--acc); border-color:var(--acc); color:#04220f;
+               font-weight:700; }
+  .mxcell.sel { outline:2px solid var(--play); }
+  #stepedit { margin-top:14px; border-top:1px solid #2a2a2a; padding-top:10px; }
+  #stepedit .sgrid { display:grid; grid-template-columns:repeat(16, 30px);
+                     gap:3px; margin-top:8px; }
+  .step { height:32px; border:1px solid #333; border-radius:4px;
+          background:#1c1c1c; color:#9cf; font-size:10px; cursor:pointer;
+          display:flex; align-items:center; justify-content:center; }
+  .step.on { background:#2b4a6f; border-color:#3d6da8; }
+  .step.b0 { border-left-width:3px; border-left-color:#555; }
 </style>
 </head>
 <body>
@@ -72,6 +91,12 @@
   <section class="card">
     <h2>Mixer</h2>
     <div id="mixer"><em>No tracks.</em></div>
+  </section>
+
+  <section class="card">
+    <h2>Clip matrix</h2>
+    <div id="matrix"><em>No tracks.</em></div>
+    <div id="stepedit" hidden></div>
   </section>
 
   <section class="card">
@@ -161,6 +186,7 @@ function renderProject(pf) {
   $("p-bpm").value = pf.project.bpm;
   $("p-loop").value = pf.project.loop_bars;
   renderMixer(pf);
+  renderMatrix();
   if (!$("raw").hidden) $("raw").value = JSON.stringify(pf, null, 2);
   const ul = $("takes");
   ul.innerHTML = "";
@@ -216,6 +242,7 @@ async function putProject(body, okMsg) {
 }
 
 async function refresh() {
+  if (dirty) return; // never clobber unsaved local edits with a background fetch
   try {
     const r = await fetch("/api/project");
     renderProject(await r.json());
@@ -270,6 +297,137 @@ $("toggle").addEventListener("click", () => {
 });
 connect();
 refresh();
+// ------------------------------------------------------------- clip matrix
+// Matrix: rows = tracks, cols = scenes. Empty cell -> click creates a
+// 1-bar pattern; filled cell -> step editor below. Edits mutate `project`
+// and ride the existing dirty-flag Save (PUT) path.
+let sel = null;              // {ti, si} of the open step editor
+let paintPitch = 60;         // pitch stamped into newly clicked steps
+const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+const noteName = (p) => NOTE_NAMES[p % 12] + (Math.floor(p / 12) - 1);
+
+function renderMatrix() {
+  const box = $("matrix");
+  box.innerHTML = "";
+  const tracks = project?.project.tracks || [];
+  if (!tracks.length) { box.innerHTML = "<em>No tracks.</em>"; return; }
+  const scenes = project.project.scenes || [];
+
+  const head = document.createElement("div");
+  head.className = "mxrow";
+  head.append(Object.assign(document.createElement("span"), { className: "mxname" }));
+  for (let s = 0; s < 8; s++) {
+    const h = document.createElement("span");
+    h.className = "mxhead"; h.textContent = "S" + (s + 1);
+    h.title = scenes[s]?.name || "";
+    head.append(h);
+  }
+  box.append(head);
+
+  tracks.forEach((t, ti) => {
+    const row = document.createElement("div");
+    row.className = "mxrow";
+    const nm = document.createElement("span");
+    nm.className = "mxname"; nm.textContent = t.name;
+    row.append(nm);
+    for (let si = 0; si < 8; si++) {
+      const clip = (t.clips || [])[si];
+      const cell = document.createElement("div");
+      cell.className = "mxcell" + (clip ? " on" : "") +
+        (sel && sel.ti === ti && sel.si === si ? " sel" : "");
+      cell.textContent = clip ? clip.pattern.bars + "b" : "+";
+      cell.title = clip ? `${t.name} · ${scenes[si]?.name || "S" + (si + 1)}`
+                        : "create clip";
+      cell.addEventListener("click", () => {
+        if (!t.clips || t.clips.length < 8) t.clips = Array(8).fill(null);
+        if (!clip) {
+          t.clips[si] = {
+            name: `${t.name} S${si + 1}`,
+            pattern: { bars: 1, steps: Array(16).fill(null) },
+          };
+          markDirty();
+        }
+        sel = { ti, si };
+        renderMatrix();
+      });
+      row.append(cell);
+    }
+    box.append(row);
+  });
+
+  if (sel) renderStepEditor();
+}
+
+function renderStepEditor() {
+  const box = $("stepedit");
+  const t = project.project.tracks[sel.ti];
+  const clip = t?.clips?.[sel.si];
+  if (!clip) { box.hidden = true; return; }
+  box.hidden = false;
+  box.innerHTML = "";
+
+  const bar = document.createElement("div");
+  bar.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap";
+
+  const title = document.createElement("b");
+  title.textContent = `${t.name} · ${project.project.scenes[sel.si]?.name || "S" + (sel.si + 1)}`;
+
+  const pitch = document.createElement("input");
+  pitch.type = "number"; pitch.min = 0; pitch.max = 127; pitch.value = paintPitch;
+  pitch.style.width = "70px"; pitch.title = "paint pitch (MIDI)";
+  pitch.addEventListener("input", () => { paintPitch = +pitch.value || 60; });
+
+  const barsSel = document.createElement("select");
+  for (const b of [1, 2, 4]) {
+    const o = document.createElement("option");
+    o.value = b; o.textContent = b + " bar" + (b > 1 ? "s" : "");
+    barsSel.append(o);
+  }
+  barsSel.value = clip.pattern.bars;
+  barsSel.addEventListener("change", () => {
+    const nb = +barsSel.value;
+    const steps = Array(nb * 16).fill(null);
+    clip.pattern.steps.forEach((s, i) => { if (i < steps.length) steps[i] = s; });
+    clip.pattern.bars = nb;
+    clip.pattern.steps = steps;
+    markDirty(); renderStepEditor();
+  });
+
+  const del = document.createElement("button");
+  del.className = "alt"; del.textContent = "delete clip";
+  del.addEventListener("click", () => {
+    if (!confirm(`Delete clip "${clip.name}"?`)) return;
+    t.clips[sel.si] = null;
+    sel = null;
+    markDirty(); renderMatrix(); box.hidden = true;
+  });
+
+  const close = document.createElement("button");
+  close.className = "alt"; close.textContent = "close";
+  close.addEventListener("click", () => { sel = null; box.hidden = true; renderMatrix(); });
+
+  bar.append(title, document.createTextNode(" paint:"), pitch,
+             document.createTextNode(" length:"), barsSel, del, close);
+  box.append(bar);
+
+  const grid = document.createElement("div");
+  grid.className = "sgrid";
+  clip.pattern.steps.forEach((s, i) => {
+    const c = document.createElement("div");
+    c.className = "step" + (s ? " on" : "") + (i % 4 === 0 ? " b0" : "");
+    c.textContent = s ? noteName(s.pitch) : "";
+    c.title = s ? `${noteName(s.pitch)} vel ${s.velocity} — click to clear`
+                : `click to add ${noteName(paintPitch)}`;
+    c.addEventListener("click", () => {
+      clip.pattern.steps[i] = s ? null
+                                 : { pitch: paintPitch, velocity: 100 };
+      markDirty(); renderStepEditor();
+    });
+    grid.append(c);
+  });
+  box.append(grid);
+}
+
 // Remote control: transport + scene chips drive the engine over HTTP —
 // same event path the Oxygen keys take. State comes back via /ws.
 $("remote").addEventListener("click", async (e) => {
