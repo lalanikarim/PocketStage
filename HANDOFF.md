@@ -82,12 +82,22 @@ Key architectural facts proven so far:
 | Oxygen 49 MKV | **Connected to this laptop**, ALSA card 3, sequencer client 28 with ports: `28:0` USB MIDI (main), `28:1` Mackie/HUI, `28:2` Editor (SysEx) |
 | Internet | works generally; m-audio.com unreachable from this box (possibly blocked) |
 
+Audio routing note (dev box): the engine's `default` ALSA device resolves to
+the **CX1970** USB interface and PipeWire links it *directly* to its endpoints,
+bypassing WirePlumber sink nodes — so the OS master volume slider does not
+scale it (per-app stream volume via GNOME/`wpctl set-volume <stream> <v>`
+does). To route through the default sink (system slider works), open the sink's
+node name as the device: `POCKETSTAGE_DEVICE=alsa_output.pci-0000_04_00.6.HiFi__Speaker__sink`
+(verified working, session 8). Sink node ids churn on WirePlumber restarts —
+look them up with `wpctl status` / `wpctl inspect <id>`.
+
 Useful device-check commands:
 
 ```bash
 aconnect -l                                  # list ALSA sequencer clients/ports
 amidi -p hw:3,0 -d                           # dump raw MIDI from Oxygen (Ctrl+C stop)
 aplay -l                                     # playback devices
+wpctl status                                 # sinks/streams; find the engine's stream id
 ```
 
 ---
