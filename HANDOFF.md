@@ -3,10 +3,11 @@
 > Created: 2026 – session handoff for continuing work after folder rename.
 > Read this first, then read `specs/brainstorming/scratchpad.md` (the full design brainstorm).
 
-**Status:** spike validated (0 xruns, ~1 % CPU) · model crate + CI merged · MIDI core
-(parser/probe/hotplug/pump) merged · **T1 hardware capture done** → device map at
-`specs/device-maps/oxygen-49-mkv.md`. Next: `pocketstage-oxygen` input mapper (unblocked),
-then the T2 SysEx expedition (LEDs).
+**Status (session 7):** spike validated (0 xruns, ~1 % CPU) · model crate + CI ·
+MIDI core (parser/hotplug/pump) · **oxygen input mapper DONE incl. hardware probes
+A/B/C** — 47 tests green. Device ground truth: `specs/device-maps/oxygen-49-mkv.md`.
+**Next slice:** wire pump → oxygen mapper → engine (play pads/keys for real).
+Remaining hardware work: T2 SysEx expedition (pad LEDs), pedal CC check.
 
 ---
 
@@ -22,44 +23,41 @@ Full design: `specs/brainstorming/scratchpad.md`
 
 ---
 
-## 2. Immediate task: rename the folder
+## 2. Repo identity
 
-The repo folder is still named with the old working title. From a shell (NOT from
-inside this session's cwd):
-
-```bash
-shopt -s nullglob; rmdir ~/Projects/PocketStage 2>/dev/null
-mv ~/Projects/PiDaw ~/Projects/PocketStage
-cd ~/Projects/PocketStage
-```
-
-Then verify:
-
-```bash
-cargo build          # should print no errors
-ls specs/brainstorming/scratchpad.md
-```
-
-Everything else in the repo already uses the `pocketstage` name (workspace, crate).
+Folder is `~/Projects/PocketStage`; remote **https://github.com/lalanikarim/PocketStage**
+(public, MIT). Branch protection on main: PR required + linear history, admins
+(currently: me) bypass to push directly. Always run the CI gates locally before pushing:
+`cargo build && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check`.
 
 ---
 
 ## 3. Current state of the code
 
 ```
-PocketStage/            (folder currently named PiDaw)
-├── Cargo.toml                       # workspace, member: crates/pocketstage-engine
-├── .gitignore                       # ignores .pi/
-├── specs/brainstorming/scratchpad.md   # full design brainstorm + decision log D1–D10
-└── crates/pocketstage-engine/
-    ├── Cargo.toml                   # deps: alsa 0.9, libc 0.2
-    └── src/main.rs                  # PLACEHOLDER stub — prints one line
+PocketStage/
+├── Cargo.toml                          # workspace, 4 member crates
+├── AGENTS.md                           # AI-agent guide — read before editing code
+├── SPIKE_RESULTS.md                    # spike numbers + platform quirks log
+├── specs/brainstorming/scratchpad.md   # design brainstorm, decisions D1–D10
+├── specs/device-maps/oxygen-49-mkv.md  # GROUND TRUTH controller map (T1 + probes A/B/C)
+├── .github/workflows/ci.yml            # build + clippy -D warnings + fmt + tests
+└── crates/
+    ├── pocketstage-engine/   ALSA + hand-rolled FluidSynth FFI spike, pump consumer, metrics
+    ├── pocketstage-model/    versioned clip-matrix project format (serde), 9 tests
+    ├── pocketstage-midi/     port discovery, streaming parser, hotplug, spawn_pump → mpsc;
+    │                         bin: midi_probe (list/watch/pump/send)
+    └── pocketstage-oxygen/   controller input mapper — pure, JSON-reassignable, 24 tests;
+                              bin: oxygen_demo (per-port mappers: music + HUI)
 ```
 
-- `cargo build` verified working (BUILD_OK).
-- **Spike DONE** (see `SPIKE_RESULTS.md`): `src/main.rs` + `src/ffi.rs` implement the
-  full ALSA + FluidSynth-FFI spike with metrics; runs glitch-free, ~1% CPU, 0 xruns.
-  Next task: project file format (`pocketstage-model`) — backlog item 1 below.
+Key architectural facts proven so far:
+- Audio: single-writer synth owned by the audio thread; mpsc event boundary; 0 xruns.
+- MIDI: pump delivers decoded `Event`s + provenance (`MidiInputMessage`), hotplug-aware;
+  device clock spam (~45 msg/s) discarded at the mapper boundary.
+- Oxygen mapping: **per-port mappers** — port :0 music (default_mapping), port :1 HUI
+  (hui_mapping, transport notes 86/93/94/95); fader-9 button tap-detector for its
+  factory CC collision. Never open the unit's DAW mode expectations — preset mode only.
 
 ---
 
@@ -144,24 +142,25 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    streaming parser, T1 `midi_probe` tool (verified live on the MKV), hotplug
    tracking (`ActivePorts` + pure `diff_ports`), engine event pump
    (`spawn_pump` → mpsc `PumpMessage`s; `midi_probe pump` smoke-tests it).
-   15 tests, hardware tests mutex-serialized (rawmidi excludes concurrent openers).
+   13 tests, hardware tests mutex-serialized (rawmidi excludes concurrent openers).
    Deferred to when needed: rtrb lock-free ring for the audio-thread consumer,
    ALSA inotify instead of 1 s poll-scan.
-   **T1 capture DONE** (sessions in DAW + Preset mode). Distilled map:
-   `specs/device-maps/oxygen-49-mkv.md`; raw logs `/tmp/probe-t1-run1-dawmode.log`,
-   `/tmp/probe-t2-preset.log`. Headlines: controls on **ch13** (knobs CC44-47,62,63,
-   75,76 · faders CC33-41 · fader buttons CC49-56); pads = notes 36-43 ch1; transport
-   = system Start/Stop/Reset messages (NOT CCs); octave/program buttons emit nothing;
-   device streams MIDI clock ~45 msg/s nonstop — the pump must discard TimingClock.
-   Corrected inventory: **9 faders+buttons, 8 knobs, 8 pads** (brainstorm's 16 pads /
-   4 faders was wrong).
-3. Oxygen mapper (`pocketstage-oxygen`) — **part 1 (input mapping) DONE**: pure
-   `Mapping` (serde, deny_unknown_fields, validated) + `Mapper::map(&Event) -> Option<Action>`
-   from the measured T1 map; 16 unit tests + doctest; `oxygen_demo` bin verified live
-   (silently swallows the clock spam). Engine wiring (pump→mapper→song actions) is the
-   next slice. Probes A/B/C done (pad banks, transport-via-HUI, fader-9 button
-   collision — see device-map file). **Remaining**: T2 SysEx expedition (+ pedal CC
-   check when a pedal exists) → then part 2 (LEDs).
+   **T1 capture DONE** (+ probes A/B/C; all distilled into the device-map file —
+   raw logs lived in /tmp and are ephemeral). Headlines: controls on **ch13**;
+   knobs CC[44,45,46,47,62,63,75,76] · faders CC33-41 · buttons CC49-56 + #9
+   colliding with CC41; pads = notes 36–51 (two banks → logical 1–16); transport via
+   HUI-port notes (play/record indistinguishable otherwise); octave/program buttons
+   emit nothing; device streams MIDI clock ~45 msg/s nonstop — mapper discards it.
+   Corrected inventory: **9 faders+buttons, 8 knobs, 8 physical pads** (2×4 rows).
+3. Oxygen mapper (`pocketstage-oxygen`) — **part 1 DONE** (input mapping, probes
+   A/B/C baked in): `Mapping` (serde, deny_unknown_fields, validated; pad window
+   36–51 = logical pads 1–16 via banks; knob order [44,45,46,47,62,63,75,76];
+   shared-button faders [9]) + stateful `Mapper::map(&Event, &mut Vec<Action>)`
+   (tap-detector; one Mapper **per source port** — see oxygen_demo). 24 tests.
+   **Next slice: engine wiring** — pump → per-port mappers → song actions
+   (keys→synth, pads→clip launch later, transport→play/stop/record/loop).
+   **Remaining hardware tasks**: T2 SysEx expedition (LEDs; `midi_probe send` ready),
+   pedal CC verify when a pedal exists. Then part 2 (LED feedback).
 4. Web server (`pocketstage-server`): axum REST + WS, single-writer state snapshots
 5. Minimal web UI: project load/save, take list, mixer
 
@@ -177,7 +176,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D4 | Record MIDI only in v0.1; offline WAV bounce | Proposed |
 | D5 | Scene launch quantized to next bar (configurable) | Proposed |
 | D6 | Rust workspace, crates per R5 layout | Proposed (scaffolded) |
-| D7 | No footswitch; transport = Oxygen onboard buttons | ✅ |
+| D7 | Transport = Oxygen onboard buttons (a sustain pedal exists but was never on hand; probe deferred, expect CC64) | ✅ |
 | D8 | Curated defaults: FluidR3 GM base + GeneralUser GS upgrade + patch layer (R8) | ✅ |
 | D9 | mDNS + no auth in v0.1 (LAN-trusted) | Proposed |
 | D10 | Name = **PocketStage** | ✅ |
@@ -187,16 +186,25 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 ## 8. Open risks / watch-list
 
 - **Pad LED control on MKV** — Editor port exists (good sign) but protocol unverified (task T2). Fallback: blink-free UX via transport buttons + audio cues.
-- ~~MKV CC map unknown~~ — **resolved by T1 capture**; see `specs/device-maps/oxygen-49-mkv.md`.
-- **FluidSynth crate bindings on crates.io are stale** — use hand-written FFI (spike will prove the approach).
+- ~~MKV CC map unknown~~ — **resolved** by T1 + probes A/B/C; ground truth in `specs/device-maps/oxygen-49-mkv.md`.
+- ~~FluidSynth crate bindings stale~~ — resolved: hand-written FFI works (spike-proven).
 - **Pi performance never measured** — spike CPU% is first datapoint; Pi hardware not yet acquired? (not discussed)
+- **Unit state drifts**: preset mode + channel 13 + bank 1 are assumed defaults; the
+  user can change them on the unit. `control_any_channel` and JSON mapping overrides
+  exist for this — surface a "learn/mismatch" warning in the UI someday.
+- **Fader 9 button collision** — heuristic (bare 127→0) could misfire only if someone
+  moves that fader top-to-bottom between two MIDI samples; effectively impossible at
+  USB rates, but it's a known theoretical edge.
 
 ---
 
 ## 9. How to resume (suggested prompt for next session)
 
-> Read HANDOFF.md and specs/brainstorming/scratchpad.md, then implement the audio
-> engine spike described in section 5 of HANDOFF.md.
+> Read HANDOFF.md, AGENTS.md, and specs/device-maps/oxygen-49-mkv.md. Then wire
+> pump → oxygen per-port mappers → engine: keys/pads drive the demo synth and
+> transport buttons drive a visible play/stop state (backlog item 3 "next slice").
+> `oxygen_demo` already shows the per-port mapper setup; the spike's main.rs shows
+> the audio-side consumer. Keep mpsc boundaries; no locks in the render loop.
 
 ---
 
