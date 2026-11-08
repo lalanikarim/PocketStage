@@ -73,6 +73,22 @@ fn rejects_bad_payloads_and_changes_nothing() {
     cleanup(&path);
 }
 
+#[test]
+fn replace_creates_missing_parent_dirs() {
+    // Regression: first save to a fresh ~/.pocketstage-style location.
+    let mut path =
+        std::env::temp_dir().join(format!("ps-server-test-nested-{}", std::process::id()));
+    path.push("deeper");
+    path.push("project.json");
+    cleanup(&path);
+    let store = ProjectStore::open_or_default(&path).unwrap();
+    let mut pf = store.get();
+    pf.project.name = "Fresh".into();
+    store.replace(pf).unwrap();
+    assert!(path.exists());
+    let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap().parent().unwrap());
+}
+
 // ------------------------------------------------------------------ HTTP
 
 async fn call(app: axum::Router, req: Request<Body>) -> (StatusCode, String) {

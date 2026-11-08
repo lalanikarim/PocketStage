@@ -82,6 +82,9 @@ impl ProjectStore {
         let json =
             serde_json::to_string_pretty(&incoming).map_err(|e| StoreError::Io(e.to_string()))?;
 
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| StoreError::Io(e.to_string()))?;
+        }
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, json).map_err(|e| StoreError::Io(e.to_string()))?;
         std::fs::rename(&tmp, &self.path).map_err(|e| StoreError::Io(e.to_string()))?;
