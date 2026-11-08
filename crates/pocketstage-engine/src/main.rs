@@ -353,7 +353,7 @@ fn main() {
 
     // ---- audio thread -------------------------------------------------------
     let a_stats = Arc::clone(&stats);
-    let _audio_thread = thread::Builder::new()
+    let audio_thread = thread::Builder::new()
         .name("ps-audio".into())
         .spawn(move || {
             try_realtime_priority();
@@ -586,8 +586,14 @@ fn main() {
                                     };
                                 }
                                 Event::LaunchScene { index } => {
-                                    let q =
-                                        project.scenes[index].quantize.unwrap_or(Quantize::NextBar);
+                                    // A scene the current project does not have
+                                    // (pad 8 after a shrink to 3 scenes) is
+                                    // IGNORED — this once panicked ps-audio and
+                                    // killed all sound until restart.
+                                    let Some(scene) = project.scenes.get(index) else {
+                                        continue; // silently ignored (no syscalls here)
+                                    };
+                                    let q = scene.quantize.unwrap_or(Quantize::NextBar);
                                     if playing_since.is_none() {
                                         // Launching from stopped starts playback now.
                                         playing_since = Some(total_samples);
@@ -598,7 +604,7 @@ fn main() {
                                             .store(index as u8 + 1, Ordering::Relaxed);
                                         for (t, track) in project.tracks.iter().enumerate() {
                                             synth.all_notes_off(t as i32);
-                                            if track.clips[index].is_some() {
+                                            if track.clips.get(index).is_some_and(|c| c.is_some()) {
                                                 synth.program_change(
                                                     t as i32,
                                                     track.instrument.gm_program as i32,
@@ -613,7 +619,7 @@ fn main() {
                                             .store(index as u8 + 1, Ordering::Relaxed);
                                         for (t, track) in project.tracks.iter().enumerate() {
                                             synth.all_notes_off(t as i32);
-                                            if track.clips[index].is_some() {
+                                            if track.clips.get(index).is_some_and(|c| c.is_some()) {
                                                 synth.program_change(
                                                     t as i32,
                                                     track.instrument.gm_program as i32,
@@ -657,7 +663,7 @@ fn main() {
                                     .store(i as u8 + 1, Ordering::Relaxed);
                                 for (t, track) in project.tracks.iter().enumerate() {
                                     synth.all_notes_off(t as i32);
-                                    if track.clips[i].is_some() {
+                                    if track.clips.get(i).is_some_and(|c| c.is_some()) {
                                         synth.program_change(
                                             t as i32,
                                             track.instrument.gm_program as i32,
@@ -687,7 +693,7 @@ fn main() {
                             let mut k = s0.ceil() as u64; // first step reached this period
                             while (k as f64) < s1 {
                                 for (t, track) in project.tracks.iter().enumerate() {
-                                    if let Some(clip) = &track.clips[scene] {
+                                    if let Some(Some(clip)) = track.clips.get(scene) {
                                         let len = clip.pattern.steps.len() as u64;
                                         // 16th gating: off the previous step's note,
                                         // on this one (sustains = repeated pitches).
@@ -823,9 +829,20 @@ fn main() {
     thread::Builder::new()
         .name("ps-stats".into())
         .spawn(move || {
+            // Watchdog: a panic in ps-audio silences every surface while the
+            // rest of the process keeps running — make that state obvious.
+            let audio_watchdog = audio_thread;
+            let mut audio_dead_reported = false;
             let window = Duration::from_millis(2000);
             loop {
                 thread::sleep(window);
+                if !audio_dead_reported && audio_watchdog.is_finished() {
+                    audio_dead_reported = true;
+                    eprintln!(
+                        "[FATAL] ps-audio thread died (see panic above) — \
+                               NO AUDIO until restart. RUST_BACKTRACE=1 for detail."
+                    );
+                }
                 let [
                     cycles,
                     busy_ns,
