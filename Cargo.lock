@@ -66,6 +66,9 @@ version = "0.1.0"
 dependencies = [
  "alsa",
  "libc",
+ "pocketstage-midi",
+ "pocketstage-model",
+ "pocketstage-oxygen",
 ]
 
 [[package]]
