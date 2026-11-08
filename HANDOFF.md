@@ -15,10 +15,16 @@ voice live (verified with headphones), pads fire a kick placeholder,
 overrides the ALSA device.
 **Transport/clock DONE:** Play/Stop drive a real master clock in the engine —
 sample-accurate playhead at project BPM (120 default), accented beat ticks
-while playing, `transport=… pos=bar.beat` in stats. Live-verified (ticks on
-play, reset on stop). Pure clock math in `engine/src/clock.rs` (3 tests).
-**Next slice:** pads → clip launching (quantized to next bar per D5, consuming
-the new clock).
+while playing, `transport=… pos=bar.beat` in stats. Live-verified.
+**Scene launching DONE:** pads 1–8 launch scenes (R2) — from stopped it starts
+playback immediately; while playing the switch lands on the scene's quantized
+boundary (D5, per-scene override honored). Active scene's clip column plays as
+looping 16th-gated step patterns (track N → channel N, D3); `scene=S#` in stats.
+Boot project = `Project::default_project()` + demo patterns in scenes 1–2
+(placeholder until project loading). Live-verified: all 8 pads, keys layering,
+0 xruns. Pure clock math in `engine/src/clock.rs` (4 tests).
+**Next slice:** web server (`pocketstage-server`) — project load/save is the
+natural first piece behind it; then SEQ-mode pattern editing.
 Remaining hardware work: pedal CC check (needs a pedal).
 
 ---
@@ -185,7 +191,12 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    arpeggio (no hardware); device selectable via arg or `POCKETSTAGE_DEVICE`.
    **Transport/clock ✅ DONE** — Play/Stop drive a sample-accurate master clock
    (`clock.rs`, pure + tested): accented beat ticks while playing, position in
-   stats, live-verified. **Next:** pads → clip launching (D5 bar quantization).
+   stats, live-verified.
+   **Scene launching ✅ DONE** — pads 1–8 launch scenes: immediate from
+   stopped, D5-quantized while playing (per-scene override honored); active
+   column loops as 16th-gated step patterns (track N → channel N). Demo
+   patterns in scenes 1–2 of the boot project. Live-verified all 8 pads +
+   keys, 0 xruns. **Next:** web server (project load/save first), then SEQ mode.
    **T2 DONE (session 8), inconclusive**: LEDs are local momentary state;
    Editor port silent both ways; no host-controllable LED protocol found →
    LED-less UX fallback adopted. Part 2 (LED feedback) is therefore **dropped
@@ -225,6 +236,12 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 - **Unit state drifts**: preset mode + channel 13 + bank 1 are assumed defaults; the
   user can change them on the unit. `control_any_channel` and JSON mapping overrides
   exist for this — surface a "learn/mismatch" warning in the UI someday.
+  **Concrete incident (session 8):** unit left at octave −2 shifted the keyboard
+  into the pad window (36–51) → middle keys silently became pad presses; diagnosed
+  via `midi_probe watch` capture of a full white-key sweep. Operational rule: if
+  keys go missing, check the unit's octave/preset state first. Note the lowest 16
+  keys (C2–G3 at oct 0) are *always* pad-shadowed by design; making the pad window
+  configurable is the open fix if that ever matters.
 - **Fader 9 button collision** — heuristic (bare 127→0) could misfire only if someone
   moves that fader top-to-bottom between two MIDI samples; effectively impossible at
   USB rates, but it's a known theoretical edge.
@@ -292,6 +309,18 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   clock too (scripted kicks removed — the clock owns the drum now). Live-
   verified: ticks at 120 BPM on play, position counting bars, reset on stop,
   keys layering over ticks, 0 xruns. 50 tests, all gates green.
+  Then **scene launching**: pads 1–8 now launch scenes — immediate from
+  stopped (starts playback), D5-quantized while playing (per-scene `Quantize`
+  override honored: immediate/next-beat/next-bar). The active scene's clip
+  column loops as 16th-gated step patterns, track N → internal channel N
+  (D3); scene switch silences old voices via `fluid_synth_all_notes_off` (new
+  FFI decl) and re-arms programs. Boot project = `Project::default_project()`
+  with demo patterns in scenes 1–2; keys now play track 1's instrument
+  (Acoustic Grand, not the old saw lead). `--demo` auto-launches scene 1.
+  Live incident: unit left at octave −2 put the keyboard inside the pad
+  window — middle keys became pad presses (silence); diagnosed by capturing a
+  full white-key sweep with `midi_probe watch`. All 8 pads + keys verified,
+  0 xruns. 51 tests, all gates green.
 - **Housekeeping note (session 5)**: some earlier HANDOFF edits were found missing
   (prose edits did not persist; cause unknown). This file was reconstructed from git +
   notes. When prose and git disagree, trust git.

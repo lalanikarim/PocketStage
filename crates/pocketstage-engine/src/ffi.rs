@@ -47,6 +47,7 @@ unsafe extern "C" {
         chan: c_int,
         program: c_int,
     ) -> c_int;
+    pub fn fluid_synth_all_notes_off(synth: *mut fluid_synth_t, chan: c_int) -> c_int;
     pub fn fluid_synth_write_float(
         synth: *mut fluid_synth_t,
         len: c_int,
@@ -131,6 +132,14 @@ impl Synth {
     #[inline]
     pub fn program_change(&self, chan: i32, program: i32) {
         unsafe { fluid_synth_program_change(self.0, chan, program) };
+    }
+
+    /// Silences every voice on one channel (used when a scene switch stops a
+    /// track's pattern). Note: keys share their track's channel in v0.1, so
+    /// this also cuts held key notes on that channel — accepted tradeoff.
+    #[inline]
+    pub fn all_notes_off(&self, chan: i32) {
+        unsafe { fluid_synth_all_notes_off(self.0, chan) };
     }
 
     /// Renders `frames` audio frames into separate L / R float buffers (0..=1 stride).

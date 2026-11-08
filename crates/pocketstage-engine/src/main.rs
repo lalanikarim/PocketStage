@@ -8,9 +8,11 @@
 //!
 //! Event sources:
 //!   * default: live MIDI — `spawn_pump` → per-port Oxygen mappers (music +
-//!     HUI) → engine events. Keys drive the lead voice; pads fire a kick on
-//!     the drum channel (clip launching comes later); transport drives the
-//!     master clock (accented beat ticks while playing, position in stats).
+//!     HUI) → engine events. Keys drive track 1's voice; pads 1–8 launch
+//!     scenes (their clip column, D5-quantized); transport drives the master
+//!     clock (accented beat ticks while playing, position in stats).
+//!   * The boot project is `Project::default_project()` with placeholder demo
+//!     patterns in scenes 1–2; real project loading comes with the web server.
 //!   * `--demo`: scripted arpeggio feeder, no hardware needed (spike mode).
 //!
 //! Run:  cargo run --release -p pocketstage-engine            (live MIDI)
@@ -23,6 +25,7 @@ mod ffi;
 use alsa::pcm::{Access, Format, Frames, PCM};
 use alsa::{Direction, ValueOr};
 use pocketstage_midi::{PumpMessage, spawn_pump};
+use pocketstage_model::{Clip, Pattern, Project, Quantize, STEPS_PER_BAR, StepNote};
 use pocketstage_oxygen::{Action, Mapper, default_mapping, hui_mapping};
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,15 +40,10 @@ const PERIOD_FRAMES: usize = 256; // frames per period (buffer size knob)
 const N_PERIODS: u32 = 3;
 const SF2_PATH: &str = "/usr/share/sounds/sf2/FluidR3_GM.sf2";
 
-/// Internal FluidSynth MIDI channel for the lead voice (track 1 in the real model).
+/// Keys play track 1's voice (D3: track N → internal channel N).
 const LEAD_CH: i32 = 0;
-/// GM drum channel (channel 10 in MIDI land, index 9) — proves multi-timbral D3.
+/// GM drum channel (channel 10 in MIDI land, index 9) — metronome ticks.
 const DRUM_CH: i32 = 9;
-/// GM program for the lead: 81 = "Lead 2 (sawtooth)".
-const LEAD_PROGRAM: i32 = 81;
-/// Project tempo. Fixed per project in v0.1; will come from the loaded
-/// project's `bpm` once project loading exists.
-const BPM: u32 = 120;
 
 // ------------------------------------------------------------------- events
 
@@ -59,14 +57,15 @@ enum Event {
         chan: i32,
         key: i32,
     },
-    ProgramChange {
-        chan: i32,
-        program: i32,
-    },
     /// Transport: start playback — master clock runs from the current sample.
     Play,
     /// Transport: stop playback — clock halts; position restarts on next play.
     Stop,
+    /// Launch scene `index` (0-based). Stopped → starts playing immediately;
+    /// playing → applied at the scene's quantized boundary (D5).
+    LaunchScene {
+        index: usize,
+    },
 }
 
 /// An event plus the wall-clock time it was *intended* to fire. The audio
@@ -92,6 +91,8 @@ struct Stats {
     // Transport *levels* (read by the stats thread, never reset):
     playing: std::sync::atomic::AtomicBool,
     pos_beats_x1000: std::sync::atomic::AtomicU32,
+    /// Active scene, stored 1-based; 0 = none.
+    active_scene: std::sync::atomic::AtomicU8,
 }
 
 impl Stats {
@@ -139,7 +140,38 @@ fn main() {
             std::process::exit(1);
         }
     }
-    synth.program_change(LEAD_CH, LEAD_PROGRAM);
+    // ---- boot project (placeholder until project loading exists) ---------
+    let mut project = Project::default_project();
+    if let Err(e) = project.validate() {
+        eprintln!("[init] internal default project invalid: {e}");
+        std::process::exit(1);
+    }
+    // Demo content so pads 1–2 have audible scenes out of the box.
+    let bass_eighths: [(usize, u8, u8); 8] = [
+        (0, 36, 100),
+        (2, 36, 80),
+        (4, 36, 100),
+        (6, 36, 80),
+        (8, 36, 100),
+        (10, 36, 80),
+        (12, 36, 100),
+        (14, 36, 80),
+    ]; // C2 on every eighth
+    project.tracks[0].clips[0] = Some(demo_clip(
+        "Piano I",
+        &[(0, 60, 90), (4, 60, 80), (8, 60, 90), (12, 60, 80)], // C4 quarters
+    ));
+    project.tracks[3].clips[0] = Some(demo_clip("Bass I", &bass_eighths));
+    project.tracks[1].clips[1] = Some(demo_clip(
+        "E.Piano I",
+        &[(0, 60, 90), (4, 64, 90), (8, 67, 90), (12, 72, 90)], // C-E-G-C quarters
+    ));
+    project.tracks[3].clips[1] = Some(demo_clip("Bass II", &bass_eighths));
+    println!(
+        "[init] boot project: {} bpm, {} tracks — scenes 1-2 carry demo content",
+        project.bpm,
+        project.tracks.len()
+    );
 
     let (tx, rx) = mpsc::channel::<TimedEvent>();
     let stats = Arc::new(Stats::default());
@@ -168,9 +200,18 @@ fn main() {
             let mut right = vec![0f32; PERIOD_FRAMES];
             let mut out = vec![0i16; PERIOD_FRAMES * 2]; // interleaved
 
+            // Track programs (D3: track N → internal channel N). Keys on
+            // channel 0 thus play track 1's instrument.
+            for (t, track) in project.tracks.iter().enumerate() {
+                synth.program_change(t as i32, track.instrument.gm_program as i32);
+            }
+
+            let bpm = project.bpm;
             let mut cycle: u64 = 0;
             let mut total_samples: u64 = 0; // frames rendered so far (master clock domain)
             let mut playing_since: Option<u64> = None; // sample index where Play fired
+            let mut active_scene: Option<usize> = None;
+            let mut pending_launch: Option<(usize, Quantize)> = None; // (scene, quantize)
             loop {
                 // 1) Drain pending MIDI events (bounded per cycle — writes stay timely).
                 for _ in 0..64 {
@@ -185,15 +226,57 @@ fn main() {
                             match te.event {
                                 Event::NoteOn { chan, key, vel } => synth.note_on(chan, key, vel),
                                 Event::NoteOff { chan, key } => synth.note_off(chan, key),
-                                Event::ProgramChange { chan, program } => {
-                                    synth.program_change(chan, program)
-                                }
                                 Event::Play => {
                                     if playing_since.is_none() {
                                         playing_since = Some(total_samples);
                                     }
                                 }
-                                Event::Stop => playing_since = None,
+                                Event::Stop => {
+                                    playing_since = None;
+                                    active_scene = None;
+                                    pending_launch = None;
+                                    a_stats.active_scene.store(0, Ordering::Relaxed);
+                                    for t in 0..project.tracks.len() as i32 {
+                                        synth.all_notes_off(t);
+                                    }
+                                }
+                                Event::LaunchScene { index } => {
+                                    let q =
+                                        project.scenes[index].quantize.unwrap_or(Quantize::NextBar);
+                                    if playing_since.is_none() {
+                                        // Launching from stopped starts playback now.
+                                        playing_since = Some(total_samples);
+                                        active_scene = Some(index);
+                                        a_stats
+                                            .active_scene
+                                            .store(index as u8 + 1, Ordering::Relaxed);
+                                        for (t, track) in project.tracks.iter().enumerate() {
+                                            synth.all_notes_off(t as i32);
+                                            if track.clips[index].is_some() {
+                                                synth.program_change(
+                                                    t as i32,
+                                                    track.instrument.gm_program as i32,
+                                                );
+                                            }
+                                        }
+                                    } else if q == Quantize::Immediate {
+                                        active_scene = Some(index);
+                                        a_stats
+                                            .active_scene
+                                            .store(index as u8 + 1, Ordering::Relaxed);
+                                        for (t, track) in project.tracks.iter().enumerate() {
+                                            synth.all_notes_off(t as i32);
+                                            if track.clips[index].is_some() {
+                                                synth.program_change(
+                                                    t as i32,
+                                                    track.instrument.gm_program as i32,
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        pending_launch = Some((index, q));
+                                    }
+                                }
                             }
                         }
                         Err(_) => break,
@@ -205,20 +288,74 @@ fn main() {
                 // period spans ~1% of a beat at 120 BPM; the loop runs ≤1x).
                 match playing_since {
                     Some(start) => {
-                        let b0 = clock::beats_elapsed(total_samples - start, RATE, BPM);
+                        let b0 = clock::beats_elapsed(total_samples - start, RATE, bpm);
                         let b1 = clock::beats_elapsed(
                             total_samples + PERIOD_FRAMES as u64 - start,
                             RATE,
-                            BPM,
+                            bpm,
                         );
                         let mut p = b0.ceil() as u64; // first beat position reached this period
                         while (p as f64) < b1 {
+                            // Apply a pending scene launch at its quantized boundary.
+                            if let Some((i, q)) = pending_launch
+                                && match q {
+                                    Quantize::NextBar => p.is_multiple_of(4),
+                                    _ => true,
+                                }
+                            {
+                                pending_launch = None;
+                                active_scene = Some(i);
+                                a_stats.active_scene.store(i as u8 + 1, Ordering::Relaxed);
+                                for (t, track) in project.tracks.iter().enumerate() {
+                                    synth.all_notes_off(t as i32);
+                                    if track.clips[i].is_some() {
+                                        synth.program_change(
+                                            t as i32,
+                                            track.instrument.gm_program as i32,
+                                        );
+                                    }
+                                }
+                            }
                             // Accent the downbeat; the kick self-decays (on+off now).
                             let vel: i32 = if p.is_multiple_of(4) { 110 } else { 70 };
                             synth.note_on(DRUM_CH, 36, vel);
                             synth.note_off(DRUM_CH, 36);
                             p += 1;
                         }
+
+                        // Pattern playback: 16th-gated step notes for the active scene.
+                        if let Some(scene) = active_scene {
+                            let s0 = clock::steps_elapsed(total_samples - start, RATE, bpm);
+                            let s1 = clock::steps_elapsed(
+                                total_samples + PERIOD_FRAMES as u64 - start,
+                                RATE,
+                                bpm,
+                            );
+                            let mut k = s0.ceil() as u64; // first step reached this period
+                            while (k as f64) < s1 {
+                                for (t, track) in project.tracks.iter().enumerate() {
+                                    if let Some(clip) = &track.clips[scene] {
+                                        let len = clip.pattern.steps.len() as u64;
+                                        // 16th gating: off the previous step's note,
+                                        // on this one (sustains = repeated pitches).
+                                        if let Some(n) =
+                                            clip.pattern.steps[((k - 1) % len) as usize]
+                                        {
+                                            synth.note_off(t as i32, n.pitch as i32);
+                                        }
+                                        if let Some(n) = clip.pattern.steps[(k % len) as usize] {
+                                            synth.note_on(
+                                                t as i32,
+                                                n.pitch as i32,
+                                                n.velocity as i32,
+                                            );
+                                        }
+                                    }
+                                }
+                                k += 1;
+                            }
+                        }
+
                         a_stats.playing.store(true, Ordering::Relaxed);
                         a_stats
                             .pos_beats_x1000
@@ -301,11 +438,17 @@ fn main() {
                 let (bar, beat) = clock::bar_beat(
                     s_stats.pos_beats_x1000.load(Ordering::Relaxed) as f64 / 1000.0,
                 );
+                let scene = s_stats.active_scene.load(Ordering::Relaxed);
+                let scene_str = if scene == 0 {
+                    "-".to_string()
+                } else {
+                    format!("S{scene}")
+                };
                 println!(
                     "[stats] cycles={cycles:5} busy={busy_pct:4.2}% ({:.1} us/{} us period) \
                      events={events:3} queue avg/max={q_avg:6.1}/{q_max:6} us \
                      feeder_jitter_max={feed_max:5} us xruns={xruns} out_queue~{:.1} ms \
-                     transport={} pos={bar}.{beat}",
+                     transport={} pos={bar}.{beat} scene={}",
                     if cycles > 0 {
                         busy_ns as f64 / cycles as f64 / 1000.0
                     } else {
@@ -314,6 +457,7 @@ fn main() {
                     period_us,
                     delay_max as f64 * 1000.0 / RATE as f64,
                     if playing { "playing" } else { "stopped" },
+                    scene_str,
                 );
             }
         })
@@ -344,8 +488,9 @@ fn run_demo_feeder(tx: mpsc::Sender<TimedEvent>) {
         });
     };
 
-    // Start the master clock so beat ticks are audible alongside the arpeggio.
-    send(start, Event::Play);
+    // Launch scene 1 from stopped: starts the master clock AND activates the
+    // demo patterns, so --demo exercises the full pipeline without hardware.
+    send(start, Event::LaunchScene { index: 0 });
 
     let mut i: u32 = 0;
     loop {
@@ -375,23 +520,7 @@ fn run_demo_feeder(tx: mpsc::Sender<TimedEvent>) {
             );
         }
 
-        // (Drum ticks are the master clock's job now — see the audio loop.)
-
-        // Swap lead program every ~8 s to prove program_change works mid-stream.
-        if i > 0 && i.is_multiple_of(32) {
-            let prog = if (i / 32).is_multiple_of(2) {
-                LEAD_PROGRAM
-            } else {
-                4
-            }; // saw lead <-> EPiano
-            send(
-                t,
-                Event::ProgramChange {
-                    chan: LEAD_CH,
-                    program: prog,
-                },
-            );
-        }
+        // (Drum ticks + scene patterns are the audio loop's job now.)
 
         i += 1;
     }
@@ -401,9 +530,8 @@ fn run_demo_feeder(tx: mpsc::Sender<TimedEvent>) {
 ///
 /// One mapper per source port (the HUI subdevice is the only place
 /// loop/record are distinguishable — probe A2). Runs on the main thread; the
-/// audio thread stays untouched. Keys drive the lead voice, pads fire a kick
-/// on the drum channel until clip launching exists, transport drives the
-/// master clock.
+/// audio thread stays untouched. Keys drive track 1's voice, pads 1–8 launch
+/// scenes, transport drives the master clock.
 fn run_live_midi(tx: mpsc::Sender<TimedEvent>) {
     for m in [default_mapping(), hui_mapping()] {
         if let Err(e) = m.validate() {
@@ -452,23 +580,13 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>) {
                             };
                             send_event(&tx, m.received, event);
                         }
-                        // Pads → audible kick until clip launching exists.
-                        Action::Pad { on, velocity, .. } if on => {
+                        // Pads 1–8 launch scenes (R2: pad N = scene N).
+                        Action::Pad { index, on, .. } if on && (1..=8).contains(&index) => {
                             send_event(
                                 &tx,
                                 m.received,
-                                Event::NoteOn {
-                                    chan: DRUM_CH,
-                                    key: 36,
-                                    vel: velocity as i32,
-                                },
-                            );
-                            send_event(
-                                &tx,
-                                m.received,
-                                Event::NoteOff {
-                                    chan: DRUM_CH,
-                                    key: 36,
+                                Event::LaunchScene {
+                                    index: (index - 1) as usize,
                                 },
                             );
                         }
@@ -494,6 +612,21 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>) {
             Ok(PumpMessage::PortDisconnected(p)) => println!("[midi] [-] {p}"),
             Err(_) => break, // pump gone — shut down
         }
+    }
+}
+
+/// Sparse one-bar pattern from `(step, pitch, velocity)` entries (demo content).
+fn demo_clip(name: &str, entries: &[(usize, u8, u8)]) -> Clip {
+    let mut steps = vec![None; STEPS_PER_BAR];
+    for (i, pitch, vel) in entries {
+        steps[*i] = Some(StepNote {
+            pitch: *pitch,
+            velocity: *vel,
+        });
+    }
+    Clip {
+        name: name.into(),
+        pattern: Pattern { bars: 1, steps },
     }
 }
 

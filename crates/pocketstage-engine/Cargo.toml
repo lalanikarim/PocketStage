@@ -8,4 +8,5 @@ license = "MIT"
 alsa = "0.9"
 libc = "0.2"
 pocketstage-midi = { path = "../pocketstage-midi" }
+pocketstage-model = { path = "../pocketstage-model" }
 pocketstage-oxygen = { path = "../pocketstage-oxygen" }
