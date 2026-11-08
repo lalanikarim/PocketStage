@@ -94,6 +94,11 @@
   </section>
 
   <section class="card">
+    <h2>Structure</h2>
+    <div id="structure"></div>
+  </section>
+
+  <section class="card">
     <h2>Clip matrix</h2>
     <div id="matrix"><em>No tracks.</em></div>
     <div id="stepedit" hidden></div>
@@ -203,6 +208,7 @@ function renderProject(pf) {
   $("p-loop").value = pf.project.loop_bars;
   renderMixer(pf);
   renderMatrix();
+  renderStructure();
   if (!$("raw").hidden) $("raw").value = JSON.stringify(pf, null, 2);
   const ul = $("takes");
   ul.innerHTML = "";
@@ -313,6 +319,78 @@ $("toggle").addEventListener("click", () => {
 });
 connect();
 refresh();
+// ------------------------------------------------------------- structure
+// Track CRUD (max 4) + scene renaming (8 fixed columns). Edits mutate the
+// fetched ProjectFile and ride the dirty-flag Save path like everything else.
+function rerenderAll() {
+  renderMixer(project);
+  renderMatrix();
+  renderStructure();
+}
+
+function renderStructure() {
+  const box = $("structure");
+  box.innerHTML = "";
+  const p = project?.project;
+  if (!p) return;
+
+  p.tracks.forEach((t, ti) => {
+    const row = document.createElement("div");
+    row.className = "mrow";
+
+    const name = document.createElement("input");
+    name.type = "text"; name.value = t.name; name.style.width = "140px";
+    name.addEventListener("input", () => { t.name = name.value; markDirty(); });
+
+    const prog = document.createElement("input");
+    prog.type = "number"; prog.min = 0; prog.max = 127;
+    prog.value = t.instrument.gm_program; prog.style.width = "64px";
+    prog.title = "GM program";
+    prog.addEventListener("input", () => {
+      t.instrument.gm_program = Math.max(0, Math.min(127, +prog.value || 0));
+      markDirty();
+    });
+
+    const del = document.createElement("button");
+    del.className = "alt"; del.textContent = "\u2715"; del.title = "delete track";
+    del.addEventListener("click", () => {
+      if (!confirm(`Delete "${t.name}" and all its clips?`)) return;
+      p.tracks.splice(ti, 1);
+      if (sel) sel = null;
+      markDirty(); rerenderAll();
+    });
+
+    row.append(name, document.createTextNode(" prog"), prog, del);
+    box.append(row);
+  });
+
+  const add = document.createElement("button");
+  add.textContent = "+ add track";
+  add.disabled = p.tracks.length >= 4;
+  add.addEventListener("click", () => {
+    p.tracks.push({
+      name: "Track " + (p.tracks.length + 1),
+      color: [120, 180, 255],
+      instrument: { soundfont: null, gm_program: 0 },
+      clips: Array(p.scenes.length).fill(null),
+      channel: null, gain: null, pan: null, mute: false,
+      reverb: null, chorus: null,
+    });
+    markDirty(); rerenderAll();
+  });
+  box.append(add);
+
+  const sc = document.createElement("div");
+  sc.style.cssText = "display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px";
+  p.scenes.forEach((s, si) => {
+    const in_ = document.createElement("input");
+    in_.type = "text"; in_.value = s.name; in_.title = "scene S" + (si + 1);
+    in_.addEventListener("input", () => { s.name = in_.value; markDirty(); });
+    sc.append(in_);
+  });
+  box.append(sc);
+}
+
 // ------------------------------------------------------------- clip matrix
 // Matrix: rows = tracks, cols = scenes. Empty cell -> click creates a
 // 1-bar pattern; filled cell -> step editor below. Edits mutate `project`

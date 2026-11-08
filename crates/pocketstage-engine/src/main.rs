@@ -415,6 +415,19 @@ fn main() {
                     match cmd {
                         EngineCommand::SetProject(pf) => {
                             apply_swap(pf, &mut project, &mut bpm, &mut takes, &mine, &synth);
+                            // A PUT may shrink the scene list; a dangling
+                            // active index would play nothing / wrong column.
+                            let dangling_active =
+                                active_scene.is_some_and(|i| i >= project.scenes.len());
+                            let dangling_pending =
+                                pending_launch.is_some_and(|(i, _)| i >= project.scenes.len());
+                            if dangling_active {
+                                active_scene = None;
+                                a_stats.live.active_scene.store(0, Ordering::Relaxed);
+                            }
+                            if dangling_pending {
+                                pending_launch = None;
+                            }
                             a_stats
                                 .project_updates
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
