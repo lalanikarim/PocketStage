@@ -21,6 +21,7 @@
 
 mod clock;
 mod ffi;
+mod transport;
 
 use alsa::pcm::{Access, Format, Frames, PCM};
 use alsa::{Direction, ValueOr};
@@ -115,6 +116,17 @@ fn apply_swap(
         apply_track_voice(synth, t as i32, track);
     }
     *project = new;
+}
+
+/// Voice reset on scene switch: silence every track; (re-)set the program
+/// only for tracks that actually have a clip in this column.
+fn apply_scene_voice(synth: &ffi::Synth, project: &Project, scene: usize) {
+    for (t, track) in project.tracks.iter().enumerate() {
+        synth.all_notes_off(t as i32);
+        if track.clips.get(scene).is_some_and(|c| c.is_some()) {
+            synth.program_change(t as i32, track.instrument.gm_program as i32);
+        }
+    }
 }
 
 /// Fixed 8-hit GM kit for PRESET-mode pads (D12): kick snare rim clap chh ohh tom crash.
@@ -385,8 +397,8 @@ fn main() {
             let mut cycle: u64 = 0;
             let mut total_samples: u64 = 0; // frames rendered so far (master clock domain)
             let mut playing_since: Option<u64> = None; // sample index where Play fired
-            let mut active_scene: Option<usize> = None;
-            let mut pending_launch: Option<(usize, Quantize)> = None; // (scene, quantize)
+            // Scene/launch state machine — pure & unit-tested (transport.rs).
+            let mut transport = transport::Transport::default();
             // Recording (D16): (base step, events with take-local ticks).
             // Capture happens in the drain loop — the audio thread owns both
             // the clock and the event stream, so stamping is exact and needs
@@ -419,18 +431,10 @@ fn main() {
                     match cmd {
                         EngineCommand::SetProject(pf) => {
                             apply_swap(pf, &mut project, &mut bpm, &mut takes, &mut mine, &synth);
-                            // A PUT may shrink the scene list; a dangling
-                            // active index would play nothing / wrong column.
-                            let dangling_active =
-                                active_scene.is_some_and(|i| i >= project.scenes.len());
-                            let dangling_pending =
-                                pending_launch.is_some_and(|(i, _)| i >= project.scenes.len());
-                            if dangling_active {
-                                active_scene = None;
+                            // A PUT may shrink the scene list; drop any
+                            // dangling active/pending launch.
+                            if transport.clamp_scenes(project.scenes.len()) {
                                 a_stats.live.active_scene.store(0, Ordering::Relaxed);
-                            }
-                            if dangling_pending {
-                                pending_launch = None;
                             }
                             a_stats
                                 .project_updates
@@ -513,6 +517,7 @@ fn main() {
                                 Event::Play => {
                                     if playing_since.is_none() {
                                         playing_since = Some(total_samples);
+                                        transport.playing = true;
                                     }
                                 }
                                 Event::Stop => {
@@ -535,8 +540,7 @@ fn main() {
                                     }
                                     a_stats.live.recording.store(false, Ordering::Relaxed);
                                     playing_since = None;
-                                    active_scene = None;
-                                    pending_launch = None;
+                                    transport.stop();
                                     a_stats.live.active_scene.store(0, Ordering::Relaxed);
                                     for t in 0..project.tracks.len() as i32 {
                                         synth.all_notes_off(t);
@@ -546,6 +550,7 @@ fn main() {
                                     if recording.is_none() {
                                         if playing_since.is_none() {
                                             playing_since = Some(total_samples);
+                                            transport.playing = true;
                                         }
                                         let base = clock::steps_elapsed(
                                             total_samples - playing_since.unwrap_or(total_samples),
@@ -586,48 +591,31 @@ fn main() {
                                     };
                                 }
                                 Event::LaunchScene { index } => {
-                                    // A scene the current project does not have
-                                    // (pad 8 after a shrink to 3 scenes) is
-                                    // IGNORED — this once panicked ps-audio and
-                                    // killed all sound until restart.
-                                    let Some(scene) = project.scenes.get(index) else {
-                                        continue; // silently ignored (no syscalls here)
-                                    };
-                                    let q = scene.quantize.unwrap_or(Quantize::NextBar);
-                                    if playing_since.is_none() {
-                                        // Launching from stopped starts playback now.
-                                        playing_since = Some(total_samples);
-                                        active_scene = Some(index);
-                                        a_stats
-                                            .live
-                                            .active_scene
-                                            .store(index as u8 + 1, Ordering::Relaxed);
-                                        for (t, track) in project.tracks.iter().enumerate() {
-                                            synth.all_notes_off(t as i32);
-                                            if track.clips.get(index).is_some_and(|c| c.is_some()) {
-                                                synth.program_change(
-                                                    t as i32,
-                                                    track.instrument.gm_program as i32,
-                                                );
-                                            }
+                                    // Scenes the project does not have (e.g.
+                                    // pad 8 after a shrink) resolve to None
+                                    // and are IGNORED — see transport.rs.
+                                    let q = project
+                                        .scenes
+                                        .get(index)
+                                        .map(|s| s.quantize.unwrap_or(Quantize::NextBar));
+                                    match transport.launch(index, q) {
+                                        transport::Effect::Start { scene } => {
+                                            // Launching from stopped starts playback now.
+                                            playing_since = Some(total_samples);
+                                            a_stats
+                                                .live
+                                                .active_scene
+                                                .store(scene as u8 + 1, Ordering::Relaxed);
+                                            apply_scene_voice(&synth, &project, scene);
                                         }
-                                    } else if q == Quantize::Immediate {
-                                        active_scene = Some(index);
-                                        a_stats
-                                            .live
-                                            .active_scene
-                                            .store(index as u8 + 1, Ordering::Relaxed);
-                                        for (t, track) in project.tracks.iter().enumerate() {
-                                            synth.all_notes_off(t as i32);
-                                            if track.clips.get(index).is_some_and(|c| c.is_some()) {
-                                                synth.program_change(
-                                                    t as i32,
-                                                    track.instrument.gm_program as i32,
-                                                );
-                                            }
+                                        transport::Effect::Switch { scene } => {
+                                            a_stats
+                                                .live
+                                                .active_scene
+                                                .store(scene as u8 + 1, Ordering::Relaxed);
+                                            apply_scene_voice(&synth, &project, scene);
                                         }
-                                    } else {
-                                        pending_launch = Some((index, q));
+                                        transport::Effect::Queued | transport::Effect::Ignore => {}
                                     }
                                 }
                             }
@@ -649,27 +637,12 @@ fn main() {
                         let mut p = b0.ceil() as u64; // first beat position reached this period
                         while (p as f64) < b1 {
                             // Apply a pending scene launch at its quantized boundary.
-                            if let Some((i, q)) = pending_launch
-                                && match q {
-                                    Quantize::NextBar => p.is_multiple_of(4),
-                                    _ => true,
-                                }
-                            {
-                                pending_launch = None;
-                                active_scene = Some(i);
+                            if let Some(i) = transport.tick(p) {
                                 a_stats
                                     .live
                                     .active_scene
                                     .store(i as u8 + 1, Ordering::Relaxed);
-                                for (t, track) in project.tracks.iter().enumerate() {
-                                    synth.all_notes_off(t as i32);
-                                    if track.clips.get(i).is_some_and(|c| c.is_some()) {
-                                        synth.program_change(
-                                            t as i32,
-                                            track.instrument.gm_program as i32,
-                                        );
-                                    }
-                                }
+                                apply_scene_voice(&synth, &project, i);
                             }
                             // Metronome (D16): fires ONLY while recording —
                             // never during plain playback, never captured.
@@ -683,22 +656,24 @@ fn main() {
                         }
 
                         // Pattern playback: 16th-gated step notes for the active scene.
-                        if let Some(scene) = active_scene {
+                        if let Some(scene) = transport.active {
                             let s0 = clock::steps_elapsed(total_samples - start, RATE, bpm);
                             let s1 = clock::steps_elapsed(
                                 total_samples + PERIOD_FRAMES as u64 - start,
                                 RATE,
                                 bpm,
                             );
-                            let mut k = s0.ceil() as u64; // first step reached this period
-                            while (k as f64) < s1 {
+                            let (first, last) = transport::Transport::step_window(s0, s1);
+                            for k in first..last {
                                 for (t, track) in project.tracks.iter().enumerate() {
                                     if let Some(Some(clip)) = track.clips.get(scene) {
                                         let len = clip.pattern.steps.len() as u64;
                                         // 16th gating: off the previous step's note,
                                         // on this one (sustains = repeated pitches).
+                                        // saturating: k==0 when a launch starts the
+                                        // clock mid-period (used to underflow).
                                         if let Some(n) =
-                                            clip.pattern.steps[((k - 1) % len) as usize]
+                                            clip.pattern.steps[(k.saturating_sub(1) % len) as usize]
                                         {
                                             synth.note_off(t as i32, n.pitch as i32);
                                         }
@@ -711,7 +686,6 @@ fn main() {
                                         }
                                     }
                                 }
-                                k += 1;
                             }
                         }
 
