@@ -26,8 +26,8 @@ use alsa::pcm::{Access, Format, Frames, PCM};
 use alsa::{Direction, ValueOr};
 use pocketstage_midi::{PumpMessage, spawn_pump};
 use pocketstage_model::{
-    Clip, Pattern, ProjectFile, Quantize, RecordedEvent, SCHEMA_VERSION, STEPS_PER_BAR, StepNote,
-    Take, Track,
+    Clip, Pattern, Project, ProjectFile, Quantize, RecordedEvent, SCHEMA_VERSION, STEPS_PER_BAR,
+    StepNote, Take, Track,
 };
 use pocketstage_oxygen::{Action, Mapper, Mode, default_mapping, hui_mapping};
 use pocketstage_server::{AppState, EngineCommand, LiveStatus, ProjectStore};
@@ -77,6 +77,33 @@ fn apply_track_voice(synth: &ffi::Synth, chan: i32, track: &Track) {
         .round()
         .clamp(0.0, 127.0) as i32;
     synth.cc(chan, 10, pan);
+}
+
+/// Apply a store-validated project swap to the audio thread's state.
+/// Takes adopt the incoming order/mute flags (a PUT can also delete); takes
+/// finalized this boot that the store has not absorbed yet are kept — the
+/// take-feed drains on its own tick and must not lose one to a racing swap.
+fn apply_swap(
+    pf: ProjectFile,
+    project: &mut Project,
+    bpm: &mut f64,
+    takes: &mut Vec<Take>,
+    mine: &[String],
+    synth: &ffi::Synth,
+) {
+    let mut new = pf.project;
+    let mut adopted = std::mem::take(&mut new.takes);
+    for t in takes.drain(..) {
+        if mine.contains(&t.name) && !adopted.iter().any(|a| a.name == t.name) {
+            adopted.push(t);
+        }
+    }
+    *takes = adopted;
+    *bpm = new.bpm;
+    for (t, track) in new.tracks.iter().enumerate() {
+        apply_track_voice(synth, t as i32, track);
+    }
+    *project = new;
 }
 
 /// Fixed 8-hit GM kit for PRESET-mode pads (D12): kick snare rim clap chh ohh tom crash.
@@ -135,6 +162,16 @@ enum Event {
     },
     /// D13 settings key (letter B in DAW mode): cycle loop_bars 2→4→8→16→2.
     CycleLoopBars,
+}
+
+/// Wrap an engine event that arrived from the HTTP lane as a TimedEvent
+/// (both timestamps are "now" — latency for a web click is irrelevant).
+fn remote(event: Event) -> TimedEvent {
+    TimedEvent {
+        intended: Instant::now(),
+        sent: Instant::now(),
+        event,
+    }
 }
 
 /// An event plus the wall-clock time it was *intended* to fire. The audio
@@ -352,6 +389,9 @@ fn main() {
             // boot-seeded takes are purely store-owned and vanish when a PUT
             // drops or mutes them.
             let mut mine: Vec<String> = Vec::new();
+            // Remote (web) transport/scene commands, translated to Events in
+            // step 0 and consumed by the same drain as hardware events.
+            let mut remote_ev: std::collections::VecDeque<TimedEvent> = Default::default();
             a_stats
                 .live
                 .takes
@@ -359,33 +399,42 @@ fn main() {
             loop {
                 // 0) HTTP commands. Payloads are store-validated; the swap +
                 // dealloc runs here (user-initiated, rare) — deliberate
-                // exception to the audio-thread no-allocation rule.
-                if let Ok(EngineCommand::SetProject(pf)) = crx.try_recv() {
-                    project = pf.project;
-                    bpm = project.bpm;
-                    // Adopt the incoming take state (order + mute flags; a PUT
-                    // can also delete takes). Un-persisted takes finalized this
-                    // boot are kept until the store has absorbed them.
-                    let mut adopted = std::mem::take(&mut project.takes);
-                    for t in takes.drain(..) {
-                        let keep_unsaved =
-                            mine.contains(&t.name) && !adopted.iter().any(|a| a.name == t.name);
-                        if keep_unsaved {
-                            adopted.push(t);
+                // exception to the audio-thread no-allocation rule. Transport/
+                // scene triggers are translated into ordinary events and run
+                // through the same pipeline as hardware (step 1).
+                remote_ev.clear();
+                for _ in 0..16 {
+                    let Ok(cmd) = crx.try_recv() else { break };
+                    match cmd {
+                        EngineCommand::SetProject(pf) => {
+                            apply_swap(pf, &mut project, &mut bpm, &mut takes, &mine, &synth);
+                            a_stats
+                                .project_updates
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
+                        EngineCommand::Play => remote_ev.push_back(remote(Event::Play)),
+                        EngineCommand::Stop => remote_ev.push_back(remote(Event::Stop)),
+                        EngineCommand::Record => {
+                            remote_ev.push_back(remote(Event::StartRecording));
+                        }
+                        EngineCommand::LaunchScene(n) if n >= 1 => {
+                            remote_ev.push_back(remote(Event::LaunchScene {
+                                index: n as usize - 1,
+                            }));
+                        }
+                        _ => {} // non_exhaustive: future commands ignored
                     }
-                    takes = adopted;
-                    for (t, track) in project.tracks.iter().enumerate() {
-                        apply_track_voice(&synth, t as i32, track);
-                    }
-                    a_stats
-                        .project_updates
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                // 1) Drain pending MIDI events (bounded per cycle — writes stay timely).
-                for _ in 0..64 {
-                    match rx.try_recv() {
-                        Ok(te) => {
+
+                // 1) Drain pending events: queued remote commands first, then
+                // the MIDI lane (bounded per cycle — writes stay timely).
+                for _ in 0..80 {
+                    let te = match remote_ev.pop_front().or_else(|| rx.try_recv().ok()) {
+                        Some(te) => te,
+                        None => break,
+                    };
+                    {
+                        {
                             let q_us = te.sent.elapsed().as_micros() as u64;
                             let feed_us = te.intended.elapsed().as_micros() as u64 - q_us;
                             a_stats.events.fetch_add(1, Ordering::Relaxed);
@@ -553,7 +602,6 @@ fn main() {
                                 }
                             }
                         }
-                        Err(_) => break,
                     }
                 }
 

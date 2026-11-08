@@ -41,6 +41,7 @@
   button.alt { background:#2c3238; color:var(--ink); font-weight:400; }
   #msg { margin-top:8px; min-height:18px; font-size:12px; color:var(--dim); }
   #msg.err { color:var(--rec); }
+  #remote button.rec { color:var(--rec); }
 </style>
 </head>
 <body>
@@ -54,6 +55,17 @@
       <div class="cell"><b id="l-scene">–</b><span>scene</span></div>
       <div class="cell"><b id="l-mode">–</b><span>mode</span></div>
       <div class="cell"><b id="l-takes">–</b><span>takes</span></div>
+    </div>
+    <div id="remote" style="margin-top:12px; display:flex; gap:6px; flex-wrap:wrap">
+      <button data-cmd="transport/play" title="play (⌘ transport)">▶</button>
+      <button data-cmd="transport/stop" title="stop">⏹</button>
+      <button data-cmd="transport/record" class="rec" title="record">
+        ⏺</button>
+      <span style="width:10px"></span>
+      <button data-cmd="scene/1">S1</button><button data-cmd="scene/2">S2</button>
+      <button data-cmd="scene/3">S3</button><button data-cmd="scene/4">S4</button>
+      <button data-cmd="scene/5">S5</button><button data-cmd="scene/6">S6</button>
+      <button data-cmd="scene/7">S7</button><button data-cmd="scene/8">S8</button>
     </div>
   </section>
 
@@ -258,6 +270,16 @@ $("toggle").addEventListener("click", () => {
 });
 connect();
 refresh();
+// Remote control: transport + scene chips drive the engine over HTTP —
+// same event path the Oxygen keys take. State comes back via /ws.
+$("remote").addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-cmd]");
+  if (!b) return;
+  try {
+    const r = await fetch("/api/" + b.dataset.cmd, { method: "POST" });
+    if (!r.ok) msg("remote: " + (await r.text()), true);
+  } catch (err) { msg("remote failed: " + err, true); }
+});
 </script>
 </body>
 </html>

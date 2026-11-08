@@ -259,7 +259,11 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    state (mute flags + deletions) while keeping this boot's un-persisted
    takes until the store absorbs them (swap-vs-drain race). Web takes list:
    mute checkbox (dirty-flag Save) + ✕ delete (confirm → immediate PUT).
-8. Web UI follow-ups (deferred): per-scene/clip editing widgets, FX sends
+8. **Remote transport DONE (session 8)**: POST /api/transport/play|stop|
+   record + /api/scene/{1..8} push EngineCommands; the audio thread maps
+   them onto ordinary Events and they run through the SAME drain as
+   hardware (web click == key press, one code path). UI live card gained
+   ▶ ⏹ ⏺ + S1–S8 chips. Next web items: clip matrix/step editor, FX sends
 
 ---
 

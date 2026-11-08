@@ -14,11 +14,12 @@
 //!   the engine. Bad payloads are rejected with the reason and leave disk,
 //!   memory, and the live engine untouched.
 
+use axum::extract::Path as PathParam;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use std::path::{Path, PathBuf};
@@ -40,6 +41,14 @@ pub enum EngineCommand {
     /// Swap the live project. Payload was validated by [`ProjectStore::replace`]
     /// before it got here.
     SetProject(ProjectFile),
+    /// Start playback (master clock from zero) — same semantics as the ⏵ key.
+    Play,
+    /// Stop: finalizes a live take, halts playback — identical to hardware ⏹.
+    Stop,
+    /// ⏺ start capturing a take (metronome on while recording, D16).
+    Record,
+    /// Launch scene `n` (1-based as users count; engine maps to its 0-based).
+    LaunchScene(u8),
 }
 
 // ------------------------------------------------------------------ store
@@ -256,6 +265,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/project", get(get_project).put(put_project))
         .route("/ws", get(ws_upgrade))
+        .route("/api/transport/play", post(play))
+        .route("/api/transport/stop", post(stop))
+        .route("/api/transport/record", post(record))
+        .route("/api/scene/{n}", post(launch_scene))
         .with_state(state)
 }
 
@@ -360,6 +373,41 @@ async fn ws_pump(mut socket: WebSocket, state: AppState) {
             }
         }
     }
+}
+
+// Remote transport / scene triggers: the web page drives the same event
+// path the Oxygen keys drive. One-way lane; engine applies at its safe point.
+
+async fn play(State(state): State<AppState>) -> Result<StatusCode, (StatusCode, String)> {
+    send_ctrl(&state, EngineCommand::Play)
+}
+async fn stop(State(state): State<AppState>) -> Result<StatusCode, (StatusCode, String)> {
+    send_ctrl(&state, EngineCommand::Stop)
+}
+async fn record(State(state): State<AppState>) -> Result<StatusCode, (StatusCode, String)> {
+    send_ctrl(&state, EngineCommand::Record)
+}
+async fn launch_scene(
+    State(state): State<AppState>,
+    PathParam(n): PathParam<u8>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if !(1..=8).contains(&n) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("scene {n} out of range 1..8"),
+        ));
+    }
+    send_ctrl(&state, EngineCommand::LaunchScene(n))
+}
+
+fn send_ctrl(state: &AppState, cmd: EngineCommand) -> Result<StatusCode, (StatusCode, String)> {
+    let tx = state
+        .engine
+        .as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "no live engine".into()))?;
+    tx.send(cmd)
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "engine lane closed".into()))?;
+    Ok(StatusCode::ACCEPTED)
 }
 
 async fn put_project(

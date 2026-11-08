@@ -276,3 +276,63 @@ fn drain_takes_appends_to_stored_project() {
     assert_eq!(names, vec!["Take 1".to_string()]);
     cleanup(&path);
 }
+
+#[tokio::test]
+async fn remote_transport_routes() {
+    let path = temp_path("remote");
+    cleanup(&path);
+    let (tx, rx) = std::sync::mpsc::channel::<EngineCommand>();
+    let (_ptx, prx) = std::sync::mpsc::channel::<pocketstage_model::Take>();
+    let app = router(AppState::embedded(
+        std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap()),
+        tx,
+        std::sync::Arc::new(crate::LiveStatus::default()),
+        prx,
+    ));
+
+    for (uri, expect) in [
+        ("/api/transport/play", EngineCommand::Play),
+        ("/api/transport/stop", EngineCommand::Stop),
+        ("/api/transport/record", EngineCommand::Record),
+        ("/api/scene/3", EngineCommand::LaunchScene(3)),
+    ] {
+        let (status, _) = call(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{uri}");
+        let got = rx.try_recv().unwrap();
+        assert_eq!(format!("{got:?}"), format!("{expect:?}"), "{uri}");
+    }
+
+    // Scene out of range → 400, engine untouched.
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/api/scene/9")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(rx.try_recv().is_err());
+
+    // Standalone (no engine) → 503.
+    let solo = router(test_state(&path));
+    let (status, _) = call(
+        solo,
+        Request::builder()
+            .method("POST")
+            .uri("/api/transport/play")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
