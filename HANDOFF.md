@@ -248,7 +248,13 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    (auto-reconnect), recorded-take list (re-fetched when the take count
    changes), project editor (name/bpm/loop bars + raw JSON escape hatch) via
    GET/PUT /api/project. Mixer view deferred until FX exist.
-6. Web UI follow-ups (deferred): mixer view, per-scene/clip editing widgets
+6. **Mixer slice DONE (session 8)**: `Track.gain/pan/mute` (additive optional
+   fields — schema policy kept at v1), engine applies CC7/CC10 per track at
+   boot + every project swap (`apply_track_voice`); web UI gains a Mixer card
+   (per-track gain/pan sliders + mute, dirty-flag Save). No new endpoints —
+   mixer edits ride PUT /api/project. Live-verified: PUT → 204, swaps=1,
+   xruns=0.
+7. Web UI follow-ups (deferred): per-scene/clip editing widgets, FX sends
 
 ---
 

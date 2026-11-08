@@ -27,7 +27,7 @@ use alsa::{Direction, ValueOr};
 use pocketstage_midi::{PumpMessage, spawn_pump};
 use pocketstage_model::{
     Clip, Pattern, ProjectFile, Quantize, RecordedEvent, SCHEMA_VERSION, STEPS_PER_BAR, StepNote,
-    Take,
+    Take, Track,
 };
 use pocketstage_oxygen::{Action, Mapper, Mode, default_mapping, hui_mapping};
 use pocketstage_server::{AppState, EngineCommand, LiveStatus, ProjectStore};
@@ -59,6 +59,24 @@ const PAD_CH_BASE: i32 = 8;
 #[inline]
 fn is_pad_channel(chan: i32) -> bool {
     (TICK_CH..=15).contains(&chan)
+}
+
+/// Apply a track's voice state — program + mixer — to its internal channel
+/// (D3: track N → channel N). Mute is CC7=0; gain 0..=2 maps onto CC7;
+/// pan −1..=+1 maps onto CC10. Called at boot and on every project swap, so
+/// mixer edits ride the existing PUT → SetProject path with no new plumbing.
+fn apply_track_voice(synth: &ffi::Synth, chan: i32, track: &Track) {
+    synth.program_change(chan, track.instrument.gm_program as i32);
+    let gain = if track.mute {
+        0.0
+    } else {
+        track.gain.unwrap_or(1.0)
+    };
+    synth.cc(chan, 7, (gain * 127.0).round() as i32);
+    let pan = ((track.pan.unwrap_or(0.0) + 1.0) * 63.5)
+        .round()
+        .clamp(0.0, 127.0) as i32;
+    synth.cc(chan, 10, pan);
 }
 
 /// Fixed 8-hit GM kit for PRESET-mode pads (D12): kick snare rim clap chh ohh tom crash.
@@ -309,10 +327,10 @@ fn main() {
             let mut right = vec![0f32; PERIOD_FRAMES];
             let mut out = vec![0i16; PERIOD_FRAMES * 2]; // interleaved
 
-            // Track programs (D3: track N → internal channel N). Keys on
-            // channel 0 thus play track 1's instrument.
+            // Track programs + mixer (D3: track N → internal channel N).
+            // Keys on channel 0 thus play track 1's instrument (and level).
             for (t, track) in project.tracks.iter().enumerate() {
-                synth.program_change(t as i32, track.instrument.gm_program as i32);
+                apply_track_voice(&synth, t as i32, track);
             }
 
             let mut bpm = project.bpm;
@@ -341,7 +359,7 @@ fn main() {
                     project = pf.project;
                     bpm = project.bpm;
                     for (t, track) in project.tracks.iter().enumerate() {
-                        synth.program_change(t as i32, track.instrument.gm_program as i32);
+                        apply_track_voice(&synth, t as i32, track);
                     }
                     a_stats
                         .project_updates

@@ -314,3 +314,56 @@ fn unsorted_take_is_rejected() {
         ValidationError::UnsortedTake { take: "bad".into() }
     );
 }
+
+// ------------------------------------------------------- mixer (web slice 5)
+
+#[test]
+fn mixer_fields_default_when_absent() {
+    // Pre-mixer files must parse unchanged: gain/pan None, mute false.
+    let json = r#"{
+        "version": 1,
+        "project": {
+            "name": "PreMixer",
+            "tracks": [{ "name": "T1", "instrument": {}, "clips": [null] }],
+            "scenes": [{ "name": "A" }]
+        }
+    }"#;
+    let file = ProjectFile::from_json_str(json).unwrap();
+    let t = &file.project.tracks[0];
+    assert_eq!(t.gain, None);
+    assert_eq!(t.pan, None);
+    assert!(!t.mute);
+    file.validate().unwrap();
+}
+
+#[test]
+fn mixer_values_round_trip_and_validate() {
+    let mut p = sample_project();
+    p.tracks[0].gain = Some(0.5);
+    p.tracks[0].pan = Some(-1.0);
+    p.tracks[0].mute = true;
+    p.validate().unwrap();
+    let file = ProjectFile {
+        version: SCHEMA_VERSION,
+        project: p.clone(),
+    };
+    let json = file.to_json_pretty().unwrap();
+    let back = ProjectFile::from_json_str(&json).unwrap();
+    assert_eq!(back.project, p);
+}
+
+#[test]
+fn mixer_range_checks() {
+    let mut p = sample_project();
+    p.tracks[0].gain = Some(2.5);
+    assert!(matches!(
+        p.validate().unwrap_err(),
+        ValidationError::GainOutOfRange { .. }
+    ));
+    p.tracks[0].gain = Some(0.0);
+    p.tracks[0].pan = Some(-1.5);
+    assert!(matches!(
+        p.validate().unwrap_err(),
+        ValidationError::PanOutOfRange { .. }
+    ));
+}

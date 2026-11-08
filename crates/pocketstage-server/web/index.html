@@ -21,6 +21,12 @@
   .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(90px,1fr)); gap:8px; }
   .cell b { display:block; font-size:19px; }
   .cell span { color:var(--dim); font-size:11px; text-transform:uppercase; }
+  .mrow { display:grid; grid-template-columns:90px 34px 1fr 46px 1fr 46px; gap:8px;
+          align-items:center; padding:5px 0; }
+  .mrow.muted .tname { color:var(--dim); text-decoration:line-through; }
+  .mrow input[type=range] { padding:0; width:100%; }
+  .mval { font-size:11px; color:var(--dim); text-align:right; }
+  .chip { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:5px; }
   ul { list-style:none; margin:0; padding:0; }
   li { display:flex; justify-content:space-between; padding:6px 2px; border-bottom:1px solid #2a2f35; }
   li:last-child { border:0; }
@@ -52,6 +58,11 @@
   </section>
 
   <section class="card">
+    <h2>Mixer</h2>
+    <div id="mixer"><em>No tracks.</em></div>
+  </section>
+
+  <section class="card">
     <h2>Recorded takes</h2>
     <ul id="takes"><li><em>none yet</em></li></ul>
   </section>
@@ -74,6 +85,10 @@
 const $ = (id) => document.getElementById(id);
 let project = null;          // last ProjectFile fetched from the server
 let liveTakes = -1;          // take count seen in the latest WS frame (array)
+let dirty = false;           // local edits not yet PUT to the store
+
+function setSave() { $("save").textContent = dirty ? "Save ●" : "Save"; }
+function markDirty() { dirty = true; setSave(); }
 
 function msg(text, isErr) {
   const el = $("msg");
@@ -81,11 +96,59 @@ function msg(text, isErr) {
   el.className = isErr ? "err" : "";
 }
 
+function renderMixer(pf) {
+  const box = $("mixer");
+  box.innerHTML = "";
+  const tracks = pf.project.tracks || [];
+  if (!tracks.length) { box.innerHTML = "<em>No tracks.</em>"; return; }
+  for (const t of tracks) {
+    const row = document.createElement("div");
+    row.className = "mrow" + (t.mute ? " muted" : "");
+
+    const name = document.createElement("span");
+    name.className = "tname";
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.style.background = `rgb(${(t.color || [200, 200, 200]).join(",")})`;
+    name.append(chip, document.createTextNode(t.name));
+
+    const mute = document.createElement("input");
+    mute.type = "checkbox"; mute.checked = !!t.mute; mute.title = "mute";
+
+    const gain = document.createElement("input");
+    gain.type = "range"; gain.min = 0; gain.max = 2; gain.step = 0.01;
+    gain.value = t.gain ?? 1; gain.title = "gain 0..2";
+    const gval = document.createElement("span"); gval.className = "mval";
+
+    const pan = document.createElement("input");
+    pan.type = "range"; pan.min = -1; pan.max = 1; pan.step = 0.05;
+    pan.value = t.pan ?? 0; pan.title = "pan L..R";
+    const pval = document.createElement("span"); pval.className = "mval";
+
+    const labels = () => {
+      gval.textContent = (+gain.value).toFixed(2);
+      pval.textContent = (+pan.value).toFixed(2);
+    };
+    labels();
+
+    gain.addEventListener("input", () => { t.gain = +gain.value; markDirty(); labels(); });
+    pan.addEventListener("input", () => { t.pan = +pan.value; markDirty(); labels(); });
+    mute.addEventListener("input", () => {
+      t.mute = mute.checked; row.classList.toggle("muted", mute.checked);
+      markDirty();
+    });
+
+    row.append(name, mute, gain, gval, pan, pval);
+    box.appendChild(row);
+  }
+}
+
 function renderProject(pf) {
   project = pf;
   $("p-name").value = pf.project.name;
   $("p-bpm").value = pf.project.bpm;
   $("p-loop").value = pf.project.loop_bars;
+  renderMixer(pf);
   if (!$("raw").hidden) $("raw").value = JSON.stringify(pf, null, 2);
   const ul = $("takes");
   ul.innerHTML = "";
@@ -122,6 +185,7 @@ async function save() {
     const r = await fetch("/api/project", { method: "PUT",
       headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
     if (!r.ok) { msg("rejected: " + (await r.text()), true); return; }
+    dirty = false; setSave();
     msg("saved — engine applies at next safe point");
     refresh();
   } catch (e) { msg("save failed: " + e, true); }
@@ -148,6 +212,9 @@ function connect() {
   };
 }
 
+$("p-name").addEventListener("input", markDirty);
+$("p-bpm").addEventListener("input", markDirty);
+$("p-loop").addEventListener("input", markDirty);
 $("save").addEventListener("click", save);
 $("toggle").addEventListener("click", () => {
   const raw = $("raw");

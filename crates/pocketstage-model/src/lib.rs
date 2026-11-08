@@ -75,6 +75,10 @@ pub enum ValidationError {
     LoopBarsOutOfRange(u8),
     #[error("take '{take}' events not sorted by tick")]
     UnsortedTake { take: String },
+    #[error("track '{track}' gain {gain} out of range 0..=2")]
+    GainOutOfRange { track: String, gain: f64 },
+    #[error("track '{track}' pan {pan} out of range -1..=1")]
+    PanOutOfRange { track: String, pan: f64 },
 }
 
 // ---------------------------------------------------------------- top level
@@ -190,6 +194,9 @@ impl Project {
                     },
                     clips: vec![None; MAX_SCENES],
                     channel: None,
+                    gain: None,
+                    pan: None,
+                    mute: false,
                 })
                 .collect(),
             scenes: (1..=MAX_SCENES)
@@ -244,6 +251,22 @@ impl Project {
                 return Err(ValidationError::ChannelOutOfRange {
                     track: track.name.clone(),
                     channel: ch,
+                });
+            }
+            if let Some(g) = track.gain
+                && !(0.0..=2.0).contains(&g)
+            {
+                return Err(ValidationError::GainOutOfRange {
+                    track: track.name.clone(),
+                    gain: g,
+                });
+            }
+            if let Some(p) = track.pan
+                && !(-1.0..=1.0).contains(&p)
+            {
+                return Err(ValidationError::PanOutOfRange {
+                    track: track.name.clone(),
+                    pan: p,
                 });
             }
             for clip in track.clips.iter().flatten() {
@@ -310,6 +333,17 @@ pub struct Track {
     /// for a GM drum track, which must sit on channel 9.
     #[serde(default)]
     pub channel: Option<u8>,
+    /// Mixer gain multiplier; `None` = 1.0. Applied as CC7 on the track's
+    /// channel (mute is CC7=0 — no extra engine state).
+    #[serde(default)]
+    pub gain: Option<f64>,
+    /// Stereo pan −1 (left) ..= +1 (right); `None` = center. Applied as CC10
+    /// (`(pan + 1) × 63.5`).
+    #[serde(default)]
+    pub pan: Option<f64>,
+    /// Mute this track (CC7=0 regardless of `gain`).
+    #[serde(default)]
+    pub mute: bool,
 }
 
 fn default_color() -> [u8; 3] {

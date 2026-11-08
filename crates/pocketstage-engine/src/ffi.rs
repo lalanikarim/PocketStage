@@ -51,6 +51,8 @@ unsafe extern "C" {
         chan: c_int,
         program: c_int,
     ) -> c_int;
+    pub fn fluid_synth_cc(synth: *mut fluid_synth_t, chan: c_int, ctrl: c_int, val: c_int)
+    -> c_int;
     pub fn fluid_synth_bank_select(synth: *mut fluid_synth_t, chan: c_int, bank: c_int) -> c_int;
     pub fn fluid_synth_all_sounds_off(synth: *mut fluid_synth_t, chan: c_int) -> c_int;
     pub fn fluid_synth_set_channel_type(
@@ -151,6 +153,12 @@ impl Synth {
     #[inline]
     pub fn all_notes_off(&self, chan: i32) {
         unsafe { fluid_synth_all_notes_off(self.0, chan) };
+    }
+
+    /// Send a control change (used for mixer CC7 volume / CC10 pan).
+    #[inline]
+    pub fn cc(&self, chan: i32, ctrl: i32, val: i32) {
+        unsafe { fluid_synth_cc(self.0, chan, ctrl, val) };
     }
 
     /// Select the bank subsequent program changes on `chan` resolve against
