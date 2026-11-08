@@ -92,10 +92,9 @@ fn replace_creates_missing_parent_dirs() {
 // ------------------------------------------------------------------ HTTP
 
 fn test_state(path: &std::path::Path) -> AppState {
-    AppState {
-        store: std::sync::Arc::new(ProjectStore::open_or_default(path).unwrap()),
-        engine: None,
-    }
+    AppState::standalone(std::sync::Arc::new(
+        ProjectStore::open_or_default(path).unwrap(),
+    ))
 }
 
 async fn call(app: axum::Router, req: Request<Body>) -> (StatusCode, String) {
@@ -183,10 +182,13 @@ async fn put_forwards_valid_project_to_engine_channel() {
     let path = temp_path("engine-cmd");
     cleanup(&path);
     let (tx, rx) = std::sync::mpsc::channel::<EngineCommand>();
-    let app = router(AppState {
-        store: std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap()),
-        engine: Some(tx),
-    });
+    let (_ptx, prx) = std::sync::mpsc::channel::<pocketstage_model::Take>();
+    let app = router(AppState::embedded(
+        std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap()),
+        tx,
+        std::sync::Arc::new(crate::LiveStatus::default()),
+        prx,
+    ));
 
     // Invalid payload → 400 and NOTHING reaches the engine.
     let (status, _) = call(
@@ -221,5 +223,39 @@ async fn put_forwards_valid_project_to_engine_channel() {
         Ok(EngineCommand::SetProject(got)) => assert_eq!(got.project.name, "Live"),
         other => panic!("expected SetProject, got {other:?}"),
     }
+    cleanup(&path);
+}
+
+#[test]
+fn drain_takes_appends_to_stored_project() {
+    let path = temp_path("drain");
+    cleanup(&path);
+    let (ptx, prx) = std::sync::mpsc::channel::<pocketstage_model::Take>();
+    let state = AppState::embedded(
+        std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap()),
+        std::sync::mpsc::channel::<EngineCommand>().0,
+        std::sync::Arc::new(crate::LiveStatus::default()),
+        prx,
+    );
+
+    let take = pocketstage_model::Take {
+        name: "Take 1".into(),
+        events: vec![pocketstage_model::RecordedEvent::NoteOn {
+            tick: 0,
+            channel: 0,
+            pitch: 60,
+            velocity: 90,
+        }],
+    };
+    ptx.send(take).unwrap();
+    assert_eq!(state.drain_takes(), 1);
+    assert_eq!(state.drain_takes(), 0);
+
+    // Persisted into the project file (survives restart) …
+    let reloaded = ProjectStore::open_or_default(&path).unwrap();
+    assert_eq!(reloaded.get().project.takes.len(), 1);
+    // … and surfaced through the WS status snapshot.
+    let (_status, names) = state.status();
+    assert_eq!(names, vec!["Take 1".to_string()]);
     cleanup(&path);
 }

@@ -42,7 +42,7 @@ in CI or automated loops; there are no device-free integration tests for it yet.
 | `crates/pocketstage-model` | project data model + versioned file format | serde/serde_json/thiserror **only** — no audio, no MIDI, no I/O side effects |
 | `crates/pocketstage-midi` | port discovery, streaming parser, hotplug, event pump (`spawn_pump` → mpsc) | `alsa`, `libc`; parser is pure |
 | `crates/pocketstage-oxygen` | Oxygen 49 MKV input mapper (measured map → semantic `Action`s) | pure logic + serde; demo bin uses the midi pump. LED feedback pending T2 |
-| `pocketstage-server` | axum HTTP control plane (REST project CRUD; WS snapshots planned) | `axum`, `tokio`, model — never audio |
+| `pocketstage-server` | axum HTTP control plane: REST project CRUD, `/ws` status push, take persistence | `axum`, `tokio`, model — never audio |
 
 Rules that keep this architecture intact:
 
@@ -121,4 +121,6 @@ on Play — all live-verified); web control plane slices 1–2 ✅ (axum REST
 embedded in the engine via EngineCommand channel; project boots from
 ~/.pocketstage/project.json). Next up: the mode-gated layer of R11 (drum-kit
 pads / DAW selectors) — blocked by the T6 cc113 mode-detection probe (~5 min
-attended); unblocked next: web slice 3 (WS state snapshots) + take saving.
+attended); web slices 1–3 ✅ (`/ws` status push; takes persist to the project file and
+survive reboot). Next up: the mode-gated layer of R11 — blocked by the T6
+cc113 probe; unblocked next: web slice 4 (minimal UI) or overdub UX.

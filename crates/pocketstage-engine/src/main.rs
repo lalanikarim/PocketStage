@@ -30,7 +30,7 @@ use pocketstage_model::{
     Take,
 };
 use pocketstage_oxygen::{Action, Mapper, default_mapping, hui_mapping};
-use pocketstage_server::{AppState, EngineCommand, ProjectStore};
+use pocketstage_server::{AppState, EngineCommand, LiveStatus, ProjectStore};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
@@ -95,13 +95,9 @@ struct Stats {
     q_max_us: AtomicU64,         // worst queue wait in window
     feed_max_us: AtomicU64,      // worst feeder jitter (sent - intended) in window
     delay_frames_max: AtomicU64, // max snd_pcm_delay seen in window (output-side queue)
-    // Transport *levels* (read by the stats thread, never reset):
-    playing: std::sync::atomic::AtomicBool,
-    pos_beats_x1000: std::sync::atomic::AtomicU32,
-    /// Active scene, stored 1-based; 0 = none.
-    active_scene: std::sync::atomic::AtomicU8,
-    recording: std::sync::atomic::AtomicBool,
-    takes: std::sync::atomic::AtomicU8,
+    // Transport *levels* — shared with the HTTP/WS layer (Arc'd so the
+    // server reads the very same atomics the audio thread writes).
+    live: Arc<LiveStatus>,
     /// Live project swaps via HTTP (cumulative).
     project_updates: std::sync::atomic::AtomicU64,
 }
@@ -216,17 +212,21 @@ fn main() {
     // HTTP → audio-thread command lane (single writer: the server only ever
     // *requests* state changes; the drain loop applies them — R5).
     let (ctx, crx) = mpsc::channel::<EngineCommand>();
-    let stats = Arc::new(Stats::default());
+    // Finalized takes flow back the other way: audio → HTTP layer, which
+    // appends them to the saved project so recordings survive reboot.
+    let (take_feed, take_rx) = mpsc::channel::<Take>();
+    let live = Arc::new(LiveStatus::default());
+    let stats = Arc::new(Stats {
+        live: Arc::clone(&live),
+        ..Default::default()
+    });
 
     // ---- embedded HTTP control plane (own thread + tokio runtime) ---------
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(7777);
-    let http_state = AppState {
-        store: Arc::clone(&store),
-        engine: Some(ctx),
-    };
+    let http_state = AppState::embedded(Arc::clone(&store), ctx, Arc::clone(&live), take_rx);
     match pocketstage_server::spawn_engine_server(http_state, ([0, 0, 0, 0], port).into()) {
         Ok(()) => println!("[server] control plane on http://0.0.0.0:{port} (LAN-trusted)"),
         Err(e) => eprintln!("[server] NOT started ({e}) — audio unaffected"),
@@ -273,7 +273,13 @@ fn main() {
             // the clock and the event stream, so stamping is exact and needs
             // no atomics or main-thread changes.
             let mut recording: Option<(u64, Vec<RecordedEvent>)> = None;
-            let mut takes: Vec<Take> = Vec::new();
+            // Takes persisted in the project (earlier sessions) are live from
+            // t=0; new finalizes append to the file via the take feed.
+            let mut takes: Vec<Take> = std::mem::take(&mut project.takes);
+            a_stats
+                .live
+                .takes
+                .store(takes.len().min(u8::MAX as usize) as u8, Ordering::Relaxed);
             loop {
                 // 0) HTTP commands. Payloads are store-validated; the swap +
                 // dealloc runs here (user-initiated, rare) — deliberate
@@ -347,16 +353,17 @@ fn main() {
                                             name: format!("Take {}", takes.len() + 1),
                                             events: evs,
                                         };
-                                        a_stats.takes.fetch_add(1, Ordering::Relaxed);
-                                        // (Project mirroring lands with save/load; the
-                                        // audio-thread `takes` vec is the live truth.)
+                                        a_stats.live.takes.fetch_add(1, Ordering::Relaxed);
+                                        // Hand the finalized take to the HTTP layer
+                                        // (clone + try_send: user-initiated, rare).
+                                        let _ = take_feed.send(take.clone());
                                         takes.push(take);
                                     }
-                                    a_stats.recording.store(false, Ordering::Relaxed);
+                                    a_stats.live.recording.store(false, Ordering::Relaxed);
                                     playing_since = None;
                                     active_scene = None;
                                     pending_launch = None;
-                                    a_stats.active_scene.store(0, Ordering::Relaxed);
+                                    a_stats.live.active_scene.store(0, Ordering::Relaxed);
                                     for t in 0..project.tracks.len() as i32 {
                                         synth.all_notes_off(t);
                                     }
@@ -372,7 +379,7 @@ fn main() {
                                             bpm,
                                         ) as u64;
                                         recording = Some((base, Vec::new()));
-                                        a_stats.recording.store(true, Ordering::Relaxed);
+                                        a_stats.live.recording.store(true, Ordering::Relaxed);
                                     }
                                 }
                                 Event::LaunchScene { index } => {
@@ -383,6 +390,7 @@ fn main() {
                                         playing_since = Some(total_samples);
                                         active_scene = Some(index);
                                         a_stats
+                                            .live
                                             .active_scene
                                             .store(index as u8 + 1, Ordering::Relaxed);
                                         for (t, track) in project.tracks.iter().enumerate() {
@@ -397,6 +405,7 @@ fn main() {
                                     } else if q == Quantize::Immediate {
                                         active_scene = Some(index);
                                         a_stats
+                                            .live
                                             .active_scene
                                             .store(index as u8 + 1, Ordering::Relaxed);
                                         for (t, track) in project.tracks.iter().enumerate() {
@@ -440,7 +449,10 @@ fn main() {
                             {
                                 pending_launch = None;
                                 active_scene = Some(i);
-                                a_stats.active_scene.store(i as u8 + 1, Ordering::Relaxed);
+                                a_stats
+                                    .live
+                                    .active_scene
+                                    .store(i as u8 + 1, Ordering::Relaxed);
                                 for (t, track) in project.tracks.iter().enumerate() {
                                     synth.all_notes_off(t as i32);
                                     if track.clips[i].is_some() {
@@ -537,14 +549,15 @@ fn main() {
                             }
                         }
 
-                        a_stats.playing.store(true, Ordering::Relaxed);
+                        a_stats.live.playing.store(true, Ordering::Relaxed);
                         a_stats
+                            .live
                             .pos_beats_x1000
                             .store((b1 * 1000.0) as u32, Ordering::Relaxed);
                     }
                     None => {
-                        a_stats.playing.store(false, Ordering::Relaxed);
-                        a_stats.pos_beats_x1000.store(0, Ordering::Relaxed);
+                        a_stats.live.playing.store(false, Ordering::Relaxed);
+                        a_stats.live.pos_beats_x1000.store(0, Ordering::Relaxed);
                     }
                 }
 
@@ -615,17 +628,17 @@ fn main() {
                 };
                 // Period cadence: how much of the ideal cycle budget (busy vs period duration).
                 let period_us = PERIOD_FRAMES as f64 * 1e6 / RATE as f64;
-                let playing = s_stats.playing.load(Ordering::Relaxed);
+                let playing = s_stats.live.playing.load(Ordering::Relaxed);
                 let (bar, beat) = clock::bar_beat(
-                    s_stats.pos_beats_x1000.load(Ordering::Relaxed) as f64 / 1000.0,
+                    s_stats.live.pos_beats_x1000.load(Ordering::Relaxed) as f64 / 1000.0,
                 );
-                let scene = s_stats.active_scene.load(Ordering::Relaxed);
+                let scene = s_stats.live.active_scene.load(Ordering::Relaxed);
                 let scene_str = if scene == 0 {
                     "-".to_string()
                 } else {
                     format!("S{scene}")
                 };
-                let recording = s_stats.recording.load(Ordering::Relaxed);
+                let recording = s_stats.live.recording.load(Ordering::Relaxed);
                 println!(
                     "[stats] cycles={cycles:5} busy={busy_pct:4.2}% ({:.1} us/{} us period) \
                      events={events:3} queue avg/max={q_avg:6.1}/{q_max:6} us \
@@ -646,7 +659,7 @@ fn main() {
                         "stopped"
                     },
                     scene_str,
-                    s_stats.takes.load(Ordering::Relaxed),
+                    s_stats.live.takes.load(Ordering::Relaxed),
                     s_stats.project_updates.load(Ordering::Relaxed),
                 );
             }

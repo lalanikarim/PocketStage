@@ -226,8 +226,14 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    `~/.pocketstage/project.json`) — boot-project placeholder killed; demo
    content only stamped on a brand-new project and persisted immediately.
    Stats show `swaps=N`. Verified live: PUT → 204, swaps=1, bpm change audible,
-   0 xruns. Remaining: slice 3 WS state snapshots (+ take mirroring into the
-   saved project); slice 4 minimal web UI (project + take list).
+   0 xruns. **Slice 3 DONE:** `GET /ws` WebSocket pushes a status frame every
+   250 ms (`{type,bpm,transport,bar,beat,scene,takes}`) from `LiveStatus`
+   atomics shared with the audio thread (plain stores on the audio path — no
+   locks/alloc); finalized takes stream back over a take-feed channel and are
+   appended to the stored project → **recordings survive reboot** (engine seeds
+   its live takes from the file at boot). Verified: demo session's Take 1 (64
+   events) landed in the JSON; after restart WS immediately shows it. Remaining:
+   slice 4 minimal web UI (project + take list).
 6. Minimal web UI: project load/save, take list, mixer
 
 ---
@@ -397,6 +403,14 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   Stats: `swaps=N`. Live E2E: PUT rename+bpm → 204, swaps=1, disk updated,
   0 xruns. +1 test (engine-channel forwarding; invalid PUTs never reach the
   engine). 61 tests total.
+- **Web server slice 3 (WS snapshots + take persistence)**: `LiveStatus`
+  atomics moved behind the crate boundary — Stats now holds `Arc<LiveStatus>`
+  shared with the server; `/ws` pushes `{type:"status",bpm,transport,bar,beat,
+  scene,takes}` every 250 ms (disconnect-aware). Finalized takes: audio thread
+  `send`s a clone on Stop → tokio-side drain task (250 ms tick) appends to the
+  store's project → atomic file write. Engine seeds live takes from the saved
+  project at boot, so recordings survive reboot (verified: WS shows Take 1 on a
+  fresh start; 64 events persisted). +1 test (`drain_takes`). 62 total.
   Then slices A+B (unblocked parts of the recording design): **A — model prep**
   (`Track::channel` override, `loop_bars` floor + validation, `Take::loop_ticks`
   / `events_at` / sorted-invariant, `RecordedEvent::tick()`; +5 tests) and

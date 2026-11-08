@@ -27,11 +27,7 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("cannot bind :{port}: {e}"));
     println!("[server] listening on http://0.0.0.0:{port} (LAN-trusted, no auth in v0.1)");
-    let state = AppState {
-        store,
-        engine: None,
-    };
-    axum::serve(listener, router(state))
+    axum::serve(listener, router(AppState::standalone(store)))
         .await
         .expect("axum serve");
 }
