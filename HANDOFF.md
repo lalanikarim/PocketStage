@@ -23,8 +23,10 @@ looping 16th-gated step patterns (track N → channel N, D3); `scene=S#` in stat
 Boot project = `Project::default_project()` + demo patterns in scenes 1–2
 (placeholder until project loading). Live-verified: all 8 pads, keys layering,
 0 xruns. Pure clock math in `engine/src/clock.rs` (4 tests).
-**Next slice:** web server (`pocketstage-server`) — project load/save is the
-natural first piece behind it; then SEQ-mode pattern editing.
+**Design pass (session 8):** mode system v2 + recording workflow decided —
+D11–D16, full spec in scratchpad R11. **Next slice: recording** (was: web
+server; the live-jam flow won). Blocked by T6 probe (see §8).
+**Then:** web server (`pocketstage-server`) — project load/save first.
 Remaining hardware work: pedal CC check (needs a pedal).
 
 ---
@@ -196,14 +198,19 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    stopped, D5-quantized while playing (per-scene override honored); active
    column loops as 16th-gated step patterns (track N → channel N). Demo
    patterns in scenes 1–2 of the boot project. Live-verified all 8 pads +
-   keys, 0 xruns. **Next:** web server (project load/save first), then SEQ mode.
+   keys, 0 xruns. **Next:** recording slice (item 4).
    **T2 DONE (session 8), inconclusive**: LEDs are local momentary state;
    Editor port silent both ways; no host-controllable LED protocol found →
    LED-less UX fallback adopted. Part 2 (LED feedback) is therefore **dropped
    unless** M-Audio/community SysEx docs surface later.
    **Remaining hardware tasks**: pedal CC verify when a pedal exists.
-4. Web server (`pocketstage-server`): axum REST + WS, single-writer state snapshots
-5. Minimal web UI: project load/save, take list, mixer
+4. **Recording slice** (design complete — scratchpad R11, D11–D16): mode system v2
+   (PRESET = keys+drums+record; DAW = note-selectors/audition + scene pads), take
+   capture/playback on the master clock, metronome gated to record state, per-track
+   `channel` override + `loop_bars` in the model. **Blocked by T6** (cc113 mode-
+   detection probe — evidence exists from a T2 capture; ~5 min attended session).
+5. Web server (`pocketstage-server`): axum REST + WS, single-writer state snapshots
+6. Minimal web UI: project load/save, take list, mixer
 
 ---
 
@@ -221,6 +228,12 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D8 | Curated defaults: FluidR3 GM base + GeneralUser GS upgrade + patch layer (R8) | ✅ |
 | D9 | mDNS + no auth in v0.1 (LAN-trusted) | Proposed |
 | D10 | Name = **PocketStage** | ✅ |
+| D11 | **Mode system v2**: unit's DAW/PRESET switch = manage/perform split (full spec scratchpad R11); supersedes PLAY/SEQ/MIX trim for v0.1 — SEQ/MIX deferred | ✅ |
+| D12 | Pads bank 1 = fixed 8-hit GM kit (PRESET mode); low-key shadowing accepted — one performance voice at a time | ✅ |
+| D13 | DAW mode: every note is a patch selector + audition; slot = pitch % 12 (octave ignored); full keyboard = browser; settings keys override specific letters (B = loop length) | ✅ |
+| D14 | Fader buttons reserved as channel selectors (MIX era); never scenes/instrument select. Program ‹ › / octave buttons emit no MIDI | ✅ |
+| D15 | Entering DAW mode stops recording (finalizes take), NEVER touches playback; transport owns playback | ✅ |
+| D16 | Recording = multi-channel Take capture; `loop_bars` project setting; Stop → wait for Play; metronome only while armed/recording, never captured | ✅ |
 
 ---
 
@@ -242,6 +255,11 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   keys go missing, check the unit's octave/preset state first. Note the lowest 16
   keys (C2–G3 at oct 0) are *always* pad-shadowed by design; making the pad window
   configurable is the open fix if that ever matters.
+- **Mode detection unverified (T6, BLOCKING for record slice)** — the whole D11
+  mode system gates on tracking the unit's DAW/PRESET state. Evidence: toggling the
+  button emitted `cc ch0 cc113 val127→0` on the HUI port in one T2 capture. Needs a
+  ~5 min attended probe (toggle both directions ×3, check port-open burst confusion,
+  startup announcement). Fallback: assume PRESET until first observed toggle.
 - **Fader 9 button collision** — heuristic (bare 127→0) could misfire only if someone
   moves that fader top-to-bottom between two MIDI samples; effectively impossible at
   USB rates, but it's a known theoretical edge.
@@ -250,11 +268,16 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 
 ## 9. How to resume (suggested prompt for next session)
 
-> Read HANDOFF.md, AGENTS.md, and specs/device-maps/oxygen-49-mkv.md. Then wire
-> pump → oxygen per-port mappers → engine: keys/pads drive the demo synth and
-> transport buttons drive a visible play/stop state (backlog item 3 "next slice").
-> `oxygen_demo` already shows the per-port mapper setup; the spike's main.rs shows
-> the audio-side consumer. Keep mpsc boundaries; no locks in the render loop.
+> Read HANDOFF.md, AGENTS.md, specs/device-maps/oxygen-49-mkv.md, and scratchpad
+> R11 (mode system v2 + recording design, decisions D11–D16). First: run the T6
+> probe (~5 min attended — user toggles the unit's DAW/PRESET button while
+> `midi_probe watch` runs) to verify cc113 mode detection; record results in the
+> device-map file. Then build the recording slice per R11: model additions first
+> (per-track `channel` override, project `loop_bars`), then engine record-state
+> machine + take capture/playback on the master clock + metronome gating, then
+> mode-gated Actions (PRESET = keys/drum-kit pads/record; DAW = note selectors
+> with audition via pitch % 12, bank-1 pads = scenes). Keep mpsc boundaries; no
+> locks in the render loop.
 
 ---
 
@@ -321,6 +344,16 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   window — middle keys became pad presses (silence); diagnosed by capturing a
   full white-key sweep with `midi_probe watch`. All 8 pads + keys verified,
   0 xruns. 51 tests, all gates green.
+  Then a **design pass** (no code): mode system v2 + recording workflow —
+  decisions D11–D16, full spec scratchpad R11. Headline: the unit's DAW/PRESET
+  switch becomes the manage/perform split (PRESET = keys + 8-hit drum-kit pads
+  + record; DAW = every note a patch selector w/ audition via pitch % 12,
+  bank-1 pads launch scenes, B sets loop length); takes for recording
+  (multi-channel, `loop_bars` configurable, wait-for-play after stop);
+  metronome only while recording. Fader buttons stay reserved (channel
+  selectors). Key discovery: one T2 capture shows the DAW toggle emitting
+  cc113 on the HUI port → mode is detectable; verification deferred as **T6,
+  blocking** for the record slice.
 - **Housekeeping note (session 5)**: some earlier HANDOFF edits were found missing
   (prose edits did not persist; cause unknown). This file was reconstructed from git +
   notes. When prose and git disagree, trust git.

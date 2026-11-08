@@ -111,7 +111,9 @@ Rules that keep this architecture intact:
 ## Current status snapshot
 
 See `HANDOFF.md` §6 for the authoritative ordered backlog. As of this writing:
-audio spike ✅ validated, `pocketstage-model` ✅, `pocketstage-midi` ✅ (incl.
+audio spike ✅, `pocketstage-model` ✅, `pocketstage-midi` ✅ (incl.
 `midi_probe`), `pocketstage-oxygen` input mapper ✅ (probes A/B/C + T2 done),
-engine wiring ✅ (live keys→synth verified); next up is transport → real
-play/stop state and pads → clip launching, then the web server.
+engine wiring ✅, transport/master clock ✅, scene launching via pads ✅ (all
+live-verified). Next up: **recording slice** per scratchpad R11 (mode system v2,
+decisions D11–D16) — blocked by the T6 cc113 mode-detection probe (~5 min
+attended); then the web server.
