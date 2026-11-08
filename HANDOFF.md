@@ -267,8 +267,19 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 8b. **Clip matrix DONE (session 8)**: tracks×scenes grid in the web UI;
     click to create/select clips, step editor (paint pitch, 1/2/4 bars,
     delete) edits patterns via the dirty-flag PUT path; refresh() now
-    refuses to clobber unsaved edits. Remaining web items: FX sends,
-    scene/track CRUD widgets, overdub UX pass
+    refuses to clobber unsaved edits.
+8c. **FX sends DONE (session 8)**: Track.reverb/.chorus (0..=1, None =
+    soundfont default) → CC91/CC93 in apply_track_voice; mixer sliders.
+8d. **Structure CRUD DONE (session 8)**: rename/GM-program/delete/add
+    tracks (≤4), rename the 8 scene columns; engine clamps active AND
+    pending-quantized scene indices when a PUT shrinks the scene list
+    (caught live: pending S5 used to fire after an 8→3 shrink).
+8e. **Clear-all takes DONE (session 8)**: web button + time-bounded
+    `mine` keep-rule (30 s) so cleared takes can't resurrect on swap.
+    Remaining web items: overdub UX pass, take rename/audition.
+    ⚠ Dev quirk: rebuilding while the engine runs can leave the OLD
+    binary in place (ETXTBSY under cargo's copy) — pkill before
+    `cargo build --release`, restart after.
 
 ---
 
