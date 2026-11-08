@@ -9,7 +9,7 @@ This file is the spec for `pocketstage-oxygen`'s default mapping.
 - USB `0763:0002`, three rawmidi/sequencer subdevices:
   - **port 0** — "USB MIDI" → Preset-mode controls, keys, pads
   - **port 1** — " Mackie/HUI" → DAW-mode controls (also active-sense + HUI notes)
-  - **port 2** — " Editor SysEx" → unexplored (T2 target)
+  - **port 2** — " Editor SysEx" → explored, no usable protocol found (T2, below)
 
 ## Physical inventory (user-verified + guide v1.2)
 
@@ -78,23 +78,38 @@ Keys and pads stay on **channel 1**. All values full-range unless noted.
    Default state = bank 1. ⇒ **logical pads 1–16 = notes 36–51**, mapper default
    `pad_count: 16`. (Notes 44–51 shadow low piano keys — accepted tradeoff.)
 
-## PENDING PROBES
+## T2 — SysEx expedition (Editor port, LED write-back) — **DONE, INCONCLUSIVE**
 
-### B — T2 SysEx expedition (Editor port, LED write-back) — **PENDING**
+Session run with `midi_probe send`/`watch`; user watching pad LEDs throughout.
+Findings:
 
-`midi_probe send hw:3,0,2 <hex>` is built and ready. Plan: verify the port accepts
-writes, try M-Audio-family SysEx candidates while watching pad LEDs; check if the
-unit replies to any inquiry (identity dump `F0 7E .. F7`). Worst case fallback:
-LED-less UX.
+1. **Pad LEDs are local momentary state**: all 8 lit by default; a physically
+   pressed pad's LED goes off for the duration of the press, back on on release.
+   Identical behavior in Preset and DAW mode.
+2. **Incoming notes do NOT drive the LEDs.** Note On/Off sent to port 2 (Editor)
+   and port 0 (USB MIDI), in both modes, at the note the unit itself currently
+   emits for that pad — zero LED change.
+3. **Port 2 is silent both ways.** No reply to: standard identify (`F0 7E 00 06
+   0F 00 F7`), non-standard ID inquiry, M-Audio (ID `0x43`) subcommand/dump/
+   LED guesses, CC101, Program Change. The unit's only transmissions all session
+   were its own physical controls.
+4. **Verdict: no controllable LED protocol found** with available tools/docs
+   (m-audio.com unreachable from dev box). → **Fallback adopted: LED-less UX**
+   (transport buttons + audio cues per risk list). Revisit only if M-Audio docs
+   or community SysEx references surface.
+5. **Mapping re-confirmed, no drift**: a top-row pad press emitted
+   `note_on ch1 key 40` — exactly the mapped value for that position
+   (bank 1: bottom row 36–39, top row 40–43). The T2 session's initial
+   "drift" suspicion was a misread; the unit matched the device map.
 
-### Old open-questions list (superseded by A/B above)
+### Old open-questions list (superseded by A/B/C and T2 above)
 
 1. **Fader button 9**: only CC49–56 appeared for 9 buttons — press #9 alone.
 2. **Transport → message table**: which of loop/stop/play/record maps to
    Start/Stop/Reset (press each once, ≥2 s apart).
 3. **Sustain pedal** CC (plug in, press) — expect CC64.
 4. **Pad bank 2**: SHIFT+pad1 then press pads — do notes shift (+8? channel change?).
-5. T2: SysEx on port 2 (LED write-back protocol).
+5. ~~T2: SysEx on port 2 (LED write-back protocol).~~ — done, inconclusive.
 
 ## Implications for `pocketstage-oxygen` (all implemented in part 1 unless noted)
 

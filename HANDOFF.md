@@ -3,11 +3,14 @@
 > Created: 2026 – session handoff for continuing work after folder rename.
 > Read this first, then read `specs/brainstorming/scratchpad.md` (the full design brainstorm).
 
-**Status (session 7):** spike validated (0 xruns, ~1 % CPU) · model crate + CI ·
+**Status (session 8):** spike validated (0 xruns, ~1 % CPU) · model crate + CI ·
 MIDI core (parser/hotplug/pump) · **oxygen input mapper DONE incl. hardware probes
 A/B/C** — 47 tests green. Device ground truth: `specs/device-maps/oxygen-49-mkv.md`.
+**T2 SysEx expedition DONE — inconclusive:** pad LEDs are local momentary state,
+not host-controllable (no reply to any inquiry; notes on ports 0/2 don't move
+them, both modes) → **LED-less UX fallback adopted**.
 **Next slice:** wire pump → oxygen mapper → engine (play pads/keys for real).
-Remaining hardware work: T2 SysEx expedition (pad LEDs), pedal CC check.
+Remaining hardware work: pedal CC check (needs a pedal).
 
 ---
 
@@ -159,8 +162,11 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
    (tap-detector; one Mapper **per source port** — see oxygen_demo). 24 tests.
    **Next slice: engine wiring** — pump → per-port mappers → song actions
    (keys→synth, pads→clip launch later, transport→play/stop/record/loop).
-   **Remaining hardware tasks**: T2 SysEx expedition (LEDs; `midi_probe send` ready),
-   pedal CC verify when a pedal exists. Then part 2 (LED feedback).
+   **T2 DONE (session 8), inconclusive**: LEDs are local momentary state;
+   Editor port silent both ways; no host-controllable LED protocol found →
+   LED-less UX fallback adopted. Part 2 (LED feedback) is therefore **dropped
+   unless** M-Audio/community SysEx docs surface later.
+   **Remaining hardware tasks**: pedal CC verify when a pedal exists.
 4. Web server (`pocketstage-server`): axum REST + WS, single-writer state snapshots
 5. Minimal web UI: project load/save, take list, mixer
 
@@ -185,7 +191,10 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 
 ## 8. Open risks / watch-list
 
-- **Pad LED control on MKV** — Editor port exists (good sign) but protocol unverified (task T2). Fallback: blink-free UX via transport buttons + audio cues.
+- ~~**Pad LED control on MKV**~~ — **T2 done (session 8), inconclusive**: LEDs are
+  local momentary state (off-while-pressed), Editor port silent to all inquiries,
+  incoming notes don't move them in either mode. **LED-less UX fallback adopted**
+  (transport buttons + audio cues). Revisit only if protocol docs surface.
 - ~~MKV CC map unknown~~ — **resolved** by T1 + probes A/B/C; ground truth in `specs/device-maps/oxygen-49-mkv.md`.
 - ~~FluidSynth crate bindings stale~~ — resolved: hand-written FFI works (spike-proven).
 - **Pi performance never measured** — spike CPU% is first datapoint; Pi hardware not yet acquired? (not discussed)
@@ -235,6 +244,14 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   in oxygen_demo; fader button 9 collides with fader 9's CC41 → buffering
   tap-detector (`FaderButtonTap`). 24 oxygen tests (47 workspace-wide), all gates
   green, demo verified live. Pedal probe deferred (no hardware).
+- **Session 8**: T2 SysEx expedition (attended, one-at-a-time with user watching
+  LEDs). Result: **inconclusive** — pad LEDs are local momentary state (all lit,
+  off-while-pressed); Note On/Off via ports 0 and 2 don't move them in Preset or
+  DAW mode; Editor port replies to nothing (identify, M-Audio 0x43 guesses,
+  dump requests). LED-less UX fallback adopted; part 2 (LED feedback) dropped.
+  Side confirmation: a top-row pad press emitted key 40, exactly matching the
+  device map (bank 1: bottom row 36–39, top row 40–43) — no state drift.
+  Findings in the device-map file.
 - **Housekeeping note (session 5)**: some earlier HANDOFF edits were found missing
   (prose edits did not persist; cause unknown). This file was reconstructed from git +
   notes. When prose and git disagree, trust git.
