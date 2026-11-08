@@ -280,6 +280,12 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     ⚠ Dev quirk: rebuilding while the engine runs can leave the OLD
     binary in place (ETXTBSY under cargo's copy) — pkill before
     `cargo build --release`, restart after.
+8f. **Post-mortem (session 8)**: "no sound after DAW→PRESET" was NOT a
+    mode bug — LaunchScene indexed scenes unguarded; my 3-scene shrink
+    test + pad 5 panicked ps-audio while the process kept serving WS
+    (silent-but-alive = nasty). Fixed: get()-guards + stats-thread
+    watchdog that screams when ps-audio dies. Rule: the render loop
+    may NEVER panic; treat all cross-lane data as hostile.
 
 ---
 
