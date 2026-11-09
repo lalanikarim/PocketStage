@@ -248,6 +248,20 @@ function renderProject(pf) {
       label.style.color = t.muted ? "var(--dim)" : "";
     });
 
+    // Solo: audition this take alone using the existing mute flags —
+    // immediate PUT so playback changes right away. Toggle back solos all.
+    const others = project.project.takes.filter((x) => x.name !== t.name);
+    const isSolo = !t.muted && others.every((x) => x.muted);
+    const solo = document.createElement("button");
+    solo.className = "alt"; solo.textContent = "S"; solo.title = "solo (audition alone)";
+    solo.style.margin = "0 0 0 8px"; solo.style.padding = "2px 9px";
+    if (isSolo) { solo.style.borderColor = "var(--acc)"; solo.style.color = "var(--acc)"; }
+    solo.addEventListener("click", async () => {
+      const body = structuredClone(project);
+      for (const x of body.project.takes) x.muted = isSolo ? false : (x.name !== t.name);
+      await putProject(body, isSolo ? "unsoloed" : `soloed ${t.name}`);
+    });
+
     const del = document.createElement("button");
     del.className = "alt"; del.textContent = "\u2715"; del.title = "delete take";
     del.style.margin = "0 0 0 8px"; del.style.padding = "2px 9px";
@@ -263,7 +277,7 @@ function renderProject(pf) {
 
     const left = document.createElement("span");
     left.append(mute, label);
-    li.append(left, count, del);
+    li.append(left, count, solo, del);
     li.style.display = "flex"; li.style.alignItems = "center";
     li.style.justifyContent = "space-between";
     ul.appendChild(li);
