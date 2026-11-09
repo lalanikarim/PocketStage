@@ -64,33 +64,47 @@ Folder is `~/Projects/PocketStage`; remote **https://github.com/lalanikarim/Pock
 
 ---
 
-## 3. Current state of the code
+## 3. Current state of the code (session 9 wrap)
+
+**A usable end-to-end loop exists**: boot → play keys/drum pads (PRESET) →
+⏺ record takes → Stop → looping playback → overdub layers on top; DAW mode
+launches scenes from pads and browses patches; a full web control plane at
+`:7777` mirrors and drives everything live. 84 tests, all CI gates green.
 
 ```
 PocketStage/
-├── Cargo.toml                          # workspace, 4 member crates
+├── Cargo.toml                          # workspace, 5 member crates
 ├── AGENTS.md                           # AI-agent guide — read before editing code
 ├── SPIKE_RESULTS.md                    # spike numbers + platform quirks log
-├── specs/brainstorming/scratchpad.md   # design brainstorm, decisions D1–D10
-├── specs/device-maps/oxygen-49-mkv.md  # GROUND TRUTH controller map (T1 + probes A/B/C)
+├── specs/brainstorming/scratchpad.md   # design brainstorm D1–D10 + R-sections
+├── specs/device-maps/oxygen-49-mkv.md  # GROUND TRUTH controller map (+ T6 evidence)
 ├── .github/workflows/ci.yml            # build + clippy -D warnings + fmt + tests
 └── crates/
-    ├── pocketstage-engine/   ALSA + hand-rolled FluidSynth FFI; live MIDI (pump →
-    │                         oxygen mappers → synth), --demo mode, metrics
-    ├── pocketstage-model/    versioned clip-matrix project format (serde), 9 tests
-    ├── pocketstage-midi/     port discovery, streaming parser, hotplug, spawn_pump → mpsc;
-    │                         bin: midi_probe (list/watch/pump/send)
-    └── pocketstage-oxygen/   controller input mapper — pure, JSON-reassignable, 24 tests;
-                              bin: oxygen_demo (per-port mappers: music + HUI)
+    ├── pocketstage-engine/   ALSA + hand-rolled FluidSynth FFI; live MIDI; embedded
+    │                         server; transport.rs = PURE tested state machine;
+    │                         --demo mode; labs in examples/ (retrigger, drum_chan);
+    │                         ps-stats thread watchdogs ps-audio
+    ├── pocketstage-model/    versioned project format SCHEMA_VERSION=1 (additive-
+    │                         only policy: gain/pan/mute/reverb/chorus/take.muted)
+    ├── pocketstage-midi/     port discovery, streaming parser, hotplug, spawn_pump
+    ├── pocketstage-oxygen/   input mapper incl. Mode detection (cc113/cc112 HUI)
+    └── pocketstage-server/   axum control plane: ProjectStore + project LIBRARY
+                              (switch/save-as/delete/export), REST + /ws status,
+                              EngineCommand lane, embedded single-file web UI
 ```
 
 Key architectural facts proven so far:
 - Audio: single-writer synth owned by the audio thread; mpsc event boundary; 0 xruns.
-- MIDI: pump delivers decoded `Event`s + provenance (`MidiInputMessage`), hotplug-aware;
-  device clock spam (~45 msg/s) discarded at the mapper boundary.
-- Oxygen mapping: **per-port mappers** — port :0 music (default_mapping), port :1 HUI
-  (hui_mapping, transport notes 86/93/94/95); fader-9 button tap-detector for its
-  factory CC collision. Never open the unit's DAW mode expectations — preset mode only.
+- **Render loop may NEVER panic** — all cross-lane data hostile by default (see 8f
+  post-mortem); launch/scene logic extracted to `engine/src/transport.rs` (pure,
+  total functions, 9 tests incl. the exact live-crash regressions).
+- Web click == key press: HTTP transport/scene commands become ordinary Events
+  through the same audio-thread drain.
+- Project persistence: takes auto-persist via take-feed; library mode keeps
+  `~/.pocketstage/projects/<name>.json`, engine hot-switches on load; legacy
+  single file auto-migrated as "Default".
+- Oxygen mapping: per-port mappers (music :0, HUI :1); DAW/PRESET buttons =
+  cc113/cc112 pulses on HUI port only (T6 verified) → mode fully trackable.
 
 ---
 
@@ -286,6 +300,26 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     (silent-but-alive = nasty). Fixed: get()-guards + stats-thread
     watchdog that screams when ps-audio dies. Rule: the render loop
     may NEVER panic; treat all cross-lane data as hostile.
+9. **Transport extraction DONE (session 9)**: launch/quantize/clamp/step-window
+   logic moved from the render closure to `engine/src/transport.rs` — pure,
+   total, 9 tests covering the live-crash cases; fixed a u64 k−1 underflow
+   (launch starting the clock mid-period). apply_scene_voice() dedups.
+10. **D18 Overdub DONE (session 9)**: takes keep looping while a NEW take
+    records (capture only sees the input lane — no feedback). Tick base =
+    press moment; start layers on the downbeat for alignment.
+11. **Web UX DONE (session 9)**: active-scene column/chip highlight from
+    /ws; beforeunload guard while dirty; hotkeys Space=play/stop, R=record;
+    per-take SOLO button (mute-flag solo, immediate PUT).
+12. **Project library DONE (session 9)**: multi-project store + switch/
+    save-as/delete/export routes and UI card; engine boots the library
+    (~/.pocketstage/projects, most recent = current), POCKETSTAGE_PROJECT
+    still pins a single file for tests/CI. Live E2E incl. 409-on-current.
+13. **NEXT (software-only candidates)**: engine integration harness — drive
+    the event pipeline device-free in CI (trait-injected fake synth; last big
+    testability gap); take rename; FX amount knobs (global FluidSynth
+    settings); JSON drum kits. Then design passes for SEQ mode (D20+) and
+    MIX mode. Hardware-gated: ear-checks of sessions 8/9 features, pedal
+    probe, T2 round 2, Pi validation + deployment kit (user deferred).
 
 ---
 
@@ -310,6 +344,9 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D15 | Entering DAW mode stops recording (finalizes take), NEVER touches playback; transport owns playback | ✅ |
 | D16 | Recording = multi-channel Take capture; `loop_bars` project setting; Stop → wait for Play; metronome only while armed/recording, never captured | ✅ |
 | D17 | Hardware-drum retrigger feel: same key/pad struck again RESETS its previous voice (different keys stay polyphonic). Pads own private channels 8..=15 (metronome shares ch8 with kick); kill = per-channel All Sound Off — one-shot GM voices ignore note-off AND live GEN_ATTENUATION edits (lab: `engine/examples/retrigger_lab.rs`) | ✅ |
+| D18 | **Overdub layering**: takes keep looping while a new take records; capture is input-lane-only so no feedback. Tick base = record-press moment (align by starting layers on the downbeat) | ✅ |
+| D19 | **Project library**: `~/.pocketstage/projects/*.json`, current entry switchable at runtime (load → SetProject hot-swap); save-as = atomic snapshot (no switch); delete refuses current (409); POCKETSTAGE_PROJECT pins single-file mode for tests. Legacy project.json migrates in as "Default" | ✅ |
+| D20 | **Render-loop law**: the audio thread may never panic and never trusts cross-lane indices — get()/is_some_and over indexing; state machines live in pure tested modules (transport.rs pattern); ps-stats watchdogs ps-audio | ✅ |
 
 ---
 
@@ -361,16 +398,17 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 
 ## 9. How to resume (suggested prompt for next session)
 
-> Read HANDOFF.md, AGENTS.md, specs/device-maps/oxygen-49-mkv.md, and scratchpad
-> R11 (mode system v2 + recording design, decisions D11–D16). First: run the T6
-> probe (~5 min attended — user toggles the unit's DAW/PRESET button while
-> `midi_probe watch` runs) to verify cc113 mode detection; record results in the
-> device-map file. Then build the recording slice per R11: model additions first
-> (per-track `channel` override, project `loop_bars`), then engine record-state
-> machine + take capture/playback on the master clock + metronome gating, then
-> mode-gated Actions (PRESET = keys/drum-kit pads/record; DAW = note selectors
-> with audition via pitch % 12, bank-1 pads = scenes). Keep mpsc boundaries; no
-> locks in the render loop.
+> Read HANDOFF.md (§3 state, §6 backlog item 13, §7 decisions D11–D20) and
+> AGENTS.md. Session 8/9 delivered the full loop: recording + overdub, modes
+> v2, web control plane (mixer/FX/clip matrix/structure/projects), transport
+> extraction. Pick from backlog 13: (a) engine integration harness — fake-
+> synth trait injection so CI can drive the event pipeline device-free; or
+> (b) user-facing extras: take rename, FX amount knobs, JSON drum kits;
+> or (c) start the SEQ-mode design pass (brainstorm → D20+). If the user is
+> at the machine with headphones: run the ear-check list (§6 item 13) and a
+> pedal probe if hardware appeared. Live env: engine runs detached on :7777,
+> project library in ~/.pocketstage/projects (test artifacts: "Gig" snapshot,
+> "UI Test Clip" in S1, reverb 0.5 on track 1 — user may want to clean).
 
 ---
 
@@ -494,3 +532,19 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 - **Housekeeping note (session 5)**: some earlier HANDOFF edits were found missing
   (prose edits did not persist; cause unknown). This file was reconstructed from git +
   notes. When prose and git disagree, trust git.
+- **Session 8 (mega)**: T6 mode-detection verified (cc113/cc112 HUI pulses);
+  mode system v2 live (PRESET perform / DAW manage, D11–D15); take capture &
+  looping playback (D16); web server slices 1–4 (store → embedded router →
+  WS status → single-file UI); per-track mixer + FX sends; take management
+  (mute/delete/clear-all with time-bounded keep-rule); remote transport &
+  scene launch over HTTP (web click == key press); clip matrix + step editor;
+  structure CRUD; D17 retrigger via per-pad channels + CC120 (labs kept in
+  engine/examples). Two live bug hunts: scenes-OOB panic killing ps-audio
+  silently (→ get()-guards + watchdog, D20) and stale-binary rebuilds
+  (ETXTBSY — pkill before release builds).
+- **Session 9**: transport state machine extracted to pure `transport.rs`
+  (9 tests incl. crash regressions; fixed mid-period-launch u64 underflow);
+  D18 overdub layering; web polish (scene highlight, dirty guard, Space/R
+  hotkeys); take SOLO button; D19 project library (multi-project switch/
+  save-as/delete/export + legacy migration, live E2E). 84 tests, gates green.
+  Paused by user request at this wrap; next candidates in §6 item 13.

@@ -112,12 +112,15 @@ Rules that keep this architecture intact:
 
 ## Current status snapshot
 
-See `HANDOFF.md` §6 for the authoritative ordered backlog. As of this writing:
-audio spike ✅, `pocketstage-model` ✅, `pocketstage-midi` ✅ (incl.
-`midi_probe`), `pocketstage-oxygen` mapper + T6 mode detection ✅,
-engine: transport/clock ✅, scene launching ✅, recording core ✅ (D16),
-mode system v2 ✅ (D11–D15: PRESET perform / DAW manage), same-key retrigger
-via per-pad channels ✅ (D17); `pocketstage-server` slices 1–4 ✅ — axum REST
-store embedded in the engine (EngineCommand channel), `/ws` status push, takes
-persist across reboot, minimal web UI at `GET /`. Next: mixer/FX views,
-overdub layering, SEQ/MIX modes, Pi hardware validation, pedal CC check.
+See `HANDOFF.md` §6 for the authoritative ordered backlog. As of this writing
+(sessions 8–9 wrap): full performance loop ✅ — record/overdub (D16/D18),
+looping takes, PRESET/DAW modes (D11–D15), hardware-style retrigger (D17),
+pure tested `transport.rs` state machine, render-loop no-panic law (D20)
+with ps-audio watchdog. Web control plane complete for v0.1: REST + `/ws`,
+remote transport/scene triggers, mixer + FX sends, clip matrix + step
+editor, structure CRUD, take mute/solo/delete/clear-all, project library
+with switch/save-as/export (D19). 84 tests, CI gates green.
+Next candidates (§6 item 13): engine integration harness (fake-synth trait
+for device-free CI), take rename, FX amount knobs, JSON drum kits, SEQ/MIX
+design passes. Hardware-gated (awaiting gear/ears): feature ear-checks,
+pedal CC probe, Pi validation + deployment kit.
