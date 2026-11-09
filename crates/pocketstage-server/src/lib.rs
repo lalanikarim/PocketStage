@@ -66,7 +66,11 @@ pub enum StoreError {
 /// Thread-safe project holder with atomic-ish disk persistence. The engine's
 /// in-memory `Project` converges to this via [`EngineCommand::SetProject`].
 pub struct ProjectStore {
-    path: PathBuf,
+    /// `Some` = library mode: sibling projects live in this directory and
+    /// `path` names the current one (switchable at runtime). `None` =
+    /// single-file mode (explicit POCKETSTAGE_PROJECT path).
+    dir: Option<PathBuf>,
+    path: Mutex<PathBuf>,
     project: Mutex<ProjectFile>,
 }
 
@@ -88,14 +92,177 @@ impl ProjectStore {
             Err(e) => return Err(StoreError::Io(e.to_string())),
         };
         Ok(Self {
-            path,
+            dir: None,
+            path: Mutex::new(path),
             project: Mutex::new(project),
         })
     }
 
+    /// Library mode: projects live in `dir` as `<name>.json`. Loads the most
+    /// recently modified one; seeds a "Default" project when empty. A legacy
+    /// single file next to the dir is copied in on first use (migration).
+    pub fn open_library(dir: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let dir = dir.as_ref().to_path_buf();
+        std::fs::create_dir_all(&dir).map_err(|e| StoreError::Io(e.to_string()))?;
+        let mut names: Vec<(std::time::SystemTime, String)> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|e| e.to_str()) == Some("json")
+                    && let Some(stem) = p.file_stem().and_then(|s| s.to_str())
+                {
+                    let mt = entry
+                        .metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    names.push((mt, stem.to_string()));
+                }
+            }
+        }
+        names.sort_by_key(|(when, _)| *when);
+        let current = match names.into_iter().next_back() {
+            Some((_, name)) => dir.join(format!("{name}.json")),
+            None => {
+                // Empty library: seed Default from the legacy file if present.
+                let target = dir.join("Default.json");
+                let legacy = dir
+                    .parent()
+                    .map(|p| p.join("project.json"))
+                    .filter(|l| l.exists());
+                if let Some(legacy) = legacy {
+                    std::fs::copy(&legacy, &target).map_err(|e| StoreError::Io(e.to_string()))?;
+                }
+                target
+            }
+        };
+        let store = Self::open_or_default(&current)?;
+        // A seeded (fresh-default) entry must exist on disk so the library
+        // listing and save-as targets behave uniformly.
+        if !current.exists() {
+            store.replace(store.get())?;
+        }
+        Ok(Self {
+            dir: Some(dir),
+            path: Mutex::new(current),
+            project: store.project,
+        })
+    }
+
+    /// Validate `name` for library operations (no paths, no dots-only,
+    /// filesystem-safe, max 64 chars).
+    fn check_name(name: &str) -> Result<(), StoreError> {
+        let ok = !name.is_empty()
+            && name.len() <= 64
+            && !name.starts_with('.')
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'));
+        if ok {
+            Ok(())
+        } else {
+            Err(StoreError::Io(format!("invalid project name '{name}'")))
+        }
+    }
+
+    /// Names of all projects in the library (empty in single-file mode).
+    pub fn list(&self) -> Vec<String> {
+        let Some(dir) = &self.dir else { return vec![] };
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter_map(|e| {
+                        let p = e.path();
+                        if p.extension().and_then(|x| x.to_str()) != Some("json") {
+                            return None;
+                        }
+                        Some(p.file_stem()?.to_str()?.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// Current project's name (file stem).
+    pub fn current_name(&self) -> String {
+        self.path
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string()
+    }
+
+    pub fn is_library(&self) -> bool {
+        self.dir.is_some()
+    }
+
+    /// Snapshot the current project into the library as `<name>.json`
+    /// (does not switch). Overwrites an existing project of that name.
+    pub fn save_as(&self, name: &str) -> Result<(), StoreError> {
+        Self::check_name(name)?;
+        let dir = self
+            .dir
+            .as_ref()
+            .ok_or(StoreError::Io("not a library".into()))?;
+        let snapshot = self.get();
+        let json =
+            serde_json::to_string_pretty(&snapshot).map_err(|e| StoreError::Io(e.to_string()))?;
+        let target = dir.join(format!("{name}.json"));
+        let tmp = dir.join(format!(".ps-tmp-{name}.json"));
+        std::fs::write(&tmp, json).map_err(|e| StoreError::Io(e.to_string()))?;
+        std::fs::rename(&tmp, &target).map_err(|e| StoreError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Switch the current project to library entry `<name>`.
+    /// Returns the loaded payload so the caller can forward it to the engine.
+    pub fn load(&self, name: &str) -> Result<ProjectFile, StoreError> {
+        Self::check_name(name)?;
+        let dir = self
+            .dir
+            .as_ref()
+            .ok_or(StoreError::Io("not a library".into()))?;
+        let path = dir.join(format!("{name}.json"));
+        let text = std::fs::read_to_string(&path).map_err(|e| StoreError::Io(e.to_string()))?;
+        let pf = ProjectFile::from_json_str(&text).map_err(StoreError::Model)?;
+        pf.validate().map_err(StoreError::Validation)?;
+        *self.path.lock().unwrap_or_else(|p| p.into_inner()) = path;
+        *self.project.lock().unwrap_or_else(|p| p.into_inner()) = pf.clone();
+        Ok(pf)
+    }
+
+    /// Delete a library entry; the current project cannot be deleted.
+    pub fn delete(&self, name: &str) -> Result<(), StoreError> {
+        Self::check_name(name)?;
+        let dir = self
+            .dir
+            .as_ref()
+            .ok_or(StoreError::Io("not a library".into()))?;
+        if self.current_name() == name {
+            return Err(StoreError::Io("cannot delete the current project".into()));
+        }
+        std::fs::remove_file(dir.join(format!("{name}.json")))
+            .map_err(|e| StoreError::Io(e.to_string()))
+    }
+
+    /// Raw JSON of a library entry (for export download).
+    pub fn raw(&self, name: &str) -> Result<String, StoreError> {
+        Self::check_name(name)?;
+        let dir = self
+            .dir
+            .as_ref()
+            .ok_or(StoreError::Io("not a library".into()))?;
+        std::fs::read_to_string(dir.join(format!("{name}.json")))
+            .map_err(|e| StoreError::Io(e.to_string()))
+    }
+
     /// True when the file already existed (vs. a fresh default project).
     pub fn file_exists(&self) -> bool {
-        self.path.exists()
+        self.path.lock().unwrap_or_else(|p| p.into_inner()).exists()
     }
 
     pub fn get(&self) -> ProjectFile {
@@ -114,19 +281,20 @@ impl ProjectStore {
         let json =
             serde_json::to_string_pretty(&incoming).map_err(|e| StoreError::Io(e.to_string()))?;
 
-        if let Some(dir) = self.path.parent() {
+        let path = self.path.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| StoreError::Io(e.to_string()))?;
         }
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, json).map_err(|e| StoreError::Io(e.to_string()))?;
-        std::fs::rename(&tmp, &self.path).map_err(|e| StoreError::Io(e.to_string()))?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &json).map_err(|e| StoreError::Io(e.to_string()))?;
+        std::fs::rename(&tmp, &path).map_err(|e| StoreError::Io(e.to_string()))?;
 
         *self.project.lock().unwrap_or_else(|p| p.into_inner()) = incoming;
         Ok(())
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn path(&self) -> PathBuf {
+        self.path.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 }
 
@@ -269,6 +437,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/transport/stop", post(stop))
         .route("/api/transport/record", post(record))
         .route("/api/scene/{n}", post(launch_scene))
+        .route("/api/projects", get(list_projects))
+        .route("/api/projects/save_as", post(save_as_project))
+        .route("/api/projects/load", post(load_project))
+        .route("/api/projects/delete", post(delete_project))
+        .route("/api/projects/raw", get(raw_project))
         .with_state(state)
 }
 
@@ -408,6 +581,79 @@ fn send_ctrl(state: &AppState, cmd: EngineCommand) -> Result<StatusCode, (Status
     tx.send(cmd)
         .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "engine lane closed".into()))?;
     Ok(StatusCode::ACCEPTED)
+}
+
+// ---------------------------------------------------------- project library
+
+#[derive(Debug, serde::Deserialize)]
+struct NameBody {
+    name: String,
+}
+
+async fn list_projects(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "projects": state.store.list(),
+        "current": state.store.current_name(),
+        "library": state.store.is_library(),
+    }))
+}
+
+async fn save_as_project(
+    State(state): State<AppState>,
+    Json(body): Json<NameBody>,
+) -> Result<StatusCode, StoreError> {
+    state.store.save_as(&body.name)?;
+    Ok(StatusCode::CREATED)
+}
+
+async fn load_project(
+    State(state): State<AppState>,
+    Json(body): Json<NameBody>,
+) -> Result<StatusCode, StoreError> {
+    let pf = state.store.load(&body.name)?;
+    if let Some(tx) = &state.engine {
+        tx.send(EngineCommand::SetProject(pf))
+            .map_err(|_| StoreError::Io("engine channel closed".into()))?;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_project(
+    State(state): State<AppState>,
+    Json(body): Json<NameBody>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    state.store.delete(&body.name).map_err(|e| {
+        let m = e.to_string();
+        if m.contains("current project") {
+            (StatusCode::CONFLICT, m)
+        } else {
+            (StatusCode::BAD_REQUEST, m)
+        }
+    })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn raw_project(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Response, StoreError> {
+    let name = q
+        .get("name")
+        .cloned()
+        .ok_or_else(|| StoreError::Io("missing ?name".into()))?;
+    let text = state.store.raw(&name)?;
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{name}.json\"").as_str(),
+            ),
+        ],
+        text,
+    )
+        .into_response())
 }
 
 async fn put_project(

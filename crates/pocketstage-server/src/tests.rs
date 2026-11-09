@@ -336,3 +336,125 @@ async fn remote_transport_routes() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
+
+// ------------------------------------------------------------ library mode
+
+#[test]
+fn library_migrates_saves_loads_deletes() {
+    let root = temp_path("libroot");
+    let _ = std::fs::remove_dir_all(&root);
+    let lib = root.join("projects");
+    std::fs::create_dir_all(&root).unwrap();
+    // legacy single file next to the library dir
+    let mut legacy = ProjectFile {
+        version: SCHEMA_VERSION,
+        project: pocketstage_model::Project::default_project(),
+    };
+    legacy.project.name = "Legacy".into();
+    std::fs::write(
+        root.join("project.json"),
+        serde_json::to_string(&legacy).unwrap(),
+    )
+    .unwrap();
+
+    let store = ProjectStore::open_library(&lib).unwrap();
+    assert!(store.is_library());
+    assert_eq!(store.current_name(), "Default", "migrated from legacy");
+    assert_eq!(store.get().project.name, "Legacy");
+
+    store.save_as("Gig").unwrap();
+    assert!(lib.join("Gig.json").exists());
+    assert_eq!(store.list(), vec!["Default".to_string(), "Gig".to_string()]);
+
+    store.load("Gig").unwrap();
+    assert_eq!(store.current_name(), "Gig");
+    // replace() now targets the new current file
+    let mut pf = store.get();
+    pf.project.name = "Edited".into();
+    store.replace(pf).unwrap();
+    let on_disk = std::fs::read_to_string(lib.join("Gig.json")).unwrap();
+    assert!(on_disk.contains("Edited"));
+
+    // current cannot be deleted; after switching away it can
+    assert!(store.delete("Gig").is_err());
+    store.load("Default").unwrap();
+    store.delete("Gig").unwrap();
+    assert!(!lib.join("Gig.json").exists());
+
+    // path-traversal-ish names rejected
+    assert!(store.save_as("../evil").is_err());
+    assert!(store.load("").is_err());
+}
+
+#[tokio::test]
+async fn projects_routes_end_to_end() {
+    let root = temp_path("libroutes");
+    let _ = std::fs::remove_dir_all(&root); // cleanup() is file-only
+    let store = std::sync::Arc::new(ProjectStore::open_library(root.join("projects")).unwrap());
+    let app = router(AppState::standalone(store.clone()));
+
+    // save_as then list
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/api/projects/save_as")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"name":"Copy A"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = call(
+        app.clone(),
+        Request::builder()
+            .uri("/api/projects")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(v["projects"].as_array().unwrap().len(), 2); // Default + Copy A
+
+    // load switches
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/api/projects/load")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"name":"Copy A"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(store.current_name(), "Copy A");
+
+    // export raw
+    let (status, body) = call(
+        app.clone(),
+        Request::builder()
+            .uri("/api/projects/raw?name=Copy%20A")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("\"version\""));
+
+    // delete current -> 409
+    let (status, _) = call(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/projects/delete")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"name":"Copy A"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}

@@ -96,6 +96,11 @@
     <div id="mixer"><em>No tracks.</em></div>
   </section>
 
+  <section class="card" id="projcard" hidden>
+    <h2>Projects</h2>
+    <div id="projects" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"></div>
+  </section>
+
   <section class="card">
     <h2>Structure</h2>
     <div id="structure"></div>
@@ -377,6 +382,64 @@ async function postRemote(cmd) {
 
 connect();
 refresh();
+renderProjects();
+// ------------------------------------------------------------- projects
+async function renderProjects() {
+  let info;
+  try { info = await (await fetch("/api/projects")).json(); } catch { return; }
+  if (!info.library) return; // single-file mode: nothing to switch
+  $("projcard").hidden = false;
+  const box = $("projects");
+  box.innerHTML = "";
+
+  const sel = document.createElement("select");
+  for (const n of info.projects) {
+    const o = document.createElement("option");
+    o.value = n; o.textContent = n === info.current ? `${n} ★` : n;
+    if (n === info.current) o.selected = true;
+    sel.append(o);
+  }
+
+  const btn = (text, cls, fn) => {
+    const b = document.createElement("button");
+    b.textContent = text; if (cls) b.className = cls; else b.style.padding = "4px 10px";
+    b.addEventListener("click", fn);
+    return b;
+  };
+  const postJson = async (uri, name) => {
+    const r = await fetch(uri, { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }) });
+    if (!r.ok) msg(uri + ": " + (await r.text()), true);
+    return r.ok;
+  };
+
+  box.append(sel,
+    btn("load", null, async () => {
+      if (sel.value === info.current) return;
+      if (dirty && !confirm("Switch project — unsaved edits will be lost?")) return;
+      if (await postJson("/api/projects/load", sel.value)) { dirty = false; setSave();
+        msg(`loaded “${sel.value}”`); refresh(); renderProjects(); }
+    }),
+    btn("save as…", null, async () => {
+      const name = prompt("New project name:");
+      if (!name) return;
+      if (await postJson("/api/projects/save_as", name)) {
+        msg(`saved snapshot “${name}”`); renderProjects();
+      }
+    }),
+    btn("delete", "alt", async () => {
+      if (sel.value === info.current) { msg("cannot delete the current project", true); return; }
+      if (!confirm(`Delete project “${sel.value}”?`)) return;
+      if (await postJson("/api/projects/delete", sel.value)) renderProjects();
+    }));
+
+  const exp = document.createElement("a");
+  exp.href = `/api/projects/raw?name=${encodeURIComponent(info.current)}`;
+  exp.textContent = "export ⬇"; exp.style.color = "var(--acc)";
+  box.append(exp);
+}
+
 // ------------------------------------------------------------- structure
 // Track CRUD (max 4) + scene renaming (8 fixed columns). Edits mutate the
 // fetched ProjectFile and ride the dirty-flag Save path like everything else.

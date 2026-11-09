@@ -279,15 +279,25 @@ fn main() {
         synth.program_change(ch, 0);
     }
     // ---- boot project: load from the store (single source of truth) ------
-    // Same file the HTTP control plane reads/writes; PUTs hot-swap the live
-    // project via EngineCommand. Precedence: POCKETSTAGE_PROJECT > ~/.pocketstage.
-    let project_path = std::env::var("POCKETSTAGE_PROJECT").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        format!("{home}/.pocketstage/project.json")
-    });
+    // Same store the HTTP control plane reads/writes; PUTs hot-swap the live
+    // project via EngineCommand. Precedence: POCKETSTAGE_PROJECT = single
+    // file (tests/CI); otherwise a switchable library in ~/.pocketstage/projects
+    // (the legacy project.json is migrated in on first launch).
     let store = Arc::new(
-        ProjectStore::open_or_default(&project_path).unwrap_or_else(|e| {
-            eprintln!("[init] cannot open project '{project_path}': {e}");
+        match std::env::var("POCKETSTAGE_PROJECT") {
+            Ok(project_path) => ProjectStore::open_or_default(&project_path)
+                .inspect(|s| println!("[init] single project: {}", s.path().display()))
+                .map_err(|e| (project_path, e)),
+            Err(_) => {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                let dir = format!("{home}/.pocketstage/projects");
+                ProjectStore::open_library(&dir)
+                    .inspect(|s| println!("[init] library {dir}: current '{}'", s.current_name()))
+                    .map_err(|e| (dir, e))
+            }
+        }
+        .unwrap_or_else(|(p, e)| {
+            eprintln!("[init] cannot open project store '{p}': {e}");
             std::process::exit(1);
         }),
     );
