@@ -689,9 +689,12 @@ fn main() {
                             }
                         }
 
-                        // Take playback (D16): finalized takes loop once
-                        // recording is off (no overdub in v0.1).
-                        if recording.is_none() {
+                        // Take playback (D16 + D18 overdub): every unmuted
+                        // finalized take loops together — and keeps looping
+                        // while a NEW take is being captured, so you can
+                        // layer. Capture only sees the input event lane,
+                        // never these direct synth calls: no feedback loop.
+                        {
                             let ts0 = clock::steps_elapsed(total_samples - start, RATE, bpm);
                             let ts1 = clock::steps_elapsed(
                                 total_samples + PERIOD_FRAMES as u64 - start,
