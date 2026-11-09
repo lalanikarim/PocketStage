@@ -53,6 +53,9 @@
   .mxcell.on { background:var(--acc); border-color:var(--acc); color:#04220f;
                font-weight:700; }
   .mxcell.sel { outline:2px solid var(--play); }
+  .mxhead.hot { color:var(--play); font-weight:700; }
+  .mxcell.hot { border-color:var(--play); }
+  #remote button.hot { border-color:var(--play); color:var(--play); }
   #stepedit { margin-top:14px; border-top:1px solid #2a2a2a; padding-top:10px; }
   #stepedit .sgrid { display:grid; grid-template-columns:repeat(16, 30px);
                      gap:3px; margin-top:8px; }
@@ -130,6 +133,18 @@
 const $ = (id) => document.getElementById(id);
 let project = null;          // last ProjectFile fetched from the server
 let liveTakes = -1;          // take count seen in the latest WS frame (array)
+let lastTransport = "stopped";
+
+// Highlight the active scene column (matrix + chips) from WS state.
+function hlScene(n) {
+  document.querySelectorAll(".hot").forEach((e) => e.classList.remove("hot"));
+  if (!n) return;
+  const si = n - 1;
+  document.querySelectorAll(`.mxhead[data-si="${si}"], .mxcell[data-si="${si}"]`)
+    .forEach((e) => e.classList.add("hot"));
+  const chip = document.querySelector(`#remote button[data-cmd="scene/${n}"]`);
+  if (chip) chip.classList.add("hot");
+}
 let dirty = false;           // local edits not yet PUT to the store
 
 function setSave() { $("save").textContent = dirty ? "Save ●" : "Save"; }
@@ -305,6 +320,8 @@ function connect() {
     $("l-pos").textContent = f.bar + " : " + f.beat;
     $("l-scene").textContent = f.scene || "–";
     $("l-mode").textContent = f.mode;
+    lastTransport = f.transport;
+    hlScene(f.scene);
     const n = Array.isArray(f.takes) ? f.takes.length : 0;
     $("l-takes").textContent = n;
     if (n !== liveTakes) { liveTakes = n; refresh(); } // new take -> re-fetch list
@@ -320,6 +337,30 @@ $("toggle").addEventListener("click", () => {
   raw.hidden = !raw.hidden;
   if (!raw.hidden && project) raw.value = JSON.stringify(project, null, 2);
 });
+// Unsaved edits: warn before the tab closes.
+window.addEventListener("beforeunload", (e) => {
+  if (dirty) { e.preventDefault(); e.returnValue = ""; }
+});
+
+// Keyboard transport: Space = play/stop toggle, R = record. Ignored while
+// typing in form fields.
+window.addEventListener("keydown", async (e) => {
+  const tag = document.activeElement?.tagName;
+  if (["INPUT", "TEXTAREA", "SELECT"].includes(tag)) return;
+  if (e.code === "Space") {
+    e.preventDefault();
+    postRemote(lastTransport === "stopped" ? "transport/play" : "transport/stop");
+  } else if (e.key === "r" || e.key === "R") {
+    postRemote("transport/record");
+  }
+});
+async function postRemote(cmd) {
+  try {
+    const r = await fetch("/api/" + cmd, { method: "POST" });
+    if (!r.ok) msg("remote: " + (await r.text()), true);
+  } catch (err) { msg("remote failed: " + err, true); }
+}
+
 connect();
 refresh();
 // ------------------------------------------------------------- structure
@@ -416,7 +457,7 @@ function renderMatrix() {
   for (let s = 0; s < 8; s++) {
     const h = document.createElement("span");
     h.className = "mxhead"; h.textContent = "S" + (s + 1);
-    h.title = scenes[s]?.name || "";
+    h.dataset.si = s; h.title = scenes[s]?.name || "";
     head.append(h);
   }
   box.append(head);
@@ -430,6 +471,7 @@ function renderMatrix() {
     for (let si = 0; si < 8; si++) {
       const clip = (t.clips || [])[si];
       const cell = document.createElement("div");
+      cell.dataset.si = si;
       cell.className = "mxcell" + (clip ? " on" : "") +
         (sel && sel.ti === ti && sel.si === si ? " sel" : "");
       cell.textContent = clip ? clip.pattern.bars + "b" : "+";
