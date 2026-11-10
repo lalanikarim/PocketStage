@@ -473,3 +473,43 @@ fn old_files_without_fx_fields_still_parse() {
     assert_eq!(back.project.fx_reverb, None);
     back.project.validate().unwrap();
 }
+
+// ------------------------------------------------------------ JSON drum kits
+
+#[test]
+fn drum_kit_defaults_to_none_and_validates_gm_range() {
+    let mut p = Project::default_project();
+    assert_eq!(p.drum_kit, None);
+    p.validate().unwrap();
+
+    p.drum_kit = Some([36, 38, 37, 39, 42, 46, 47, 49]);
+    p.validate().unwrap();
+
+    p.drum_kit = Some([36, 34, 37, 39, 42, 46, 47, 49]); // 34 < 35
+    assert!(matches!(
+        p.validate(),
+        Err(ValidationError::DrumNoteOutOfRange { note: 34 })
+    ));
+    p.drum_kit = Some([36, 38, 37, 39, 42, 46, 47, 99]); // 99 > 81
+    assert!(matches!(
+        p.validate(),
+        Err(ValidationError::DrumNoteOutOfRange { note: 99 })
+    ));
+}
+
+#[test]
+fn drum_kit_json_round_trip_and_wrong_length_rejected() {
+    let mut p = Project::default_project();
+    p.drum_kit = Some([35, 36, 37, 38, 39, 40, 41, 42]);
+    let json = serde_json::to_string(&ProjectFile {
+        version: SCHEMA_VERSION,
+        project: p.clone(),
+    })
+    .unwrap();
+    let back = ProjectFile::from_json_str(&json).unwrap();
+    assert_eq!(back.project.drum_kit, p.drum_kit);
+
+    // serde fixes the array length — a 7-element kit must not parse.
+    let short = json.replace("[35,36,37,38,39,40,41,42]", "[35,36,37,38,39,40,41]");
+    assert!(ProjectFile::from_json_str(&short).is_err());
+}

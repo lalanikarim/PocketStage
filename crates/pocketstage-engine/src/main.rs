@@ -47,10 +47,6 @@ use core::{EngineCore, Event, FluidBackend, LEAD_CH, PERIOD_FRAMES, RATE, Stats,
 const N_PERIODS: u32 = 3;
 const SF2_PATH: &str = "/usr/share/sounds/sf2/FluidR3_GM.sf2";
 
-/// Fixed 8-hit GM kit for PRESET-mode pads (D12): kick snare rim clap chh ohh tom crash.
-/// JSON-reassignable kits are on the roadmap; constants until then.
-const DRUM_KIT: [u8; 8] = [36, 38, 37, 39, 42, 46, 47, 49];
-
 /// Curated patch browser for DAW mode (D13): slot = pitch % 12. Letter B
 /// (slot 11) is the settings key, so there are eleven patches.
 const PATCHES: [(u8, &str); 11] = [
@@ -494,7 +490,12 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>) {
                             velocity,
                         } if (1..=8).contains(&index) => match mode {
                             Mode::Preset => {
-                                let key = DRUM_KIT[(index - 1) as usize] as i32;
+                                // Live kit (project.drum_kit or the engine
+                                // default), read lock-free from the atomic
+                                // the audio thread keeps current.
+                                let kit =
+                                    core::kit_or_default(stats.drum_kit.load(Ordering::Relaxed));
+                                let key = kit[(index - 1) as usize] as i32;
                                 // One channel per pad so retriggers kill only this pad.
                                 let chan = core::PAD_CH_BASE + (index - 1) as i32;
                                 let event = if on {

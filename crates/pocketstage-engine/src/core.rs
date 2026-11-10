@@ -46,6 +46,35 @@ pub fn is_pad_channel(chan: i32) -> bool {
     (TICK_CH..=15).contains(&chan)
 }
 
+/// Fixed 8-hit GM kit for PRESET-mode pads (D12): kick snare rim clap chh
+/// ohh tom crash. Used when the project leaves `drum_kit` unset.
+pub const DEFAULT_DRUM_KIT: [u8; 8] = [36, 38, 37, 39, 42, 46, 47, 49];
+
+/// The live kit travels from the audio thread (boot + swaps write it) to
+/// the MIDI feeder (reads it on every pad hit) as one packed AtomicU64 —
+/// lock-free both ways, keeping the audio-thread no-locks rule. Layout:
+/// 8 GM notes in bytes 0..=7 (validated ≤ 81, so bit 63 is always free)
+/// plus [`KIT_SET`] marking "the core has written a kit at least once".
+pub const KIT_SET: u64 = 1 << 63;
+
+pub fn pack_kit(kit: &[u8; 8]) -> u64 {
+    u64::from_le_bytes(*kit) | KIT_SET
+}
+
+pub fn unpack_kit(v: u64) -> [u8; 8] {
+    (v & !KIT_SET).to_le_bytes()
+}
+
+/// Reader-side resolution: the packed kit once the core has written one,
+/// else the fixed default (covers feeder strikes before the core boots).
+pub fn kit_or_default(v: u64) -> [u8; 8] {
+    if v & KIT_SET == 0 {
+        DEFAULT_DRUM_KIT
+    } else {
+        unpack_kit(v)
+    }
+}
+
 // -------------------------------------------------------------------- synth
 
 /// Everything the core can ask the audio engine to do. The real backend is a
@@ -185,6 +214,10 @@ pub struct Stats {
     pub live: Arc<LiveStatus>,
     /// Live project swaps via HTTP (cumulative).
     pub project_updates: AtomicU64,
+    /// Packed PRESET drum kit for the pad feeder ([`pack_kit`] bits, plus
+    /// [`KIT_SET`] once written). Written by the audio thread at boot and
+    /// on every swap; read lock-free by the MIDI feeder on pad hits.
+    pub drum_kit: AtomicU64,
 }
 
 impl Stats {
@@ -282,6 +315,10 @@ impl EngineCore {
         let takes = std::mem::take(&mut project.takes);
         live.takes
             .store(takes.len().min(u8::MAX as usize) as u8, Ordering::Relaxed);
+        stats.drum_kit.store(
+            pack_kit(&project.drum_kit.unwrap_or(DEFAULT_DRUM_KIT)),
+            Ordering::Relaxed,
+        );
         Self {
             bpm: project.bpm,
             project,
@@ -433,6 +470,10 @@ impl EngineCore {
             self.live.active_scene.store(0, Ordering::Relaxed);
         }
         self.project = new;
+        self.stats.drum_kit.store(
+            pack_kit(&self.project.drum_kit.unwrap_or(DEFAULT_DRUM_KIT)),
+            Ordering::Relaxed,
+        );
         self.apply_global_fx(synth);
         self.stats
             .project_updates
@@ -1163,6 +1204,47 @@ mod harness_tests {
             1,
             "project_updates counter"
         );
+    }
+
+    // ---- drum kit -----------------------------------------------------------------
+
+    #[test]
+    fn drum_kit_lands_on_the_feeder_atomic() {
+        let mut h = Harness::new();
+        // Boot with unset kit → engine default, flagged as written.
+        assert_eq!(
+            kit_or_default(h.core.stats.drum_kit.load(Ordering::Relaxed)),
+            DEFAULT_DRUM_KIT
+        );
+
+        let custom: [u8; 8] = [36, 40, 37, 39, 42, 46, 47, 56];
+        let mut pf = h.project();
+        pf.project.drum_kit = Some(custom);
+        h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
+        h.tick(1);
+        assert_eq!(
+            kit_or_default(h.core.stats.drum_kit.load(Ordering::Relaxed)),
+            custom
+        );
+
+        // Back to None → default comes back (not "keep last kit").
+        let mut pf = h.project();
+        pf.project.drum_kit = None;
+        h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
+        h.tick(1);
+        assert_eq!(
+            kit_or_default(h.core.stats.drum_kit.load(Ordering::Relaxed)),
+            DEFAULT_DRUM_KIT
+        );
+    }
+
+    #[test]
+    fn kit_packing_round_trips_and_flags() {
+        // Never written (atomic default 0) → the fixed default kit.
+        assert_eq!(kit_or_default(0), DEFAULT_DRUM_KIT);
+        let k: [u8; 8] = [35, 36, 37, 38, 39, 40, 41, 42];
+        assert_eq!(unpack_kit(pack_kit(&k)), k);
+        assert_eq!(kit_or_default(pack_kit(&k)), k);
     }
 
     // ---- global fx amounts --------------------------------------------------------

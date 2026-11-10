@@ -83,6 +83,8 @@ pub enum ValidationError {
     SendOutOfRange { track: String, send: f64 },
     #[error("global fx {name} {value} out of range 0..=1")]
     FxOutOfRange { name: &'static str, value: f64 },
+    #[error("drum kit note {note} out of range 35..=81 (GM percussion)")]
+    DrumNoteOutOfRange { note: u8 },
 }
 
 // ---------------------------------------------------------------- top level
@@ -172,6 +174,11 @@ pub struct Project {
     /// 0..=4 range, default 0.5 ≈ the stock 2); `None` = engine default.
     #[serde(default)]
     pub fx_chorus: Option<f64>,
+    /// GM drum notes for PRESET-mode pads 1–8 (D12). `None` = the engine's
+    /// fixed kit (kick snare rim clap chh ohh tom crash). Each note must be
+    /// in the GM percussion range 35..=81; pads keep one channel each.
+    #[serde(default)]
+    pub drum_kit: Option<[u8; 8]>,
 }
 
 fn default_bpm() -> f64 {
@@ -223,6 +230,7 @@ impl Project {
             takes: Vec::new(),
             fx_reverb: None,
             fx_chorus: None,
+            drum_kit: None,
         }
     }
 
@@ -255,6 +263,11 @@ impl Project {
             {
                 return Err(ValidationError::FxOutOfRange { name, value: v });
             }
+        }
+        if let Some(kit) = self.drum_kit
+            && let Some(&bad) = kit.iter().find(|&&n| !(35..=81).contains(&n))
+        {
+            return Err(ValidationError::DrumNoteOutOfRange { note: bad });
         }
         for track in &self.tracks {
             if track.clips.len() != self.scenes.len() {
