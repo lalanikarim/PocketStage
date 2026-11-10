@@ -278,6 +278,31 @@ pub fn apply_scene_voice<S: SynthBackend>(synth: &mut S, project: &Project, scen
 /// Per-period state machine of the audio thread. Constructed once and driven
 /// exclusively from one thread (the real audio thread or a test loop) —
 /// single writer, no locks anywhere in here.
+/// Keybed chatter guard (session-10b): under hard sustained pressure the
+/// Oxygen keybed bounces — a raw capture shows ~10 ms note-off/note-on
+/// re-trigger storms while one key is muscled down. Each re-attack would
+/// re-hammer a fresh sample = "stacked" mush. Policy: a release arms a
+/// short grace window; a re-strike inside it is swallowed and the note
+/// simply keeps sounding. Releases therefore land ~window late (40 ms,
+/// imperceptible) — everything else about D17 retrigger semantics is
+/// untouched (a strike with NO pending release still resets the voice).
+#[derive(Clone, Copy, PartialEq)]
+struct KeyGuard {
+    /// A note through this engine's live lane is (or was until flush) down.
+    down: bool,
+    /// `total_samples` when its release was seen; `u64::MAX` = none pending.
+    pending_off_at: u64,
+}
+
+const KEY_UP: KeyGuard = KeyGuard {
+    down: false,
+    pending_off_at: u64::MAX,
+};
+
+/// 40 ms at 48 kHz — comfortably past the measured ~10 ms chatter period,
+/// far below any musical re-strike a human can play per key.
+const CHATTER_GUARD_FRAMES: u64 = 48 * 40;
+
 pub struct EngineCore {
     pub project: Project,
     pub bpm: f64,
@@ -299,6 +324,9 @@ pub struct EngineCore {
     /// Finalized takes flow back to the HTTP layer (recordings survive
     /// reboot); tests keep the receiving end.
     take_feed: Sender<Take>,
+    /// Per-(channel, key) chatter state — flat array, no allocation on the
+    /// audio thread.
+    key_guard: [[KeyGuard; 128]; 16],
     left: Vec<f32>,
     right: Vec<f32>,
     out: Vec<i16>, // interleaved S16LE, ready for ALSA
@@ -332,6 +360,7 @@ impl EngineCore {
             live,
             stats,
             take_feed,
+            key_guard: [[KEY_UP; 128]; 16],
             left: vec![0.0; PERIOD_FRAMES],
             right: vec![0.0; PERIOD_FRAMES],
             out: vec![0; PERIOD_FRAMES * 2],
@@ -414,6 +443,9 @@ impl EngineCore {
             self.handle_event(synth, te.event);
         }
 
+        // 1a) Release any chatter-guarded notes whose grace window elapsed.
+        self.flush_guarded_offs(synth);
+
         // 1b) Master clock: ticks, scene-pattern gating, take loops.
         self.clock_section(synth);
 
@@ -465,6 +497,7 @@ impl EngineCore {
             self.live.active_scene.store(0, Ordering::Relaxed);
         }
         self.project = new;
+        self.reset_key_guards();
         self.stats.drum_kit.store(
             pack_kit(&self.project.drum_kit.unwrap_or(DEFAULT_DRUM_KIT)),
             Ordering::Relaxed,
@@ -515,6 +548,19 @@ impl EngineCore {
     fn handle_event<S: SynthBackend>(&mut self, synth: &mut S, event: Event) {
         match event {
             Event::NoteOn { chan, key, vel } => {
+                let t = self.total_samples;
+                let slot = self.guard_slot(chan, key);
+                if slot.down
+                    && slot.pending_off_at != u64::MAX
+                    && t - slot.pending_off_at < CHATTER_GUARD_FRAMES
+                {
+                    // Keybed chatter: cancel the pending release; the note
+                    // keeps sounding. No synth call, no capture.
+                    slot.pending_off_at = u64::MAX;
+                    return;
+                }
+                slot.down = true;
+                slot.pending_off_at = u64::MAX;
                 // Per-key retrigger (D17): a strike resets the previous voice
                 // of this exact key; other keys stay fully polyphonic.
                 // Pads: All Sound Off on their private channel (one-shots
@@ -528,17 +574,13 @@ impl EngineCore {
                 self.capture_note_on(chan, key, vel);
             }
             Event::NoteOff { chan, key } => {
-                synth.note_off(chan, key);
-                if let Some((base, evs)) = self.recording.as_mut()
-                    && let Some(start) = self.playing_since
-                {
-                    let step =
-                        clock::steps_elapsed(self.total_samples - start, RATE, self.bpm) as u64;
-                    evs.push(RecordedEvent::NoteOff {
-                        tick: step.saturating_sub(*base) as u32,
-                        channel: chan as u8,
-                        pitch: key as u8,
-                    });
+                let t = self.total_samples;
+                let slot = self.guard_slot(chan, key);
+                if slot.down && slot.pending_off_at == u64::MAX {
+                    // Defer: flush_guarded_offs sounds it out once the grace
+                    // window passes without a re-strike. Duplicate offs and
+                    // never-cancelled pendings are ignored.
+                    slot.pending_off_at = t;
                 }
             }
             Event::Play => {
@@ -548,12 +590,16 @@ impl EngineCore {
                 }
             }
             Event::Stop => {
+                // A release still inside its grace window belongs to the
+                // take — capture it before the wholesale silence erases it.
+                self.capture_pending_offs();
                 // Finalize any live take first (D15: stop means silent;
                 // playback waits for Play).
                 self.finalize_take();
                 self.playing_since = None;
                 self.transport.stop();
                 self.live.active_scene.store(0, Ordering::Relaxed);
+                self.reset_key_guards();
                 for t in 0..self.project.tracks.len() as i32 {
                     synth.all_notes_off(t);
                 }
@@ -615,6 +661,77 @@ impl EngineCore {
                     crate::transport::Effect::Queued | crate::transport::Effect::Ignore => {}
                 }
             }
+        }
+    }
+
+    /// Flat (channel, key) index; events outside 0..16 ch or 0..128 keys
+    /// bypass the guard entirely (returned slot always reads "up").
+    fn guard_slot(&mut self, chan: i32, key: i32) -> &mut KeyGuard {
+        // Chatter is a per-physical-key phenomenon; clamp defensively so a
+        // stray remote event can never panic the audio thread.
+        let c = chan.clamp(0, 15) as usize;
+        let k = key.clamp(0, 127) as usize;
+        &mut self.key_guard[c][k]
+    }
+
+    /// Sound out deferred releases whose grace window has elapsed.
+    fn flush_guarded_offs<S: SynthBackend>(&mut self, synth: &mut S) {
+        let t = self.total_samples;
+        for c in 0..16i32 {
+            for k in 0..128i32 {
+                let flush = {
+                    let slot = self.guard_slot(c, k);
+                    if slot.down
+                        && slot.pending_off_at != u64::MAX
+                        && t - slot.pending_off_at >= CHATTER_GUARD_FRAMES
+                    {
+                        slot.down = false;
+                        slot.pending_off_at = u64::MAX;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if flush {
+                    synth.note_off(c, k);
+                    self.capture_note_off(c, k);
+                }
+            }
+        }
+    }
+
+    /// Stamp any in-flight guarded releases into the live recording.
+    fn capture_pending_offs(&mut self) {
+        for c in 0..16i32 {
+            for k in 0..128i32 {
+                let pending = {
+                    let slot = self.guard_slot(c, k);
+                    slot.down && slot.pending_off_at != u64::MAX
+                };
+                if pending {
+                    self.capture_note_off(c, k);
+                }
+            }
+        }
+    }
+
+    /// Forget all guard state (Stop / project swap): the channels are being
+    /// silenced wholesale, pending releases must not fire afterwards.
+    fn reset_key_guards(&mut self) {
+        self.key_guard = [[KEY_UP; 128]; 16];
+    }
+
+    /// Deferred half of the NoteOff path — mirrored into a live recording.
+    fn capture_note_off(&mut self, chan: i32, key: i32) {
+        if let Some((base, evs)) = self.recording.as_mut()
+            && let Some(start) = self.playing_since
+        {
+            let step = clock::steps_elapsed(self.total_samples - start, RATE, self.bpm) as u64;
+            evs.push(RecordedEvent::NoteOff {
+                tick: step.saturating_sub(*base) as u32,
+                channel: chan as u8,
+                pitch: key as u8,
+            });
         }
     }
 
@@ -1134,6 +1251,121 @@ mod harness_tests {
         h.tick(1);
         let calls = h.calls();
         assert_eq!(calls[0], Call::Off(0, 60), "lead channel → note-off");
+    }
+
+    // ---- keybed chatter guard (session-10b) ---------------------------------
+
+    #[test]
+    fn chatter_storm_collapses_to_one_attack_and_one_release() {
+        let mut h = Harness::new();
+        h.send(Event::NoteOn {
+            chan: 0,
+            key: 60,
+            vel: 90,
+        });
+        h.tick(1);
+        assert!(h.has(Call::On(0, 60, 90)));
+
+        // Muscled key: ~10 ms off/on bounce pairs, well inside the 40 ms
+        // grace window (a period is ~5.3 ms).
+        for _ in 0..3 {
+            h.send(Event::NoteOff { chan: 0, key: 60 });
+            h.tick(1);
+            h.send(Event::NoteOn {
+                chan: 0,
+                key: 60,
+                vel: 85,
+            });
+            h.tick(1);
+        }
+        let calls = h.calls(); // the initial attack was consumed by has()
+        assert_eq!(
+            calls.iter().filter(|c| matches!(**c, Call::On(..))).count(),
+            0,
+            "storm must not re-attack"
+        );
+        assert!(!calls.contains(&Call::Off(0, 60)), "no release mid-storm");
+
+        // Final release lands once the grace window passes — not before.
+        h.send(Event::NoteOff { chan: 0, key: 60 });
+        h.tick(1);
+        assert!(!h.has(Call::Off(0, 60)), "release deferred inside grace");
+        h.tick(8); // 9 periods ≈ 48 ms > 40 ms
+        assert!(h.has(Call::Off(0, 60)), "release lands after grace");
+    }
+
+    #[test]
+    fn d17_retrigger_survives_the_guard() {
+        // A genuine strike with NO pending release still resets the voice.
+        let mut h = Harness::new();
+        h.send(Event::NoteOn {
+            chan: 0,
+            key: 61,
+            vel: 90,
+        });
+        h.tick(1);
+        h.send(Event::NoteOn {
+            chan: 0,
+            key: 61,
+            vel: 95,
+        });
+        h.tick(1);
+        let calls = h.calls();
+        assert!(calls.contains(&Call::On(0, 61, 90)));
+        assert!(calls.contains(&Call::On(0, 61, 95)));
+        assert!(calls.contains(&Call::Off(0, 61)), "D17 reset before re-on");
+    }
+
+    #[test]
+    fn recording_through_a_storm_captures_one_on_off_pair() {
+        let mut h = Harness::new();
+        h.send(Event::Play);
+        h.tick(2);
+        h.send(Event::StartRecording);
+        h.tick(1);
+        h.send(Event::NoteOn {
+            chan: 0,
+            key: 60,
+            vel: 90,
+        });
+        h.tick(1);
+        for _ in 0..3 {
+            h.send(Event::NoteOff { chan: 0, key: 60 });
+            h.tick(1);
+            h.send(Event::NoteOn {
+                chan: 0,
+                key: 60,
+                vel: 85,
+            });
+            h.tick(1);
+        }
+        h.send(Event::NoteOff { chan: 0, key: 60 });
+        h.tick(10); // grace expires → guarded off is captured
+        h.send(Event::StopRecording);
+        h.tick(1);
+        assert_eq!(h.core.takes.len(), 1);
+        let evs = &h.core.takes[0].events;
+        assert_eq!(evs.len(), 2, "exactly one on/off pair, got {evs:?}");
+        assert!(matches!(evs[0], RecordedEvent::NoteOn { .. }));
+        assert!(matches!(evs[1], RecordedEvent::NoteOff { .. }));
+    }
+
+    #[test]
+    fn stop_silences_without_ghost_releases_afterwards() {
+        let mut h = Harness::new();
+        h.send(Event::NoteOn {
+            chan: 0,
+            key: 60,
+            vel: 90,
+        });
+        h.tick(1);
+        h.calls();
+        h.send(Event::Stop);
+        h.tick(20);
+        assert!(
+            !h.calls().contains(&Call::Off(0, 60)),
+            "guards reset on Stop; no deferred off fires later"
+        );
     }
 
     // ---- swaps ---------------------------------------------------------------
