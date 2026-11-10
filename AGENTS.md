@@ -134,11 +134,13 @@ remote transport/scene triggers, mixer + FX sends, clip matrix + step
 editor, structure CRUD, take mute/solo/rename/delete/clear-all, project
 library with switch/save-as/export (D19). Session 10: device-free engine
 harness (`core.rs` — `SynthBackend` trait + fake synth driving
-`EngineCore::period()` in CI), global FX knobs, JSON drum kits, SEQ/MIX
-design pass (scratchpad R12, D21–D24 proposed). 118 tests, CI gates green.
-Session 10c hotfix: fixed the float→i16 render conversion (was saturating
-95–99% of samples into a square wave; see `HANDOFF.md` §8/§10) and rebased
-synth gain to 0.3 after the output became linear. Next (§6 item 14): implement
-R12 — D24 write-through lane → MIX overlay → SEQ overlay, test-first on the
-harness. Hardware-gated (awaiting gear/ears): feature ear-checks, pedal CC
-probe, Pi validation + deployment kit.
+`EngineCore::period()` in CI), global FX knobs, JSON drum kits. Session 10c
+hotfix: fixed the float→i16 render conversion (was saturating 95–99% of
+samples into a square wave; see `HANDOFF.md` §8/§10); synth gain rebased to
+0.3. Session 11 implemented R12 (D21–D24): write-through lane (engine →
+debounced outbound snapshots → store), MIX overlay (faders/knobs → mixer,
+fader-button detail pages) and SEQ overlay (bank-1 step programmer over the
+active scene) — pads 9/10 toggle overlays inside PRESET, voice-confirmed;
+overlay state surfaces in `/ws` + stats. 146 tests, CI gates green. Remaining
+(§6 item 14) is hardware-gated: ear-checks of sessions 8–11 features, pedal
+CC probe, Pi validation + deployment kit.

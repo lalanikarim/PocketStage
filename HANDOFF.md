@@ -64,7 +64,19 @@ Folder is `~/Projects/PocketStage`; remote **https://github.com/lalanikarim/Pock
 
 ---
 
-## 3. Current state of the code (session 10 wrap)
+## 3. Current state of the code (session 11 wrap)
+
+**R12 IMPLEMENTED (session 11):** D24 write-through lane → MIX overlay →
+SEQ overlay, each test-first on the harness. Pads 9/10 inside PRESET toggle
+MIX/SEQ (voice-confirmed kick/rim/tom — no LEDs), any mode switch exits.
+MIX maps F1–F4→gain, K1–K4→pan, K5–K8→reverb of tracks 1–4; fader buttons
+select a per-track detail page (K1–K4 = gain/pan/reverb/chorus). SEQ paints
+steps of the active scene with bank-1 pads (pad 11 next bar, pad 12 flip
+half-window), creating 1-bar clips on demand. Engine-originated edits
+persist via a debounced (~500 ms) outbound snapshot lane — nothing flows
+back in; `Track.root_note` added (additive, v1-safe). Overlay state rides
+`LiveStatus.overlay` → `/ws` frame + stats line + UI live card. 146 tests.
+See §10 "Session 11" and scratchpad R12.
 
 **A usable end-to-end loop exists**: boot → play keys/drum pads (PRESET) →
 ⏺ record takes → Stop → looping playback → overdub layers on top; DAW mode
@@ -344,10 +356,16 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     write-through CC mapping, SEQ = bank-1 step window programmer, shared
     `ProjectEdit` debounce lane. Build order when picked up: D24 lane → MIX
     → SEQ, test-first on the harness.
-14. **NEXT candidates (software)**: implement R12 (D24 lane, then MIX, then
-    SEQ); WS frame could carry overlay state + live CC values once R12 lands.
-    Hardware-gated: ear-checks of sessions 8/9/10 features, pedal probe,
-    T2 round 2, Pi validation + deployment kit (user deferred).
+14. **R12 IMPLEMENTED (session 11)** ✅: D24 write-through lane → MIX overlay
+    (D22) → SEQ overlay (D23), in the prescribed order, all harness-tested.
+    `/ws` + stats + UI surface `overlay` (none|mix|seq); live CC values not
+    yet in the WS frame (open nicety). **Next software candidates:** fader
+    *ramp* smoothing measurement, pitch-per-step editing in SEQ (deferred
+    in R12), MIX detail-page layout revisit if the hardware feel disagrees
+    with the K1–K4 = gain/pan/reverb/chorus reading. Hardware-gated: ear-
+    checks of sessions 8/9/10/11 features (overlay toggles, mix rides, step
+    painting), pedal probe, T2 round 2, Pi validation + deployment kit
+    (user deferred).
 
 ---
 
@@ -375,10 +393,10 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D18 | **Overdub layering**: takes keep looping while a new take records; capture is input-lane-only so no feedback. Tick base = record-press moment (align by starting layers on the downbeat) | ✅ |
 | D19 | **Project library**: `~/.pocketstage/projects/*.json`, current entry switchable at runtime (load → SetProject hot-swap); save-as = atomic snapshot (no switch); delete refuses current (409); POCKETSTAGE_PROJECT pins single-file mode for tests. Legacy project.json migrates in as "Default" | ✅ |
 | D20 | **Render-loop law**: the audio thread may never panic and never trusts cross-lane indices — get()/is_some_and over indexing; state machines live in pure tested modules (transport.rs pattern); ps-stats watchdogs ps-audio | ✅ |
-| D21 | **Overlay entry** (R12): SEQ/MIX are software overlays inside PRESET (the Play/Seq/Mix trims emit nothing). Logical pad 9 toggles MIX, pad 10 toggles SEQ; mutually exclusive; any mode switch exits both; voice-confirmed (no LEDs) | Proposed |
-| D22 | **MIX overlay** (R12): F1–F4→track gain, K1–K4→pan, K5–K8→reverb send; fader buttons = per-track detail select (D14); write-through to project with ~500 ms debounced persist | Proposed |
-| D23 | **SEQ overlay** (R12): live step programmer — bank-1 pads 1–8 toggle steps of an 8-step window on the selected track; bank 2 keeps commands (pad 10 exit, pad 11 next bar, pad 12 flip half-window); edits quantize to the engine's 16th grid | Proposed |
-| D24 | **Write-through lane** (R12): engine-originated project edits flow out on a dedicated mpsc to the store (debounced), never back in — single writer intact; engine applies edits locally first | Proposed |
+| D21 | **Overlay entry** (R12): SEQ/MIX are software overlays inside PRESET (the Play/Seq/Mix trims emit nothing). Logical pad 9 toggles MIX, pad 10 toggles SEQ; mutually exclusive; any mode switch exits both; voice-confirmed (no LEDs) | ✅ Implemented (s11) |
+| D22 | **MIX overlay** (R12): F1–F4→track gain, K1–K4→pan, K5–K8→reverb send; fader buttons = per-track detail select (D14); write-through to project with ~500 ms debounced persist. Detail-page layout chosen at implementation: K1–K4 = gain/pan/reverb/chorus of the selected track | ✅ Implemented (s11) |
+| D23 | **SEQ overlay** (R12): live step programmer — bank-1 pads 1–8 toggle steps of an 8-step window on the selected track; bank 2 keeps commands (pad 10 exit, pad 11 next bar, pad 12 flip half-window); edits quantize to the engine's 16th grid | ✅ Implemented (s11) |
+| D24 | **Write-through lane** (R12): engine-originated project edits flow out on a dedicated mpsc to the store (debounced), never back in — single writer intact; engine applies edits locally first. Debounce is sample-counted in the engine; the server drain coalesces bursts to one persist. First rider: CycleLoopBars — B-key survives reboot now | ✅ Implemented (s11) |
 
 ---
 
@@ -437,17 +455,18 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 
 ## 9. How to resume (suggested prompt for next session)
 
-> Read HANDOFF.md (§3 state, §6 backlog item 14, §7 decisions D11–D24) and
-> AGENTS.md. Session 10 closed the software-only sweep: engine integration
-> harness (core.rs SynthBackend + fake — ALL event-pipeline testing now runs
-> device-free in CI), take rename, global FX knobs, JSON drum kits, and the
-> SEQ/MIX design pass (scratchpad R12). Next: implement R12 in order —
-> D24 write-through lane, then MIX overlay (CC mapping + debounced persist),
-> then SEQ overlay (step programmer) — each test-first on the harness.
-> Alternative smaller work: /ws frame could surface overlay + live CC values
-> once R12 lands; ear-check list (§6 item 14) whenever the user is at the
-> machine with headphones; pedal probe if hardware appeared. Live env: engine
-> runs detached on :7777, project library in ~/.pocketstage/projects (test
+> Read HANDOFF.md (§3 state, §6 backlog item 14, §7 decisions D21–D24) and
+> AGENTS.md. Session 11 implemented R12 end to end: D24 write-through lane
+> (debounced engine→store snapshots; CycleLoopBars was the first rider),
+> MIX overlay (F/K → gain/pan/reverb, fader-button detail pages) and SEQ
+> overlay (bank-1 step programmer over the active scene, pad 11 bar,
+> pad 12 half-window) — 146 tests, all gates green, every behavior covered
+> device-free on the core.rs harness. Next: the work is hardware-gated —
+> ear-check list in §6 item 14 (overlay voice confirmations, mix rides,
+> step painting feel, sessions 8–10 features), pedal probe, Pi validation.
+> Software niceties: live CC values in the /ws frame, fader ramp
+> smoothing, pitch-per-step SEQ editing (deferred). Live env: engine runs
+> detached on :7777, project library in ~/.pocketstage/projects (test
 > artifacts: "Gig" snapshot, "UI Test Clip" in S1, reverb 0.5 on track 1 —
 > user may want to clean).
 
@@ -668,3 +687,28 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   Lesson: the render boundary needs an **end-to-end sample-format test** —
   "the synth's float output is clean" is not the same as "the bytes handed to
   ALSA are clean".
+- **Session 11 (R12 implemented):** D24 → MIX → SEQ in the prescribed order,
+  test-first on the harness, four commits + docs. **D24 lane:** engine-originated
+  edits mark the live project dirty; after 500 ms of quiet (sample-counted —
+  no timers on the audio thread) one full snapshot (takes included) flows out
+  on a dedicated mpsc; the ps-http drain task coalesces bursts and persists
+  through ProjectStore::replace. Outbound-only, R5 intact; PUT races resolve
+  last-writer-wins (accepted). CycleLoopBars rides it immediately — the B-key
+  setting survived reboot for the first time. **Overlays (D21):** core-owned
+  Overlay state mirrored to LiveStatus.overlay (→ /ws "overlay", stats line,
+  UI live card); pad 9/10 toggles are mutually exclusive, mode switches exit,
+  every switch voice-confirmed kick/rim/tom on private channels 8/9/10.
+  **MIX (D22):** F1–F4 gain / K1–K4 pan / K5–K8 reverb of tracks 1–4; fader
+  buttons select a detail page (press-again clears) where K1–K4 =
+  gain/pan/reverb/chorus of that one track — the layout was left open by the
+  design and this reading is documented in D22. CC math shared with
+  apply_track_voice (rides and PUTs cannot diverge); mute keeps CC7=0 through
+  a ride; controls inert outside the overlay; OOB indices resolve to nothing.
+  **SEQ (D23):** bank-1 pads toggle steps of an 8-step window (bar cursor +
+  half flip) on the selected track of the active scene (column 1 when
+  stopped); empty-cell toggle creates a 1-bar clip, pitch = clip's own →
+  Track.root_note (new additive field) → C4; never deletes clips; zero synth
+  calls from the programmer — edits land audibly on the 16th grid via the
+  pattern clock. Feeder reads the overlay atomic (drum-kit pattern) to route
+  bank-1 pads away from the kit. 146 tests total (+28), clippy -D warnings +
+  fmt green throughout. All of it device-free; hardware ear-checks still owed.

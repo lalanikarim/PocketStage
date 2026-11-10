@@ -615,7 +615,15 @@ ever).
 toggle semantics, SEQ/MIX modes, footswitch, fader/knob behavior in DAW mode (controls
 route to port 1 HUI there — unmeasured; MIX-era probe list).
 
-## R12. SEQ + MIX design pass (session 10 — D21–D24, proposed)
+## R12. SEQ + MIX design pass (session 10 — D21–D24)
+
+> **STATUS: IMPLEMENTED (session 11)** — all four decisions landed in the
+> prescribed order (lane → MIX → SEQ), harness-tested. Deviations/choices
+> made during implementation: debounce lives in the engine (sample-counted,
+> not wall-clock); server coalesces bursts to one persist; MIX detail page =
+> K1–K4 → gain/pan/reverb/chorus of the selected track (design left it open);
+> SEQ pitch precedence = clip's own pitch → `Track.root_note` (new additive
+> field) → C4, velocity fixed 100. See HANDOFF §10 "Session 11".
 
 **Premise check.** The MKV's Play/Seq/Mix trims are *device-side control presets*, not
 trackable MIDI switches — the only mode signal the host ever sees is the DAW/PRESET pair
