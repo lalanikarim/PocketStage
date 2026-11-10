@@ -46,6 +46,19 @@ pub fn is_pad_channel(chan: i32) -> bool {
     (TICK_CH..=15).contains(&chan)
 }
 
+/// Convert one normalized FluidSynth float sample to S16LE.
+///
+/// `fluid_synth_write_float` emits -1.0..=1.0, so the scale factor is the
+/// **i16** full scale. Scaling by `i32::MAX` before clamping to `i16` saturates
+/// every sample louder than ~-96 dBFS — i.e. essentially the whole signal —
+/// turning the output into a square wave ("crisp" at low levels, buzz/distortion
+/// as more samples hit the rails). The clamp is only a safety net for genuine
+/// out-of-range float output; it must not normally engage.
+#[inline]
+fn to_i16(x: f32) -> i16 {
+    (x * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
+
 /// Fixed 8-hit GM kit for PRESET-mode pads (D12): kick snare rim clap chh
 /// ohh tom crash. Used when the project leaves `drum_kit` unset.
 pub const DEFAULT_DRUM_KIT: [u8; 8] = [36, 38, 37, 39, 42, 46, 47, 49];
@@ -449,14 +462,12 @@ impl EngineCore {
         // 1b) Master clock: ticks, scene-pattern gating, take loops.
         self.clock_section(synth);
 
-        // 2) Render float L/R -> interleave + soft-clip to i16.
+        // 2) Render float L/R -> interleave + scale/clamp to i16.
         let t0 = Instant::now();
         synth.render(PERIOD_FRAMES, &mut self.left, &mut self.right);
         for i in 0..PERIOD_FRAMES {
-            let l = (self.left[i] * i32::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32);
-            let r = (self.right[i] * i32::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32);
-            self.out[2 * i] = l as i16;
-            self.out[2 * i + 1] = r as i16;
+            self.out[2 * i] = to_i16(self.left[i]);
+            self.out[2 * i + 1] = to_i16(self.right[i]);
         }
         let busy = t0.elapsed().as_nanos() as u64;
 
@@ -1251,6 +1262,20 @@ mod harness_tests {
         h.tick(1);
         let calls = h.calls();
         assert_eq!(calls[0], Call::Off(0, 60), "lead channel → note-off");
+    }
+
+    // ---- S16LE conversion ---------------------------------------------------
+
+    #[test]
+    fn float_to_i16_is_linear_until_true_full_scale() {
+        assert_eq!(to_i16(0.0), 0);
+        assert_eq!(to_i16(0.5), 16_383);
+        assert_eq!(to_i16(-0.5), -16_383);
+        assert_eq!(to_i16(0.018), 589); // typical live peak — must not saturate
+        assert_eq!(to_i16(1.0), i16::MAX);
+        assert_eq!(to_i16(-1.0), -i16::MAX);
+        assert_eq!(to_i16(2.0), i16::MAX);
+        assert_eq!(to_i16(-2.0), i16::MIN);
     }
 
     // ---- keybed chatter guard (session-10b) ---------------------------------

@@ -77,6 +77,11 @@ Rules that keep this architecture intact:
   on a desktop session (fine on the Pi, which runs plain ALSA).
 - `snd_pcm_delay` over PipeWire's ALSA plugin over-reports (~26 ms vs reality).
 - FluidSynth default master gain is 0.2 — set `synth.gain` explicitly.
+- `fluid_synth_write_float` emits normalized −1..=1. Convert to S16LE with
+  `i16::MAX` (32767), **never** `i32::MAX` — session-10c bug: scaling by i32
+  before the i16 clamp saturates everything above ≈−96 dBFS, turning the
+  output into a square wave (sounds "crisp" on soft taps, distorted on hard
+  hits). Keep `core::to_i16` + `float_to_i16_is_linear_until_true_full_scale`.
 - FluidSynth 2.3.4 FX gotchas (session-10b post-mortem, `examples/fx_bench.rs`):
   `fluid_synth_set_chorus`'s real C signature is `(synth, nr, level, speed,
   depth_ms, type)`; bool-typed settings (`synth.chorus.active`) have NO public
@@ -130,7 +135,10 @@ editor, structure CRUD, take mute/solo/rename/delete/clear-all, project
 library with switch/save-as/export (D19). Session 10: device-free engine
 harness (`core.rs` — `SynthBackend` trait + fake synth driving
 `EngineCore::period()` in CI), global FX knobs, JSON drum kits, SEQ/MIX
-design pass (scratchpad R12, D21–D24 proposed). 113 tests, CI gates green.
-Next (§6 item 14): implement R12 — D24 write-through lane → MIX overlay →
-SEQ overlay, test-first on the harness. Hardware-gated (awaiting gear/ears):
-feature ear-checks, pedal CC probe, Pi validation + deployment kit.
+design pass (scratchpad R12, D21–D24 proposed). 118 tests, CI gates green.
+Session 10c hotfix: fixed the float→i16 render conversion (was saturating
+95–99% of samples into a square wave; see `HANDOFF.md` §8/§10) and rebased
+synth gain to 0.3 after the output became linear. Next (§6 item 14): implement
+R12 — D24 write-through lane → MIX overlay → SEQ overlay, test-first on the
+harness. Hardware-gated (awaiting gear/ears): feature ear-checks, pedal CC
+probe, Pi validation + deployment kit.

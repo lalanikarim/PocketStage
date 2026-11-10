@@ -69,12 +69,21 @@ Folder is `~/Projects/PocketStage`; remote **https://github.com/lalanikarim/Pock
 **A usable end-to-end loop exists**: boot → play keys/drum pads (PRESET) →
 ⏺ record takes → Stop → looping playback → overdub layers on top; DAW mode
 launches scenes from pads and browses patches; a full web control plane at
-`:7777` mirrors and drives everything live. **113 tests, all CI gates green.**
+`:7777` mirrors and drives everything live. **118 tests, all CI gates green.**
 Session 10 closed the software-only backlog: device-free engine harness
 (`engine/src/core.rs` — `SynthBackend` trait + call-recording fake driving
 `EngineCore::period()` in a loop; main.rs keeps only ALSA/FFI/feeder),
 take rename, global FX amount knobs, JSON drum kits, and the SEQ/MIX
 design pass (scratchpad R12, D21–D24 proposed).
+
+**Session 10c hotfix — output was hard-clipped into a square wave.** The
+render path scaled FluidSynth's normalized float output by `i32::MAX` before
+clamping to `i16`, so every sample above ≈−96 dBFS pinned to ±32767 (95–99% of
+the waveform at normal velocities). Soft taps were sparse/partially clipped
+("crisp"); harder hits became a dense square wave ("stacked/distorted"). Fixed
+with `to_i16()` (`i16::MAX` scale + regression test); master gain is now 0.3
+(the old 0.05 was an accidental side-effect of the saturation). See §10
+"Session 10c" for measurements.
 
 ```
 PocketStage/
@@ -375,6 +384,13 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 
 ## 8. Open risks / watch-list
 
+- **Float→i16 conversion is load-bearing.** `fluid_synth_write_float` emits
+  normalized −1.0..=1.0; scale by `i16::MAX`, **never** `i32::MAX` — the latter
+  puts almost every sample above the i16 clamp and turns the output into a
+  square wave. Session 10c post-mortem below; regression test
+  `float_to_i16_is_linear_until_true_full_scale`. Any future render-path change
+  must include an end-to-end conversion test, not just a synth-float peak check.
+
 - **FluidSynth one-shot voices are unkillable by note-off or live gen edits**
   (session 8 lab): FluidR3 percussion ignores note-off (plays to natural end),
   `fluid_voice_gen_set(GEN_ATTENUATION)` + `update_param` writes the value but
@@ -607,3 +623,48 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   2.3.4; `Settings` must outlive `Synth` (dangling-pointer segfault). The
   session-10 claim "None = documented engine defaults restore the stock
   sound" was itself wrong — retracted by this entry.
+- **Session 10c (hotfix): velocity-dependent distortion post-mortem.** User
+  report across sessions: soft key hits sounded crisp, harder hits sounded
+  distorted / like notes were stacking, and it persisted at low system volume.
+  Chatter guard, reverb/chorus and MIDI input had already been ruled out
+  (events were 1–3 per hit; `fx_bench` proved FX-clean; the high-velocity
+  FluidR3 piano layer is *bit-exactly* the low-velocity waveform scaled —
+  normalized rel-diff 0.0000). Root cause was in `EngineCore::period`'s float
+  → S16LE conversion:
+
+  ```rust
+  // WRONG — threshold ≈ 1/65536 ≈ −96.3 dBFS:
+  let l = (left[i] * i32::MAX as f32)
+      .clamp(i16::MIN as f32, i16::MAX as f32);
+  ```
+
+  FluidSynth floats are normalized −1..=1. Multiplying by `i32::MAX` before
+  clamping to `i16` meant essentially every sample saturated: measured on the
+  live Grand Piano, velocity 35 clipped **95.1%** of samples, velocity 64
+  **98.5%**, velocity 90 **99.2%**, velocity 127 **99.5%** (velocity 5: 1.0%).
+  At normal playing levels the engine was emitting a square wave, not the
+  synth waveform. Very soft taps only partially crossed the threshold, hence
+  "crisp"; harder hits crossed everywhere, hence the buzz/stacking illusion.
+
+  Why it survived so long: prior checks inspected the *float* signal (peak
+  only 1.8% FS at velocity 127) and assumed the clamp only engaged above 1.0;
+  nobody tested the actual i16 output. The fix is a helper with the correct
+  scale plus a boundary regression test:
+
+  ```rust
+  fn to_i16(x: f32) -> i16 {
+      (x * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16
+  }
+  ```
+
+  `float_to_i16_is_linear_until_true_full_scale` asserts 0.5 → 16383,
+  0.018 → 589 (typical live peak), and saturation only at genuine full scale.
+  Consequence: the correct output is ~35 dB quieter than the old saturated
+  one, so `synth.gain` was raised from 0.05 (which had been masking the bug)
+  to 0.3; an 8-note max-velocity chord peaks ≈0.40 (≈−8 dBFS), leaving
+  headroom. The PipeWire per-app stream volume (restored to 100%) is still the
+  listener's loudness control.
+
+  Lesson: the render boundary needs an **end-to-end sample-format test** —
+  "the synth's float output is clean" is not the same as "the bytes handed to
+  ALSA are clean".

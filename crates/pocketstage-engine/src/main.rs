@@ -83,9 +83,12 @@ fn main() {
     // ---- FluidSynth setup (main thread; handles move to the audio thread) ----
     let settings = ffi::Settings::new().expect("new_fluid_settings returned null");
     settings.set_num("synth.sample-rate", RATE as f64);
-    // FluidSynth's default master gain is 0.2; we run well below that —
-    // per-listener loudness is the CX1970 / PipeWire stream volume's job.
-    settings.set_num("synth.gain", 0.05);
+    // FluidSynth's default master gain is 0.2. The old 0.05 was a workaround
+    // for the float->i16 clipping bug (fixed in core::to_i16); with the correct
+    // conversion, 0.3 puts a single hard note around -19 dBFS and an 8-note
+    // max-velocity chord around -8 dBFS — audible with headroom left before
+    // true full scale. Per-listener loudness is still PipeWire's job.
+    settings.set_num("synth.gain", 0.3);
     // FX policy (session-10 "held keys sound stacked" post-mortem, see
     // examples/fx_bench.rs): boot with FluidSynth's BUILT-IN effect config
     // and never write space/rate/depth params. A project only rides its
