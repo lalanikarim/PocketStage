@@ -61,6 +61,20 @@ unsafe extern "C" {
         type_: c_int,
     ) -> c_int;
     pub fn fluid_synth_all_notes_off(synth: *mut fluid_synth_t, chan: c_int) -> c_int;
+    pub fn fluid_synth_set_reverb(
+        synth: *mut fluid_synth_t,
+        roomsize: c_double,
+        damping: c_double,
+        width: c_double,
+        level: c_double,
+    ) -> c_int;
+    pub fn fluid_synth_set_chorus(
+        synth: *mut fluid_synth_t,
+        nrvoices: c_int,
+        speed: c_double,
+        depth_ms: c_double,
+        level: c_double,
+    ) -> c_int;
     pub fn fluid_synth_write_float(
         synth: *mut fluid_synth_t,
         len: c_int,
@@ -182,6 +196,31 @@ impl Synth {
     #[inline]
     pub fn set_channel_type_drum(&self, chan: i32) {
         unsafe { fluid_synth_set_channel_type(self.0, chan, 1) }; // CHANNEL_TYPE_DRUM
+    }
+
+    /// Set the global reverb + chorus amounts (both normalized 0..=1).
+    /// Room size/damping/width and chorus rate/depth stay at FluidSynth's
+    /// stock values; only the *amounts* are user-facing. Level ranges:
+    /// reverb 0..=0.999 direct; chorus normalized maps onto 0..=4 (stock
+    /// default 2 sits at v=0.5).
+    #[inline]
+    pub fn set_global_fx(&self, reverb: f64, chorus: f64) {
+        unsafe {
+            fluid_synth_set_reverb(
+                self.0,
+                0.5, // roomsize (stock default)
+                0.4, // damping
+                0.7, // width
+                reverb.clamp(0.0, 0.999),
+            );
+            fluid_synth_set_chorus(
+                self.0,
+                3,   // nrvoices (stock default)
+                0.3, // speed Hz
+                8.0, // depth ms
+                (chorus * 4.0).clamp(0.0, 4.0),
+            );
+        }
     }
 
     /// Renders `frames` audio frames into separate L / R float buffers (0..=1 stride).

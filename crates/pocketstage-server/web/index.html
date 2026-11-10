@@ -165,7 +165,7 @@ function renderMixer(pf) {
   const box = $("mixer");
   box.innerHTML = "";
   const tracks = pf.project.tracks || [];
-  if (!tracks.length) { box.innerHTML = "<em>No tracks.</em>"; return; }
+  if (!tracks.length) box.innerHTML = "<em>No tracks.</em>";
   for (const t of tracks) {
     const row = document.createElement("div");
     row.className = "mrow" + (t.mute ? " muted" : "");
@@ -222,6 +222,31 @@ function renderMixer(pf) {
     row.append(name, mute, gain, gval, pan, pval, rev, revv, cho, chov);
     box.appendChild(row);
   }
+
+  // Global FX amounts (project-level): scale the master reverb/chorus.
+  // None = engine default (0.9 / 0.5) — shown as such until touched.
+  const grow = document.createElement("div");
+  grow.className = "mrow";
+  const gname = document.createElement("span");
+  gname.className = "tname";
+  gname.textContent = "Global FX";
+  const mkGlobal = (key, dflt, title) => {
+    const s = document.createElement("input");
+    s.type = "range"; s.min = 0; s.max = 1; s.step = 0.01;
+    s.value = pf.project[key] ?? dflt; s.title = title + ` (default ${dflt})`;
+    const v = document.createElement("span"); v.className = "mval";
+    const upd = () => {
+      v.textContent = title + " " + (+s.value).toFixed(2)
+        + (pf.project[key] == null && +s.value === dflt ? " (dflt)" : "");
+    };
+    upd();
+    s.addEventListener("input", () => { pf.project[key] = +s.value; markDirty(); upd(); });
+    return [s, v];
+  };
+  const [grev, grevv] = mkGlobal("fx_reverb", 0.9, "rev");
+  const [gcho, gchov] = mkGlobal("fx_chorus", 0.5, "cho");
+  grow.append(gname, grev, grevv, gcho, gchov);
+  box.appendChild(grow);
 }
 
 function renderProject(pf) {

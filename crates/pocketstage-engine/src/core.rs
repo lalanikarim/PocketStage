@@ -61,7 +61,15 @@ pub trait SynthBackend {
     fn all_sounds_off(&mut self, chan: i32);
     /// Render `frames` audio frames into separate L / R float buffers.
     fn render(&mut self, frames: usize, left: &mut [f32], right: &mut [f32]);
+    /// Global reverb + chorus amounts (both normalized 0..=1) — the FX
+    /// amount knobs; applied at boot and on every project swap.
+    fn set_global_fx(&mut self, reverb: f64, chorus: f64);
 }
+
+/// Engine defaults when the project leaves the global FX amounts unset
+/// (reverb = FluidSynth's stock 0.9; chorus 0.5 ≈ the stock level of 2).
+pub const FX_REVERB_DEFAULT: f64 = 0.9;
+pub const FX_CHORUS_DEFAULT: f64 = 0.5;
 
 /// Real backend: borrowed handle to the one FluidSynth instance (owned and
 /// moved into the audio thread by `main.rs` — single writer, R5).
@@ -95,6 +103,10 @@ impl SynthBackend for FluidBackend<'_> {
     #[inline]
     fn render(&mut self, frames: usize, left: &mut [f32], right: &mut [f32]) {
         self.0.render(frames, left, right)
+    }
+    #[inline]
+    fn set_global_fx(&mut self, reverb: f64, chorus: f64) {
+        self.0.set_global_fx(reverb, chorus)
     }
 }
 
@@ -289,11 +301,28 @@ impl EngineCore {
         }
     }
 
-    /// Boot-time: apply every track's program + mixer to its channel.
+    /// Boot-time: apply every track's program + mixer to its channel,
+    /// plus the global FX amounts.
     pub fn apply_all_voices<S: SynthBackend>(&self, synth: &mut S) {
         for (t, track) in self.project.tracks.iter().enumerate() {
             apply_track_voice(synth, t as i32, track);
         }
+        self.apply_global_fx(synth);
+    }
+
+    /// Global FX amount knobs: project values (or engine defaults) onto the
+    /// synth. Rides the boot + SetProject paths — no new command needed.
+    fn apply_global_fx<S: SynthBackend>(&self, synth: &mut S) {
+        synth.set_global_fx(
+            self.project
+                .fx_reverb
+                .unwrap_or(FX_REVERB_DEFAULT)
+                .clamp(0.0, 1.0),
+            self.project
+                .fx_chorus
+                .unwrap_or(FX_CHORUS_DEFAULT)
+                .clamp(0.0, 1.0),
+        );
     }
 
     /// Interleaved S16LE output of the most recent [`Self::period`] — hand
@@ -404,6 +433,7 @@ impl EngineCore {
             self.live.active_scene.store(0, Ordering::Relaxed);
         }
         self.project = new;
+        self.apply_global_fx(synth);
         self.stats
             .project_updates
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -703,6 +733,7 @@ mod harness_tests {
         Cc(i32, i32, i32),
         NotesOff(i32),
         SoundsOff(i32),
+        Fx(f64, f64),
     }
 
     #[derive(Default)]
@@ -732,6 +763,9 @@ mod harness_tests {
         fn render(&mut self, frames: usize, l: &mut [f32], r: &mut [f32]) {
             l[..frames].fill(0.0);
             r[..frames].fill(0.0);
+        }
+        fn set_global_fx(&mut self, reverb: f64, chorus: f64) {
+            self.calls.push(Call::Fx(reverb, chorus));
         }
     }
 
@@ -1129,6 +1163,34 @@ mod harness_tests {
             1,
             "project_updates counter"
         );
+    }
+
+    // ---- global fx amounts --------------------------------------------------------
+
+    #[test]
+    fn boot_applies_default_global_fx() {
+        let mut h = Harness::new();
+        h.core.apply_all_voices(&mut h.fake);
+        assert!(h.has(Call::Fx(FX_REVERB_DEFAULT, FX_CHORUS_DEFAULT)));
+    }
+
+    #[test]
+    fn swap_applies_global_fx_knobs() {
+        let mut h = Harness::new();
+        let mut pf = h.project();
+        pf.project.fx_reverb = Some(0.3);
+        pf.project.fx_chorus = Some(1.0);
+        h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
+        h.tick(1);
+        assert!(h.has(Call::Fx(0.3, 1.0)));
+
+        // Back to None → engine defaults come back (not "leave as-is").
+        let mut pf = h.project();
+        pf.project.fx_reverb = None;
+        pf.project.fx_chorus = None;
+        h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
+        h.tick(1);
+        assert!(h.has(Call::Fx(FX_REVERB_DEFAULT, FX_CHORUS_DEFAULT)));
     }
 
     // ---- take rename -----------------------------------------------------------

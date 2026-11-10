@@ -81,6 +81,8 @@ pub enum ValidationError {
     PanOutOfRange { track: String, pan: f64 },
     #[error("track '{track}' fx send {send} out of range 0..=1")]
     SendOutOfRange { track: String, send: f64 },
+    #[error("global fx {name} {value} out of range 0..=1")]
+    FxOutOfRange { name: &'static str, value: f64 },
 }
 
 // ---------------------------------------------------------------- top level
@@ -161,6 +163,15 @@ pub struct Project {
     /// Recorded MIDI performances (D4: MIDI-only recording in v0.1).
     #[serde(default)]
     pub takes: Vec<Take>,
+    /// Global reverb level 0..=1; `None` = engine default (FluidSynth's own
+    /// 0.9). Scales the whole master reverb — per-track CC91 sends ride on
+    /// top of it. Applied at boot and on every project swap.
+    #[serde(default)]
+    pub fx_reverb: Option<f64>,
+    /// Global chorus level 0..=1 (normalized; maps onto FluidSynth's
+    /// 0..=4 range, default 0.5 ≈ the stock 2); `None` = engine default.
+    #[serde(default)]
+    pub fx_chorus: Option<f64>,
 }
 
 fn default_bpm() -> f64 {
@@ -210,6 +221,8 @@ impl Project {
                 })
                 .collect(),
             takes: Vec::new(),
+            fx_reverb: None,
+            fx_chorus: None,
         }
     }
 
@@ -235,6 +248,13 @@ impl Project {
         }
         if !LOOP_BARS_RANGE.contains(&self.loop_bars) {
             return Err(ValidationError::LoopBarsOutOfRange(self.loop_bars));
+        }
+        for (name, v) in [("fx_reverb", self.fx_reverb), ("fx_chorus", self.fx_chorus)] {
+            if let Some(v) = v
+                && !(0.0..=1.0).contains(&v)
+            {
+                return Err(ValidationError::FxOutOfRange { name, value: v });
+            }
         }
         for track in &self.tracks {
             if track.clips.len() != self.scenes.len() {

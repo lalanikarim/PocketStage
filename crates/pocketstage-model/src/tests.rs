@@ -414,3 +414,62 @@ fn fx_sends_default_none_and_validate_range() {
     p.tracks[0].chorus = Some(1.5);
     assert!(p.validate().is_err());
 }
+
+// ------------------------------------------------------------ global FX knobs
+
+#[test]
+fn global_fx_fields_default_to_none() {
+    let p = Project::default_project();
+    assert_eq!(p.fx_reverb, None);
+    assert_eq!(p.fx_chorus, None);
+    p.validate().unwrap();
+}
+
+#[test]
+fn global_fx_validates_range() {
+    let mut p = Project::default_project();
+    p.fx_reverb = Some(0.25);
+    p.fx_chorus = Some(1.0);
+    p.validate().unwrap();
+
+    p.fx_reverb = Some(1.5);
+    assert!(matches!(
+        p.validate(),
+        Err(ValidationError::FxOutOfRange {
+            name: "fx_reverb",
+            ..
+        })
+    ));
+    p.fx_reverb = None;
+    p.fx_chorus = Some(-0.1);
+    assert!(matches!(
+        p.validate(),
+        Err(ValidationError::FxOutOfRange {
+            name: "fx_chorus",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn old_files_without_fx_fields_still_parse() {
+    // Additive-field policy: a v1 file predating fx_reverb/fx_chorus loads
+    // with None defaults, and round-trips once present.
+    let mut p = Project::default_project();
+    p.fx_reverb = Some(0.6);
+    let json = serde_json::to_string(&ProjectFile {
+        version: SCHEMA_VERSION,
+        project: p.clone(),
+    })
+    .unwrap();
+    let back = ProjectFile::from_json_str(&json).unwrap();
+    assert_eq!(back.project.fx_reverb, Some(0.6));
+    assert_eq!(back.project.fx_chorus, None);
+
+    let stripped = json
+        .replace("\"fx_reverb\":0.6,", "")
+        .replace("\"fx_reverb\": 0.6,", "");
+    let back = ProjectFile::from_json_str(&stripped).unwrap();
+    assert_eq!(back.project.fx_reverb, None);
+    back.project.validate().unwrap();
+}
