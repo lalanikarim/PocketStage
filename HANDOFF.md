@@ -588,3 +588,22 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   row + kit editor card + ✎. SEQ/MIX design pass → scratchpad R12, D21–D24
   proposed. 113 tests, all gates green. Live ear-check still owed by human
   ears (§6 item 14).
+- **Session 10b (hotfix): "held keys sound stacked" post-mortem.** User
+  report: sustained notes uncrisp vs taps — a session-10 regression.
+  `examples/fx_bench.rs` (headless FFI render lab; tail/sustain energy +
+  sample-distance metrics) pinned TWO independent mistakes: (a) the hand-
+  written `fluid_synth_set_chorus` FFI declared five args in the wrong order
+  (real: `(synth, nr, level, speed, depth_ms, type)`) → boot ran chorus with
+  clamped-to-max speed + garbage `type` — but FluidR3 piano/organ/strings
+  have ZERO chorus send, so it was inaudible on the complained-about sound
+  (Lead Synth 81 is the probe preset that hears chorus); (b) the real
+  culprit: session-10 boot unconditionally overwrote reverb space params
+  (`set_reverb(0.5, 0.4, 0.7, v)` vs this build's stock room=0.2/damp=0/
+  width=0.5) — more than double the tail; held notes pile onto their own
+  reverb. New policy: FX knobs are LEVEL-ONLY and OPT-IN — `fx_* = None`
+  touches nothing at boot/swap (per-group *level* setters + `chorus_on/
+  reverb_on` only); regression proof: fixed engine renders bit-identical to
+  stock. Side discoveries: bool-typed settings have no public setter in
+  2.3.4; `Settings` must outlive `Synth` (dangling-pointer segfault). The
+  session-10 claim "None = documented engine defaults restore the stock
+  sound" was itself wrong — retracted by this entry.

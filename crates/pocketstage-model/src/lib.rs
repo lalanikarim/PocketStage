@@ -165,13 +165,15 @@ pub struct Project {
     /// Recorded MIDI performances (D4: MIDI-only recording in v0.1).
     #[serde(default)]
     pub takes: Vec<Take>,
-    /// Global reverb level 0..=1; `None` = engine default (FluidSynth's own
-    /// 0.9). Scales the whole master reverb — per-track CC91 sends ride on
-    /// top of it. Applied at boot and on every project swap.
+    /// Global reverb level 0..=1 (group-level knob only; room/damp/width
+    /// are never written). `None` = leave the synth's built-in FX config
+    /// untouched — session 10 learned that forcing params at boot changes
+    /// the stock sound ("stacked" held keys). Applied at boot and swap.
     #[serde(default)]
     pub fx_reverb: Option<f64>,
     /// Global chorus level 0..=1 (normalized; maps onto FluidSynth's
-    /// 0..=4 range, default 0.5 ≈ the stock 2); `None` = engine default.
+    /// native 0..=4 group level). `None` = leave the synth's built-in FX
+    /// config untouched; 0 explicitly switches chorus OFF.
     #[serde(default)]
     pub fx_chorus: Option<f64>,
     /// GM drum notes for PRESET-mode pads 1–8 (D12). `None` = the engine's

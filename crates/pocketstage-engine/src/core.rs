@@ -90,15 +90,15 @@ pub trait SynthBackend {
     fn all_sounds_off(&mut self, chan: i32);
     /// Render `frames` audio frames into separate L / R float buffers.
     fn render(&mut self, frames: usize, left: &mut [f32], right: &mut [f32]);
-    /// Global reverb + chorus amounts (both normalized 0..=1) — the FX
-    /// amount knobs; applied at boot and on every project swap.
-    fn set_global_fx(&mut self, reverb: f64, chorus: f64);
+    /// Global reverb + chorus amount knobs (normalized 0..=1); applied at
+    /// boot and on every project swap. `None` means LEAVE THE SYNTH'S
+    /// BUILT-IN CONFIG ALONE — do not push any values. Session 10 learned
+    /// the hard way that unconditionally overwriting reverb params (stock
+    /// room-size here is 0.2; we pushed 0.5) doubles the tail and makes
+    /// held notes "stack" (user report); examples/fx_bench.rs has proof.
+    /// Chorus `Some(0.0)` explicitly switches the effect off.
+    fn set_global_fx(&mut self, reverb: Option<f64>, chorus: Option<f64>);
 }
-
-/// Engine defaults when the project leaves the global FX amounts unset
-/// (reverb = FluidSynth's stock 0.9; chorus 0.5 ≈ the stock level of 2).
-pub const FX_REVERB_DEFAULT: f64 = 0.9;
-pub const FX_CHORUS_DEFAULT: f64 = 0.5;
 
 /// Real backend: borrowed handle to the one FluidSynth instance (owned and
 /// moved into the audio thread by `main.rs` — single writer, R5).
@@ -134,7 +134,7 @@ impl SynthBackend for FluidBackend<'_> {
         self.0.render(frames, left, right)
     }
     #[inline]
-    fn set_global_fx(&mut self, reverb: f64, chorus: f64) {
+    fn set_global_fx(&mut self, reverb: Option<f64>, chorus: Option<f64>) {
         self.0.set_global_fx(reverb, chorus)
     }
 }
@@ -347,18 +347,13 @@ impl EngineCore {
         self.apply_global_fx(synth);
     }
 
-    /// Global FX amount knobs: project values (or engine defaults) onto the
-    /// synth. Rides the boot + SetProject paths — no new command needed.
+    /// Global FX amount knobs: project values onto the synth; unset fields
+    /// pass `None` = leave the built-in config untouched (see trait docs).
+    /// Rides the boot + SetProject paths — no new command needed.
     fn apply_global_fx<S: SynthBackend>(&self, synth: &mut S) {
         synth.set_global_fx(
-            self.project
-                .fx_reverb
-                .unwrap_or(FX_REVERB_DEFAULT)
-                .clamp(0.0, 1.0),
-            self.project
-                .fx_chorus
-                .unwrap_or(FX_CHORUS_DEFAULT)
-                .clamp(0.0, 1.0),
+            self.project.fx_reverb.map(|v| v.clamp(0.0, 1.0)),
+            self.project.fx_chorus.map(|v| v.clamp(0.0, 1.0)),
         );
     }
 
@@ -774,7 +769,7 @@ mod harness_tests {
         Cc(i32, i32, i32),
         NotesOff(i32),
         SoundsOff(i32),
-        Fx(f64, f64),
+        Fx(Option<f64>, Option<f64>),
     }
 
     #[derive(Default)]
@@ -805,7 +800,7 @@ mod harness_tests {
             l[..frames].fill(0.0);
             r[..frames].fill(0.0);
         }
-        fn set_global_fx(&mut self, reverb: f64, chorus: f64) {
+        fn set_global_fx(&mut self, reverb: Option<f64>, chorus: Option<f64>) {
             self.calls.push(Call::Fx(reverb, chorus));
         }
     }
@@ -1250,10 +1245,15 @@ mod harness_tests {
     // ---- global fx amounts --------------------------------------------------------
 
     #[test]
-    fn boot_applies_default_global_fx() {
+    fn boot_without_fx_knobs_leaves_synth_stock() {
+        // Unset knobs must produce NO synth FX calls — the session-10
+        // regression was exactly "boot always overwrites reverb params."
         let mut h = Harness::new();
         h.core.apply_all_voices(&mut h.fake);
-        assert!(h.has(Call::Fx(FX_REVERB_DEFAULT, FX_CHORUS_DEFAULT)));
+        assert!(
+            h.has(Call::Fx(None, None)),
+            "unset knobs must pass None through"
+        );
     }
 
     #[test]
@@ -1264,15 +1264,15 @@ mod harness_tests {
         pf.project.fx_chorus = Some(1.0);
         h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
         h.tick(1);
-        assert!(h.has(Call::Fx(0.3, 1.0)));
+        assert!(h.has(Call::Fx(Some(0.3), Some(1.0))));
 
-        // Back to None → engine defaults come back (not "leave as-is").
+        // Back to None → leave-as-is, NOT some engine-pushed default.
         let mut pf = h.project();
         pf.project.fx_reverb = None;
         pf.project.fx_chorus = None;
         h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
         h.tick(1);
-        assert!(h.has(Call::Fx(FX_REVERB_DEFAULT, FX_CHORUS_DEFAULT)));
+        assert!(h.has(Call::Fx(None, None)));
     }
 
     // ---- take rename -----------------------------------------------------------

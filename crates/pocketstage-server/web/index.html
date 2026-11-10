@@ -239,18 +239,18 @@ function renderMixer(pf) {
   const mkGlobal = (key, dflt, title) => {
     const s = document.createElement("input");
     s.type = "range"; s.min = 0; s.max = 1; s.step = 0.01;
-    s.value = pf.project[key] ?? dflt; s.title = title + ` (default ${dflt})`;
+    s.value = pf.project[key] ?? dflt; s.title = title + " (unset = synth stock)";
     const v = document.createElement("span"); v.className = "mval";
     const upd = () => {
       v.textContent = title + " " + (+s.value).toFixed(2)
-        + (pf.project[key] == null && +s.value === dflt ? " (dflt)" : "");
+        + (pf.project[key] == null && +s.value === dflt ? " (stock)" : "");
     };
     upd();
     s.addEventListener("input", () => { pf.project[key] = +s.value; markDirty(); upd(); });
     return [s, v];
   };
   const [grev, grevv] = mkGlobal("fx_reverb", 0.9, "rev");
-  const [gcho, gchov] = mkGlobal("fx_chorus", 0.5, "cho");
+  const [gcho, gchov] = mkGlobal("fx_chorus", 0, "cho"); // unset/0 = untouched/off
   grow.append(gname, grev, grevv, gcho, gchov);
   box.appendChild(grow);
 }

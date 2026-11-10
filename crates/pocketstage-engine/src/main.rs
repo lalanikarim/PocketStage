@@ -86,6 +86,10 @@ fn main() {
     // FluidSynth's default master gain is 0.2; we run well below that —
     // per-listener loudness is the CX1970 / PipeWire stream volume's job.
     settings.set_num("synth.gain", 0.05);
+    // FX policy (session-10 "held keys sound stacked" post-mortem, see
+    // examples/fx_bench.rs): boot with FluidSynth's BUILT-IN effect config
+    // and never write space/rate/depth params. A project only rides its
+    // fx_reverb / fx_chorus knobs (levels); unset = touch nothing.
     let synth = ffi::Synth::new(&settings).expect("new_fluid_synth returned null");
 
     match synth.load_soundfont(SF2_PATH) {

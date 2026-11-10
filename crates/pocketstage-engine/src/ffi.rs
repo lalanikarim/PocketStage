@@ -28,7 +28,6 @@ unsafe extern "C" {
         name: *const c_char,
         val: c_double,
     ) -> c_int;
-
     // --- synth lifecycle ---
     pub fn new_fluid_synth(settings: *mut fluid_settings_t) -> *mut fluid_synth_t;
     pub fn delete_fluid_synth(synth: *mut fluid_synth_t);
@@ -61,18 +60,26 @@ unsafe extern "C" {
         type_: c_int,
     ) -> c_int;
     pub fn fluid_synth_all_notes_off(synth: *mut fluid_synth_t, chan: c_int) -> c_int;
-    pub fn fluid_synth_set_reverb(
+    pub fn fluid_synth_reverb_on(synth: *mut fluid_synth_t, fx_group: c_int, on: c_int) -> c_int;
+    pub fn fluid_synth_chorus_on(synth: *mut fluid_synth_t, fx_group: c_int, on: c_int) -> c_int;
+    // Effect AMOUNT knobs ride the per-fx-group level setters (this build
+    // has exactly one group, index 0). Space/rate/depth params are never
+    // touched — see Synth::set_global_fx for why.
+    //
+    // History: session 10 declared `fluid_synth_set_chorus` with five args
+    // in the wrong order (real signature takes `(synth, nr, level, speed,
+    // depth_ms, type)`) AND called `fluid_synth_set_reverb(0.5, 0.4, 0.7, v)`
+    // unconditionally at boot — this build's stock room-size is 0.2, so we
+    // doubled the tail and held notes "stacked" (user report). Both calls
+    // are gone; examples/fx_bench.rs has the measurements.
+    pub fn fluid_synth_set_reverb_group_level(
         synth: *mut fluid_synth_t,
-        roomsize: c_double,
-        damping: c_double,
-        width: c_double,
+        fx_group: c_int,
         level: c_double,
     ) -> c_int;
-    pub fn fluid_synth_set_chorus(
+    pub fn fluid_synth_set_chorus_group_level(
         synth: *mut fluid_synth_t,
-        nrvoices: c_int,
-        speed: c_double,
-        depth_ms: c_double,
+        fx_group: c_int,
         level: c_double,
     ) -> c_int;
     pub fn fluid_synth_write_float(
@@ -198,28 +205,31 @@ impl Synth {
         unsafe { fluid_synth_set_channel_type(self.0, chan, 1) }; // CHANNEL_TYPE_DRUM
     }
 
-    /// Set the global reverb + chorus amounts (both normalized 0..=1).
-    /// Room size/damping/width and chorus rate/depth stay at FluidSynth's
-    /// stock values; only the *amounts* are user-facing. Level ranges:
-    /// reverb 0..=0.999 direct; chorus normalized maps onto 0..=4 (stock
-    /// default 2 sits at v=0.5).
+    /// Global FX amount knobs — LEVELS ONLY, and only where the project
+    /// speaks (`None` = touch nothing). Room size/damping/width and chorus
+    /// rate/depth are never written: FluidSynth 2.3.4's built-in values are
+    /// a coherent whole (e.g. room-size default 0.2), and session 10's
+    /// unconditional overwrite of them is what made held keys "stack".
+    ///
+    /// - `reverb Some(v)` → effect on, group level = v (its native 0..=1).
+    ///   `Some(0.0)` keeps the unit powered but silent — same as muting the
+    ///   send; fine.
+    /// - `chorus Some(v)` → on/off via `fluid_synth_chorus_on`; when > 0,
+    ///   group level = v × 4 (stock default 2 sits at v = 0.5).
     #[inline]
-    pub fn set_global_fx(&self, reverb: f64, chorus: f64) {
+    pub fn set_global_fx(&self, reverb: Option<f64>, chorus: Option<f64>) {
         unsafe {
-            fluid_synth_set_reverb(
-                self.0,
-                0.5, // roomsize (stock default)
-                0.4, // damping
-                0.7, // width
-                reverb.clamp(0.0, 0.999),
-            );
-            fluid_synth_set_chorus(
-                self.0,
-                3,   // nrvoices (stock default)
-                0.3, // speed Hz
-                8.0, // depth ms
-                (chorus * 4.0).clamp(0.0, 4.0),
-            );
+            if let Some(v) = reverb {
+                fluid_synth_reverb_on(self.0, -1, 1);
+                fluid_synth_set_reverb_group_level(self.0, 0, v.clamp(0.0, 1.0));
+            }
+            if let Some(v) = chorus {
+                let on = v > 0.0;
+                fluid_synth_chorus_on(self.0, -1, on as c_int);
+                if on {
+                    fluid_synth_set_chorus_group_level(self.0, 0, (v * 4.0).clamp(0.0, 4.0));
+                }
+            }
         }
     }
 

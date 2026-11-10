@@ -77,6 +77,14 @@ Rules that keep this architecture intact:
   on a desktop session (fine on the Pi, which runs plain ALSA).
 - `snd_pcm_delay` over PipeWire's ALSA plugin over-reports (~26 ms vs reality).
 - FluidSynth default master gain is 0.2 — set `synth.gain` explicitly.
+- FluidSynth 2.3.4 FX gotchas (session-10b post-mortem, `examples/fx_bench.rs`):
+  `fluid_synth_set_chorus`'s real C signature is `(synth, nr, level, speed,
+  depth_ms, type)`; bool-typed settings (`synth.chorus.active`) have NO public
+  setter — toggle via `fluid_synth_chorus_on/reverb_on`; FluidR3 piano/organ/
+  strings have zero chorus send (probe chorus with Lead Synth 81); stock
+  reverb is room=0.2/damp=0/width=0.5 — never overwrite effect *space* params
+  at boot (caused "stacked" held keys). Policy: FX levels only, only when the
+  project sets them (`None` = touch nothing). `Settings` must outlive `Synth`.
 - Uninhabited enums are the opaque-type idiom for C handles; `#[repr(C)]` on
   them is compile error E0084.
 
