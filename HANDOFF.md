@@ -64,12 +64,17 @@ Folder is `~/Projects/PocketStage`; remote **https://github.com/lalanikarim/Pock
 
 ---
 
-## 3. Current state of the code (session 9 wrap)
+## 3. Current state of the code (session 10 wrap)
 
 **A usable end-to-end loop exists**: boot → play keys/drum pads (PRESET) →
 ⏺ record takes → Stop → looping playback → overdub layers on top; DAW mode
 launches scenes from pads and browses patches; a full web control plane at
-`:7777` mirrors and drives everything live. 84 tests, all CI gates green.
+`:7777` mirrors and drives everything live. **113 tests, all CI gates green.**
+Session 10 closed the software-only backlog: device-free engine harness
+(`engine/src/core.rs` — `SynthBackend` trait + call-recording fake driving
+`EngineCore::period()` in a loop; main.rs keeps only ALSA/FFI/feeder),
+take rename, global FX amount knobs, JSON drum kits, and the SEQ/MIX
+design pass (scratchpad R12, D21–D24 proposed).
 
 ```
 PocketStage/
@@ -81,8 +86,10 @@ PocketStage/
 ├── .github/workflows/ci.yml            # build + clippy -D warnings + fmt + tests
 └── crates/
     ├── pocketstage-engine/   ALSA + hand-rolled FluidSynth FFI; live MIDI; embedded
-    │                         server; transport.rs = PURE tested state machine;
-    │                         --demo mode; labs in examples/ (retrigger, drum_chan);
+    │                         server; core.rs = SynthBackend trait + EngineCore
+    │                         (device-free integration harness); transport.rs =
+    │                         PURE tested state machine; --demo mode; labs in
+    │                         examples/ (retrigger, drum_chan);
     │                         ps-stats thread watchdogs ps-audio
     ├── pocketstage-model/    versioned project format SCHEMA_VERSION=1 (additive-
     │                         only policy: gain/pan/mute/reverb/chorus/take.muted)
@@ -314,12 +321,24 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     save-as/delete/export routes and UI card; engine boots the library
     (~/.pocketstage/projects, most recent = current), POCKETSTAGE_PROJECT
     still pins a single file for tests/CI. Live E2E incl. 409-on-current.
-13. **NEXT (software-only candidates)**: engine integration harness — drive
-    the event pipeline device-free in CI (trait-injected fake synth; last big
-    testability gap); take rename; FX amount knobs (global FluidSynth
-    settings); JSON drum kits. Then design passes for SEQ mode (D20+) and
-    MIX mode. Hardware-gated: ear-checks of sessions 8/9 features, pedal
-    probe, T2 round 2, Pi validation + deployment kit (user deferred).
+13. **Software-only sweep DONE (session 10)**: engine integration harness ✅
+    (`core.rs` SynthBackend trait + fake; 21 harness tests covering launches,
+    quantize timing at bpm 125, record/overdub lanes, D15/D17/D18 semantics,
+    swap adoption, scene-shrink clamp, HTTP lane); take rename ✅
+    (POST /api/takes/rename + `EngineCommand::RenameTake` keeps the live copy
+    and the mine-rule in step — no duplicate-after-swap; ✎ in UI); global FX
+    amount knobs ✅ (`Project.fx_reverb`/`fx_chorus` 0..=1 → fluid_synth_set_
+    reverb/chorus at boot + swap, "Global FX" row in mixer card); JSON drum
+    kits ✅ (`Project.drum_kit [u8;8]`, GM 35–81, lock-free AtomicU64 handoff
+    to the pad feeder, kit editor card). SEQ/MIX design pass ✅ — scratchpad
+    **R12**, decisions D21–D24 (proposed): pads 9/10 overlay toggles, MIX =
+    write-through CC mapping, SEQ = bank-1 step window programmer, shared
+    `ProjectEdit` debounce lane. Build order when picked up: D24 lane → MIX
+    → SEQ, test-first on the harness.
+14. **NEXT candidates (software)**: implement R12 (D24 lane, then MIX, then
+    SEQ); WS frame could carry overlay state + live CC values once R12 lands.
+    Hardware-gated: ear-checks of sessions 8/9/10 features, pedal probe,
+    T2 round 2, Pi validation + deployment kit (user deferred).
 
 ---
 
@@ -347,6 +366,10 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D18 | **Overdub layering**: takes keep looping while a new take records; capture is input-lane-only so no feedback. Tick base = record-press moment (align by starting layers on the downbeat) | ✅ |
 | D19 | **Project library**: `~/.pocketstage/projects/*.json`, current entry switchable at runtime (load → SetProject hot-swap); save-as = atomic snapshot (no switch); delete refuses current (409); POCKETSTAGE_PROJECT pins single-file mode for tests. Legacy project.json migrates in as "Default" | ✅ |
 | D20 | **Render-loop law**: the audio thread may never panic and never trusts cross-lane indices — get()/is_some_and over indexing; state machines live in pure tested modules (transport.rs pattern); ps-stats watchdogs ps-audio | ✅ |
+| D21 | **Overlay entry** (R12): SEQ/MIX are software overlays inside PRESET (the Play/Seq/Mix trims emit nothing). Logical pad 9 toggles MIX, pad 10 toggles SEQ; mutually exclusive; any mode switch exits both; voice-confirmed (no LEDs) | Proposed |
+| D22 | **MIX overlay** (R12): F1–F4→track gain, K1–K4→pan, K5–K8→reverb send; fader buttons = per-track detail select (D14); write-through to project with ~500 ms debounced persist | Proposed |
+| D23 | **SEQ overlay** (R12): live step programmer — bank-1 pads 1–8 toggle steps of an 8-step window on the selected track; bank 2 keeps commands (pad 10 exit, pad 11 next bar, pad 12 flip half-window); edits quantize to the engine's 16th grid | Proposed |
+| D24 | **Write-through lane** (R12): engine-originated project edits flow out on a dedicated mpsc to the store (debounced), never back in — single writer intact; engine applies edits locally first | Proposed |
 
 ---
 
@@ -398,17 +421,19 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 
 ## 9. How to resume (suggested prompt for next session)
 
-> Read HANDOFF.md (§3 state, §6 backlog item 13, §7 decisions D11–D20) and
-> AGENTS.md. Session 8/9 delivered the full loop: recording + overdub, modes
-> v2, web control plane (mixer/FX/clip matrix/structure/projects), transport
-> extraction. Pick from backlog 13: (a) engine integration harness — fake-
-> synth trait injection so CI can drive the event pipeline device-free; or
-> (b) user-facing extras: take rename, FX amount knobs, JSON drum kits;
-> or (c) start the SEQ-mode design pass (brainstorm → D20+). If the user is
-> at the machine with headphones: run the ear-check list (§6 item 13) and a
-> pedal probe if hardware appeared. Live env: engine runs detached on :7777,
-> project library in ~/.pocketstage/projects (test artifacts: "Gig" snapshot,
-> "UI Test Clip" in S1, reverb 0.5 on track 1 — user may want to clean).
+> Read HANDOFF.md (§3 state, §6 backlog item 14, §7 decisions D11–D24) and
+> AGENTS.md. Session 10 closed the software-only sweep: engine integration
+> harness (core.rs SynthBackend + fake — ALL event-pipeline testing now runs
+> device-free in CI), take rename, global FX knobs, JSON drum kits, and the
+> SEQ/MIX design pass (scratchpad R12). Next: implement R12 in order —
+> D24 write-through lane, then MIX overlay (CC mapping + debounced persist),
+> then SEQ overlay (step programmer) — each test-first on the harness.
+> Alternative smaller work: /ws frame could surface overlay + live CC values
+> once R12 lands; ear-check list (§6 item 14) whenever the user is at the
+> machine with headphones; pedal probe if hardware appeared. Live env: engine
+> runs detached on :7777, project library in ~/.pocketstage/projects (test
+> artifacts: "Gig" snapshot, "UI Test Clip" in S1, reverb 0.5 on track 1 —
+> user may want to clean).
 
 ---
 
@@ -547,4 +572,19 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   D18 overdub layering; web polish (scene highlight, dirty guard, Space/R
   hotkeys); take SOLO button; D19 project library (multi-project switch/
   save-as/delete/export + legacy migration, live E2E). 84 tests, gates green.
-  Paused by user request at this wrap; next candidates in §6 item 13.
+- **Session 10**: software-only sweep of backlog 13. Engine integration
+  harness: render-loop logic extracted to `engine/src/core.rs` behind a
+  `SynthBackend` trait (FluidBackend = FFI passthrough; fake records calls),
+  `EngineCore::period()` driven device-free in CI — 21 harness tests incl.
+  exact quantize-boundary timing (bpm 125 ⇒ whole periods per beat) and the
+  live-crash regressions through the full pipeline. Take rename end to end
+  (store-first, `EngineCommand::RenameTake`, ✎ button; duplicate-after-swap
+  regression covered — adoption keys on names so both copies must move).
+  Global FX amounts (`fx_reverb`/`fx_chorus`, additive v1-safe) applied at
+  boot + swap via `fluid_synth_set_reverb/chorus`; None = documented engine
+  defaults restore the stock sound. JSON drum kits (`drum_kit [u8;8]`, GM
+  35–81) with a lock-free packed-AtomicU64 handoff to the MIDI feeder (the
+  harness caught a pre-swap publish-ordering bug mid-extraction). Web: FX
+  row + kit editor card + ✎. SEQ/MIX design pass → scratchpad R12, D21–D24
+  proposed. 113 tests, all gates green. Live ear-check still owed by human
+  ears (§6 item 14).

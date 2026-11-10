@@ -615,6 +615,72 @@ ever).
 toggle semantics, SEQ/MIX modes, footswitch, fader/knob behavior in DAW mode (controls
 route to port 1 HUI there — unmeasured; MIX-era probe list).
 
+## R12. SEQ + MIX design pass (session 10 — D21–D24, proposed)
+
+**Premise check.** The MKV's Play/Seq/Mix trims are *device-side control presets*, not
+trackable MIDI switches — the only mode signal the host ever sees is the DAW/PRESET pair
+(cc113/cc112, T6). So SEQ and MIX cannot be hardware modes: they are **software overlays**
+lived inside PRESET (perform) mode, entered from controls we own. The knobs and faders are
+the untouched inventory (engine ignores them today; the mapper already decodes them on
+port :0 ch13 — no new probes needed).
+
+**Entry vocabulary (D21).** Logical pads 9–16 (bank 2) become command buttons — they exist,
+they shadow low keys exactly like pads 1–8 (accepted, D12 precedent), and nothing uses them:
+- **Pad 9 → MIX overlay toggle**
+- **Pad 10 → SEQ overlay toggle**
+- Overlays are mutually exclusive; entering one exits the other; any mode switch
+  (DAW/PRESET) exits both. Toggling is confirmed by a voice (no LEDs, T2): pad 9 on = kick,
+  off = rim; pad 10 on = tom, off = rim. `/ws` + stats gain an `overlay` field.
+
+**MIX overlay (D22).** Live mixer manipulation, faders/knobs → channels:
+- F1–F4 → track 1–4 gain (CC7), K1–K4 → pan (CC10), K5–K8 → reverb send (CC91) —
+  one page, 4 tracks is the model (R2); F5–F9 unused until more channels exist.
+- **Write-through with debounce**: control moves update the engine's live project AND
+  schedule a store persist (~500 ms of quiet), so a board ride survives reboot without a
+  PUT per CC. This is a new lane (see D24) — takes already proved the pattern.
+- Fader buttons stay *channel selectors* (D14 honored): pressing FB<n> makes knob row
+  K1–K4 act on track n alone (detail page); pressing again clears. Default = 1:1 mapping.
+- No new state machine: CC → value → `apply_track_voice` fragment; pure math, harness-testable.
+
+**SEQ overlay (D23).** Live step programmer for the *active scene* — build patterns while
+the loop runs (this is the "SEQ mode" the early brainstorm promised, scoped down):
+- Editing happens on **bank 1 pads** (1–8) against an 8-step window; bank 2 keeps its
+  command roles so the toggle pads are never remapped (exit must always be reachable):
+  | control | role while SEQ is on |
+  |---|---|
+  | pads 1–8 (bank 1) | toggle steps of the current 8-step window |
+  | pad 10 | exit SEQ (same key that entered it) |
+  | pad 11 | advance one bar within the clip (wraps) |
+  | pad 12 | flip window: steps 1–8 ⇄ 9–16 |
+  Bank-flip is a deliberate mode: you edit on bank 1, you manage on bank 2.
+- Toggle lands on the grid at the next step boundary (the engine already gates patterns
+  per 16th — edits quantize for free). Pitch v0.1: the track's existing clip pitch if any,
+  else a per-track root note setting; melodic step-editing (pick-your-pitch) is an open
+  question, deliberately deferred.
+- With no scene active, SEQ edits target clip column 1 and starting playback there makes
+  the edit immediately audible (no hidden-mode editing).
+- Writes mutate `project.tracks[t].clips[scene]` in the engine and ride the same D24
+  write-through lane. Clip edits while the scene plays are the whole point — the harness
+  (core.rs) already drives scene/pattern state device-free, so this lands test-first.
+- Empty-cell semantics: toggling into an empty clip creates a 1-bar clip with the default
+  pitch; SEQ never deletes a clip wholesale.
+
+**Write-through lane (D24).** One mechanism serves both overlays: engine-originated,
+user-paced project mutations (`ProjectEdit`) go out on a dedicated mpsc to the HTTP layer,
+de-bounced, then persist through `ProjectStore::replace` exactly like a web PUT. The audio
+thread stays the single writer (R5): the lane carries *owned snapshots outward*, nothing
+comes back in. Cross-lane hazard review per D20: edits racing a SetProject swap resolve
+last-writer-wins on the store, engine converges on its next swap — acceptable for mixer
+values; clip edits need the edit applied to the *engine's* project first (it owns it), so
+SEQ/MIX never round-trip through HTTP to take effect.
+
+**Explicitly deferred:** pitch-per-step editing in SEQ; fader *ramp* smoothing (CC spam vs
+127 steps — measure later); pages beyond 4 tracks; Mackie/HUI *output* (the :1 port is
+input-only today, T2 showed no host-controllable anything); pedal (still no hardware).
+
+**Build order when picked up:** D24 lane first (small, testable), then MIX (pure CC math),
+then SEQ (grid edits + clip mutation). Each is a standalone commit with harness tests.
+
 ---
 
 ## Name

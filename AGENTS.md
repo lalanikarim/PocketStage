@@ -113,14 +113,16 @@ Rules that keep this architecture intact:
 ## Current status snapshot
 
 See `HANDOFF.md` §6 for the authoritative ordered backlog. As of this writing
-(sessions 8–9 wrap): full performance loop ✅ — record/overdub (D16/D18),
+(session 10 wrap): full performance loop ✅ — record/overdub (D16/D18),
 looping takes, PRESET/DAW modes (D11–D15), hardware-style retrigger (D17),
 pure tested `transport.rs` state machine, render-loop no-panic law (D20)
 with ps-audio watchdog. Web control plane complete for v0.1: REST + `/ws`,
 remote transport/scene triggers, mixer + FX sends, clip matrix + step
-editor, structure CRUD, take mute/solo/delete/clear-all, project library
-with switch/save-as/export (D19). 84 tests, CI gates green.
-Next candidates (§6 item 13): engine integration harness (fake-synth trait
-for device-free CI), take rename, FX amount knobs, JSON drum kits, SEQ/MIX
-design passes. Hardware-gated (awaiting gear/ears): feature ear-checks,
-pedal CC probe, Pi validation + deployment kit.
+editor, structure CRUD, take mute/solo/rename/delete/clear-all, project
+library with switch/save-as/export (D19). Session 10: device-free engine
+harness (`core.rs` — `SynthBackend` trait + fake synth driving
+`EngineCore::period()` in CI), global FX knobs, JSON drum kits, SEQ/MIX
+design pass (scratchpad R12, D21–D24 proposed). 113 tests, CI gates green.
+Next (§6 item 14): implement R12 — D24 write-through lane → MIX overlay →
+SEQ overlay, test-first on the harness. Hardware-gated (awaiting gear/ears):
+feature ear-checks, pedal CC probe, Pi validation + deployment kit.
