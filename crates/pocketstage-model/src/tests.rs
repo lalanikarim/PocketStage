@@ -190,7 +190,27 @@ fn optional_fields_have_sane_defaults() {
     assert_eq!(t.color, [200, 200, 200]);
     assert_eq!(file.project.loop_bars, 4); // D16 default
     assert_eq!(t.channel, None); // D3: channel = track index
+    assert_eq!(t.root_note, None); // D23: SEQ fallback pitch unset by default
     file.validate().unwrap();
+}
+
+#[test]
+fn root_note_round_trips_and_validates() {
+    // Additive v1-safe field (D23): optional, defaults None, range-checked.
+    let mut p = Project::default_project();
+    p.tracks[0].root_note = Some(48);
+    p.validate().unwrap();
+    let json = ProjectFile {
+        version: SCHEMA_VERSION,
+        project: p.clone(),
+    }
+    .to_json_pretty()
+    .unwrap();
+    let back = ProjectFile::from_json_str(&json).unwrap();
+    assert_eq!(back.project.tracks[0].root_note, Some(48));
+
+    p.tracks[0].root_note = Some(128);
+    assert_eq!(p.validate(), Err(ValidationError::PitchOutOfRange(128)));
 }
 
 // --------------------------------------------------- slice A: record prep

@@ -221,6 +221,7 @@ impl Project {
                     mute: false,
                     reverb: None,
                     chorus: None,
+                    root_note: None,
                 })
                 .collect(),
             scenes: (1..=MAX_SCENES)
@@ -299,6 +300,11 @@ impl Project {
                     track: track.name.clone(),
                     gain: g,
                 });
+            }
+            if let Some(n) = track.root_note
+                && n > 127
+            {
+                return Err(ValidationError::PitchOutOfRange(n));
             }
             for s in [track.reverb, track.chorus] {
                 if let Some(v) = s
@@ -400,6 +406,10 @@ pub struct Track {
     /// Chorus send 0..=1; `None` = soundfont default. Applied as CC93.
     #[serde(default)]
     pub chorus: Option<f64>,
+    /// Default pitch for SEQ-overlay step editing (D23): used when the
+    /// edited clip has no existing pitch to copy. `None` = engine fallback.
+    #[serde(default)]
+    pub root_note: Option<u8>,
 }
 
 fn default_color() -> [u8; 3] {
