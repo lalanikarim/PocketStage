@@ -511,6 +511,13 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>) {
                             on,
                             velocity,
                         } if (1..=8).contains(&index) => match mode {
+                            Mode::Preset if stats.live.overlay.load(Ordering::Relaxed) == 2 => {
+                                // SEQ overlay: bank-1 pads program steps,
+                                // they do NOT hit the drum kit (D23).
+                                if on {
+                                    send_event(&tx, m.received, Event::SeqStep { step: index });
+                                }
+                            }
                             Mode::Preset => {
                                 // Live kit (project.drum_kit or the engine
                                 // default), read lock-free from the atomic
@@ -572,11 +579,20 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>) {
                             index: index @ 9..=16,
                             on: true,
                             ..
-                        } if mode == Mode::Preset => match index {
-                            9 => send_event(&tx, m.received, Event::ToggleMixOverlay),
-                            10 => send_event(&tx, m.received, Event::ToggleSeqOverlay),
-                            _ => {} // 11+ gain roles while an overlay is live
-                        },
+                        } if mode == Mode::Preset => {
+                            // Pad 10 doubles as the SEQ exit (same key that
+                            // entered); pads 11/12 are the bank-2 management
+                            // roles of D23 — only while SEQ is live. Bank
+                            // flip is deliberate: edit on bank 1, manage on 2.
+                            let seq_live = stats.live.overlay.load(Ordering::Relaxed) == 2;
+                            match index {
+                                9 => send_event(&tx, m.received, Event::ToggleMixOverlay),
+                                10 => send_event(&tx, m.received, Event::ToggleSeqOverlay),
+                                11 if seq_live => send_event(&tx, m.received, Event::SeqNextBar),
+                                12 if seq_live => send_event(&tx, m.received, Event::SeqFlipWindow),
+                                _ => {}
+                            }
+                        }
                         // Faders/knobs/fader-buttons: forwarded unconditionally —
                         // the core interprets them only while MIX is on (D22),
                         // and fader buttons are channel selectors, never scene

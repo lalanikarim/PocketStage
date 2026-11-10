@@ -18,7 +18,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::Instant;
 
 use pocketstage_model::{
-    Project, ProjectFile, Quantize, RecordedEvent, SCHEMA_VERSION, Take, Track,
+    Clip, Pattern, Project, ProjectFile, Quantize, RecordedEvent, SCHEMA_VERSION, STEPS_PER_BAR,
+    StepNote, Take, Track,
 };
 use pocketstage_server::{EngineCommand, LiveStatus};
 
@@ -98,6 +99,13 @@ impl Overlay {
 pub const CONFIRM_KICK: (i32, i32) = (PAD_CH_BASE, 36);
 pub const CONFIRM_RIM: (i32, i32) = (PAD_CH_BASE + 1, 37);
 pub const CONFIRM_TOM: (i32, i32) = (PAD_CH_BASE + 2, 47);
+
+/// D23 fallback pitch for a step when neither the edited clip nor the track
+/// carries a pitch hint (`Track::root_note`).
+pub const DEFAULT_STEP_PITCH: u8 = 60;
+/// Fixed velocity for pad-toggled SEQ steps (pitch-per-step is deferred in
+/// R12; touch dynamics belong to the recorded lane, not the programmer).
+pub const STEP_VELOCITY: u8 = 100;
 
 /// The live kit travels from the audio thread (boot + swaps write it) to
 /// the MIDI feeder (reads it on every pad hit) as one packed AtomicU64 —
@@ -246,6 +254,15 @@ pub enum Event {
     SelectTrack {
         index: u8,
     },
+    /// D23: bank-1 pad while SEQ is on — toggle step `step` (1–8) of the
+    /// current window on the selected track of the active scene.
+    SeqStep {
+        step: u8,
+    },
+    /// D23: pad 11 — advance the step window one bar within the clip (wraps).
+    SeqNextBar,
+    /// D23: pad 12 — flip the window between steps 1–8 and 9–16.
+    SeqFlipWindow,
 }
 
 /// Which mixer field a MIX-overlay control move writes (D22). The CC math
@@ -403,8 +420,13 @@ pub struct EngineCore {
     /// LiveStatus atomic so WS/stats see it without touching core state.
     pub overlay: Overlay,
     /// D22/D23: fader-button channel select — `Some(n)` = detail page for
-    /// track n (MIX knobs / SEQ edit target); `None` = 1:1 page mapping.
+    /// track n (MIX knobs / SEQ edit target); `None` = 1:1 page mapping
+    /// (SEQ then edits track 1).
     pub detail: Option<usize>,
+    /// D23: SEQ cursor — bar within the edited clip (pad 11 advances, wraps
+    /// at use time) and 8-step half-window (pad 12 flips 1–8 ⇄ 9–16).
+    pub seq_bar: usize,
+    pub seq_half: bool,
     pub total_samples: u64, // frames rendered so far (master clock domain)
     pub playing_since: Option<u64>, // sample index where Play fired
     pub cycles: u64,
@@ -454,6 +476,8 @@ impl EngineCore {
             transport: Transport::default(),
             overlay: Overlay::None,
             detail: None,
+            seq_bar: 0,
+            seq_half: false,
             total_samples: 0,
             playing_since: None,
             cycles: 0,
@@ -782,8 +806,31 @@ impl EngineCore {
             }
             Event::ToggleSeqOverlay => {
                 let on = self.overlay != Overlay::Seq;
+                if on {
+                    // Every entry starts from a known cursor (bar 1, low half).
+                    self.seq_bar = 0;
+                    self.seq_half = false;
+                }
                 self.set_overlay(if on { Overlay::Seq } else { Overlay::None });
                 self.confirm(synth, if on { CONFIRM_TOM } else { CONFIRM_RIM });
+            }
+            Event::SeqStep { step } => {
+                // Bank-1 pads 1–8 while SEQ is on (feeder routes them here).
+                if self.overlay == Overlay::Seq && (1..=8).contains(&step) {
+                    self.seq_toggle_step(step - 1);
+                }
+            }
+            Event::SeqNextBar => {
+                if self.overlay == Overlay::Seq {
+                    // Wrapping happens at use time (`% clip bars`) so the
+                    // cursor stays meaningful when it lands on a 1-bar clip.
+                    self.seq_bar = self.seq_bar.wrapping_add(1);
+                }
+            }
+            Event::SeqFlipWindow => {
+                if self.overlay == Overlay::Seq {
+                    self.seq_half = !self.seq_half;
+                }
             }
             Event::ExitOverlays => {
                 self.set_overlay(Overlay::None);
@@ -886,6 +933,60 @@ impl EngineCore {
         synth.all_sounds_off(chan);
         synth.note_on(chan, note, 100);
         synth.note_off(chan, note);
+    }
+
+    /// D23: toggle one step of the 8-step window on the target track of the
+    /// active scene (column 1 when nothing plays — no hidden-mode editing).
+    /// Toggling into an empty cell creates a 1-bar clip; SEQ never deletes a
+    /// clip wholesale. Pitch: the clip's own first pitch, else the track's
+    /// `root_note`, else [`DEFAULT_STEP_PITCH`]. No synth call needed: the
+    /// clock section re-reads the project every period, so a step lands on
+    /// the 16th grid for free (and is instantly audible while looping).
+    fn seq_toggle_step(&mut self, idx: u8) {
+        let scene = self.transport.active.unwrap_or(0);
+        let track = self.detail.unwrap_or(0);
+        let Some(tr) = self.project.tracks.get_mut(track) else {
+            return;
+        };
+        let Some(cell) = tr.clips.get_mut(scene) else {
+            return;
+        };
+        if cell.is_none() {
+            *cell = Some(Clip {
+                name: "SEQ".into(),
+                pattern: Pattern {
+                    bars: 1,
+                    steps: vec![None; STEPS_PER_BAR],
+                },
+            });
+        }
+        // D20 discipline: no unwrap in the audio thread — re-check instead.
+        if let Some(clip) = cell.as_mut() {
+            let bars = usize::from(clip.pattern.bars.max(1));
+            let bar = self.seq_bar % bars;
+            let abs = bar * STEPS_PER_BAR + if self.seq_half { 8 } else { 0 } + idx as usize;
+            if abs >= clip.pattern.steps.len() {
+                return; // malformed pattern (validate should prevent): ignore
+            }
+            if clip.pattern.steps[abs].is_some() {
+                clip.pattern.steps[abs] = None; // toggle OFF keeps the clip
+            } else {
+                let pitch = clip
+                    .pattern
+                    .steps
+                    .iter()
+                    .flatten()
+                    .map(|n| n.pitch)
+                    .next()
+                    .or(tr.root_note)
+                    .unwrap_or(DEFAULT_STEP_PITCH);
+                clip.pattern.steps[abs] = Some(StepNote {
+                    pitch,
+                    velocity: STEP_VELOCITY,
+                });
+            }
+            self.mark_project_edit();
+        }
     }
 
     /// D22 write-through mix edit: update the project field AND sound it out
@@ -2127,6 +2228,218 @@ mod harness_tests {
         h.tick(QUIET_PERIODS);
         let pf = h.edit_rx.try_recv().expect("mix edit persisted");
         assert_eq!(pf.project.tracks[0].gain, Some(33.0 / 127.0));
+    }
+
+    // ---- SEQ overlay (D23) --------------------------------------------------
+
+    /// Step of track 1's scene-1 clip (window-addressing assertions).
+    fn step_at(h: &Harness, i: usize) -> Option<StepNote> {
+        h.core.project.tracks[0].clips[0]
+            .as_ref()
+            .unwrap()
+            .pattern
+            .steps[i]
+    }
+
+    /// Two-bar all-empty clip for window-addressing tests.
+    fn empty_two_bar_clip() -> Clip {
+        let mut clip = Harness::clip("2bar", &[]);
+        clip.pattern.bars = 2;
+        clip.pattern.steps.resize(32, None);
+        clip
+    }
+
+    #[test]
+    fn seq_toggle_creates_clip_at_the_right_step() {
+        let mut h = Harness::new();
+        h.core.project.tracks[0].root_note = Some(48);
+        h.send(Event::ToggleSeqOverlay);
+        h.tick(1);
+        h.calls(); // confirmation tom
+        h.send(Event::SeqStep { step: 3 });
+        h.tick(1);
+        let clip = h.core.project.tracks[0].clips[0]
+            .as_ref()
+            .expect("empty cell: toggle creates a 1-bar clip");
+        assert_eq!(clip.pattern.bars, 1);
+        assert_eq!(
+            clip.pattern.steps[2],
+            Some(StepNote {
+                pitch: 48,
+                velocity: STEP_VELOCITY
+            })
+        );
+        // No synth calls — audibility comes from the pattern clock, edits
+        // quantize to the 16th grid for free.
+        assert!(h.calls().iter().all(|c| !matches!(c, Call::On(..))));
+    }
+
+    #[test]
+    fn seq_toggle_off_clears_the_step_but_keeps_the_clip() {
+        let mut h = Harness::new();
+        h.send(Event::ToggleSeqOverlay);
+        h.send(Event::SeqStep { step: 1 });
+        h.tick(1);
+        assert!(h.core.project.tracks[0].clips[0].is_some());
+        h.send(Event::SeqStep { step: 1 }); // toggle again -> OFF
+        h.tick(1);
+        let clip = h.core.project.tracks[0].clips[0]
+            .as_ref()
+            .expect("never deletes wholesale");
+        assert_eq!(clip.pattern.steps[0], None);
+    }
+
+    #[test]
+    fn seq_copies_the_clip_pitch_before_the_root_note() {
+        let mut h = Harness::new();
+        h.core.project.tracks[0].root_note = Some(48);
+        h.core.project.tracks[0].clips[0] = Some(Harness::clip("lead", &[(5, 64, 90)]));
+        h.send(Event::ToggleSeqOverlay);
+        h.send(Event::SeqStep { step: 1 }); // new step -> copy the clip's own pitch
+        h.tick(1);
+        let clip = h.core.project.tracks[0].clips[0].as_ref().unwrap();
+        assert_eq!(clip.pattern.steps[0].map(|n| n.pitch), Some(64));
+    }
+
+    #[test]
+    fn seq_window_addressing_bar_and_half_flip() {
+        let mut h = Harness::new();
+        h.core.project.tracks[0].clips[0] = Some(empty_two_bar_clip());
+        h.send(Event::ToggleSeqOverlay);
+        h.tick(1);
+        // Cursor enters at bar 1, steps 1–8.
+        h.send(Event::SeqStep { step: 1 });
+        h.tick(1);
+        assert!(step_at(&h, 0).is_some(), "bar 1, low half -> abs 0");
+
+        h.send(Event::SeqFlipWindow); // pad 12: steps 9–16
+        h.send(Event::SeqStep { step: 2 });
+        h.tick(1);
+        assert!(step_at(&h, 9).is_some(), "bar 1, high half -> abs 9");
+
+        h.send(Event::SeqNextBar); // pad 11: bar 2 (high half stays flipped)
+        h.send(Event::SeqStep { step: 3 });
+        h.tick(1);
+        assert!(step_at(&h, 26).is_some(), "bar 2, high half -> abs 26");
+    }
+
+    #[test]
+    fn seq_next_bar_wraps_within_a_one_bar_clip() {
+        let mut h = Harness::new();
+        h.send(Event::ToggleSeqOverlay);
+        for _ in 0..5 {
+            h.send(Event::SeqNextBar);
+        }
+        h.send(Event::SeqStep { step: 1 });
+        h.tick(1);
+        // Cursor wrapped to the only bar there is — no panic, note landed.
+        let clip = h.core.project.tracks[0].clips[0].as_ref().expect("clip");
+        assert!(clip.pattern.steps[0].is_some());
+    }
+
+    #[test]
+    fn seq_targets_the_active_scene_column_or_first_when_stopped() {
+        let mut h = Harness::new();
+        // Stopped: edits aim at clip column 1 (no hidden-mode editing).
+        h.send(Event::ToggleSeqOverlay);
+        h.send(Event::SeqStep { step: 1 });
+        h.tick(1);
+        assert!(h.core.project.tracks[0].clips[0].is_some());
+
+        // Scene 3 launched -> column 3 is the target.
+        h.send(Event::LaunchScene { index: 2 });
+        h.tick(1);
+        h.send(Event::SeqStep { step: 2 });
+        h.tick(1);
+        assert!(h.core.project.tracks[0].clips[2].is_some(), "active column");
+        assert_eq!(
+            h.core.project.tracks[0].clips[0]
+                .as_ref()
+                .unwrap()
+                .pattern
+                .steps[1],
+            None,
+            "column 1 untouched once a scene is live"
+        );
+    }
+
+    #[test]
+    fn seq_detail_select_moves_the_edit_target() {
+        let mut h = Harness::new();
+        h.send(Event::ToggleSeqOverlay);
+        h.send(Event::SelectTrack { index: 3 }); // fader button = channel select
+        h.send(Event::SeqStep { step: 1 });
+        h.tick(1);
+        assert!(
+            h.core.project.tracks[2].clips[0].is_some(),
+            "track 3 edited"
+        );
+        assert!(
+            h.core.project.tracks[0].clips[0].is_none(),
+            "track 1 untouched"
+        );
+    }
+
+    #[test]
+    fn seq_entry_resets_the_cursor() {
+        let mut h = Harness::new();
+        h.send(Event::ToggleSeqOverlay);
+        h.send(Event::SeqFlipWindow);
+        h.send(Event::SeqNextBar);
+        h.send(Event::ToggleSeqOverlay); // exit
+        h.send(Event::ToggleSeqOverlay); // re-enter -> bar 1, low half again
+        h.send(Event::SeqStep { step: 1 });
+        h.tick(1);
+        let clip = h.core.project.tracks[0].clips[0].as_ref().expect("clip");
+        assert!(clip.pattern.steps[0].is_some(), "cursor reset on entry");
+    }
+
+    #[test]
+    fn seq_edit_while_looping_becomes_audible_on_the_grid() {
+        let mut h = Harness::new();
+        h.send(Event::LaunchScene { index: 0 }); // from stopped: plays now
+        h.tick(1);
+        h.calls();
+        h.send(Event::ToggleSeqOverlay);
+        h.tick(1);
+        h.calls();
+        h.send(Event::SeqStep { step: 1 }); // step 0 of the fresh clip
+        // One full pattern lap (bar = 360 periods at bpm 125) must replay it.
+        h.tick(PERIODS_PER_BEAT * 4 + 10);
+        assert!(
+            h.calls().contains(&Call::On(
+                0,
+                DEFAULT_STEP_PITCH as i32,
+                STEP_VELOCITY as i32
+            )),
+            "painted step plays on the 16th grid while looping"
+        );
+    }
+
+    #[test]
+    fn seq_events_are_inert_outside_the_overlay() {
+        let mut h = Harness::new();
+        h.send(Event::SeqStep { step: 1 });
+        h.send(Event::SeqNextBar);
+        h.send(Event::SeqFlipWindow);
+        h.send(Event::SeqStep { step: 0 }); // out of range even inside
+        h.send(Event::SeqStep { step: 9 });
+        h.tick(1);
+        assert!(h.calls().is_empty());
+        assert!(h.core.project.tracks[0].clips.iter().all(|c| c.is_none()));
+    }
+
+    #[test]
+    fn seq_edits_ride_the_write_through_lane() {
+        let mut h = Harness::new();
+        h.send(Event::ToggleSeqOverlay);
+        h.send(Event::SeqStep { step: 4 });
+        h.tick(QUIET_PERIODS);
+        let pf = h.edit_rx.try_recv().expect("step edit persisted");
+        let clip = pf.project.tracks[0].clips[0]
+            .as_ref()
+            .expect("clip in snapshot");
+        assert!(clip.pattern.steps[3].is_some());
     }
 
     #[test]
