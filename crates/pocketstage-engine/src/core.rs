@@ -17,7 +17,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Instant;
 
-use pocketstage_model::{Project, ProjectFile, Quantize, RecordedEvent, Take, Track};
+use pocketstage_model::{
+    Project, ProjectFile, Quantize, RecordedEvent, SCHEMA_VERSION, Take, Track,
+};
 use pocketstage_server::{EngineCommand, LiveStatus};
 
 use crate::clock;
@@ -27,6 +29,11 @@ use crate::transport::Transport;
 
 pub const RATE: u32 = 48_000;
 pub const PERIOD_FRAMES: usize = 256; // frames per period (buffer size knob)
+
+/// D24 write-through debounce: an engine-originated project edit persists
+/// after this much quiet (500 ms at the master rate). A fader ride emits a
+/// CC storm; only one snapshot leaves, ~500 ms after the last move.
+pub const WRITE_THROUGH_QUIET_SAMPLES: u64 = RATE as u64 / 2;
 
 /// Keys play track 1's voice (D3: track N → internal channel N).
 pub const LEAD_CH: i32 = 0;
@@ -337,6 +344,14 @@ pub struct EngineCore {
     /// Finalized takes flow back to the HTTP layer (recordings survive
     /// reboot); tests keep the receiving end.
     take_feed: Sender<Take>,
+    /// D24 write-through lane out: engine-originated project edits (MIX/
+    /// SEQ/CycleLoopBars) mutate `self.project` immediately, then one
+    /// debounced full snapshot goes to the HTTP layer for persistence.
+    /// Owned snapshots outbound only — nothing comes back (R5).
+    edit_feed: Sender<ProjectFile>,
+    /// `total_samples` at the most recent engine-originated project edit;
+    /// `Some` = a write-through snapshot is pending the quiet window.
+    edit_pending_at: Option<u64>,
     /// Per-(channel, key) chatter state — flat array, no allocation on the
     /// audio thread.
     key_guard: [[KeyGuard; 128]; 16],
@@ -351,6 +366,7 @@ impl EngineCore {
         live: Arc<LiveStatus>,
         stats: Arc<Stats>,
         take_feed: Sender<Take>,
+        edit_feed: Sender<ProjectFile>,
     ) -> Self {
         // Takes persisted in the project (earlier sessions) are live from t=0.
         let takes = std::mem::take(&mut project.takes);
@@ -373,6 +389,8 @@ impl EngineCore {
             live,
             stats,
             take_feed,
+            edit_feed,
+            edit_pending_at: None,
             key_guard: [[KEY_UP; 128]; 16],
             left: vec![0.0; PERIOD_FRAMES],
             right: vec![0.0; PERIOD_FRAMES],
@@ -403,6 +421,41 @@ impl EngineCore {
     /// this to ALSA.
     pub fn output(&self) -> &[i16] {
         &self.out
+    }
+
+    /// D24: flag that `self.project` just changed by an engine-originated,
+    /// user-paced edit (MIX knob, SEQ step, loop-length cycle). The snapshot
+    /// leaves once [`WRITE_THROUGH_QUIET_SAMPLES`] pass without a new mark;
+    /// every mark refreshes the window, so a ride costs one send.
+    pub fn mark_project_edit(&mut self) {
+        self.edit_pending_at = Some(self.total_samples);
+    }
+
+    /// Full live snapshot in the shape the store speaks (takes included —
+    /// the engine owns them; this mirrors what take-feed appends).
+    fn snapshot_project(&self) -> ProjectFile {
+        let mut pf = ProjectFile {
+            version: SCHEMA_VERSION,
+            project: self.project.clone(),
+        };
+        pf.project.takes = self.takes.clone();
+        pf
+    }
+
+    /// Debounce check, called once per period after the sample counter
+    /// advances. The clone + channel send is a documented audio-thread
+    /// exception (user-paced, at most one per quiet window — same class as
+    /// SetProject's swap). A snapshot racing a web PUT resolves
+    /// last-writer-wins on the store; accepted in R12 for mixer values.
+    fn maybe_write_through(&mut self) {
+        if let Some(at) = self.edit_pending_at
+            && self.total_samples - at >= WRITE_THROUGH_QUIET_SAMPLES
+        {
+            self.edit_pending_at = None;
+            // Unbounded send never blocks; a closed lane (server gone) only
+            // loses persistence, never audio.
+            let _ = self.edit_feed.send(self.snapshot_project());
+        }
     }
 
     /// One audio cycle: HTTP commands → event drain → master clock (ticks,
@@ -472,6 +525,7 @@ impl EngineCore {
         let busy = t0.elapsed().as_nanos() as u64;
 
         self.total_samples += PERIOD_FRAMES as u64;
+        self.maybe_write_through();
         self.cycles += 1;
         self.stats.cycles.fetch_add(1, Ordering::Relaxed);
         self.stats.busy_ns.fetch_add(busy, Ordering::Relaxed);
@@ -645,6 +699,9 @@ impl EngineCore {
                     8 => 16,
                     _ => 2,
                 };
+                // Engine-originated edit: without write-through the B-key
+                // setting would silently vanish on reboot (no PUT ever saw it).
+                self.mark_project_edit();
             }
             Event::LaunchScene { index } => {
                 // Scenes the project does not have (e.g. pad 8 after a
@@ -948,6 +1005,7 @@ mod harness_tests {
         tx_cmd: Sender<EngineCommand>,
         rx_cmd: Receiver<EngineCommand>,
         takes_rx: Receiver<Take>,
+        edit_rx: Receiver<ProjectFile>,
     }
 
     impl Harness {
@@ -960,16 +1018,18 @@ mod harness_tests {
                 ..Default::default()
             });
             let (tx_feed, takes_rx) = channel();
+            let (tx_edit, edit_rx) = channel();
             let (tx_ev, rx_ev) = channel();
             let (tx_cmd, rx_cmd) = channel();
             Self {
-                core: EngineCore::new(project, live, stats, tx_feed),
+                core: EngineCore::new(project, live, stats, tx_feed, tx_edit),
                 fake: Fake::default(),
                 tx_ev,
                 rx_ev,
                 tx_cmd,
                 rx_cmd,
                 takes_rx,
+                edit_rx,
             }
         }
 
@@ -1588,6 +1648,86 @@ mod harness_tests {
         h.send(Event::SetLeadProgram { program: 42 });
         h.tick(1);
         assert!(h.has(Call::Prog(0, 42)));
+    }
+
+    // ---- write-through lane (D24) ------------------------------------------
+
+    /// Periods covering the 500 ms debounce plus slack.
+    const QUIET_PERIODS: usize = (WRITE_THROUGH_QUIET_SAMPLES as usize / PERIOD_FRAMES) + 2;
+
+    #[test]
+    fn no_engine_edits_means_no_snapshots() {
+        let mut h = Harness::new();
+        // Live input, playback, even a take — none of it is an engine-
+        // originated PROJECT edit (takes ride the take-feed lane instead).
+        h.send(Event::Play);
+        h.tick(QUIET_PERIODS * 2);
+        assert!(h.edit_rx.try_recv().is_err(), "quiet lane stays quiet");
+    }
+
+    #[test]
+    fn engine_edit_persists_after_the_quiet_window() {
+        let mut h = Harness::new();
+        h.core.mark_project_edit();
+        // 24000 samples / 256 = 93.75 periods — nothing may leave earlier.
+        h.tick(93);
+        assert!(
+            h.edit_rx.try_recv().is_err(),
+            "snapshot must wait out the debounce"
+        );
+        h.tick(1);
+        let pf = h.edit_rx.try_recv().expect("snapshot after 500 ms quiet");
+        assert_eq!(pf.version, SCHEMA_VERSION);
+        assert_eq!(pf.project.bpm, BPM, "carries the live project");
+        // One-shot: nothing further until the next edit.
+        h.tick(QUIET_PERIODS * 2);
+        assert!(h.edit_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn continuous_edits_refresh_the_debounce_window() {
+        let mut h = Harness::new();
+        // A fader ride: marks every 50 periods — always inside the window.
+        for _ in 0..10 {
+            h.core.mark_project_edit();
+            h.tick(50);
+            assert!(h.edit_rx.try_recv().is_err(), "ride must not spam");
+        }
+        // Hands off the fader → one snapshot, then silence.
+        h.tick(QUIET_PERIODS);
+        assert!(h.edit_rx.try_recv().is_ok());
+        h.tick(QUIET_PERIODS * 2);
+        assert!(h.edit_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn cycle_loop_bars_rides_the_write_through_lane() {
+        // The B-key setting used to be boot-only: now it survives reboots.
+        let mut h = Harness::new();
+        h.send(Event::CycleLoopBars);
+        h.tick(QUIET_PERIODS);
+        let pf = h.edit_rx.try_recv().expect("loop_bars edit persisted");
+        assert_eq!(pf.project.loop_bars, 8);
+    }
+
+    #[test]
+    fn snapshot_carries_live_takes() {
+        let mut h = Harness::new();
+        h.core.takes.push(Take {
+            name: "Layer".into(),
+            events: vec![RecordedEvent::NoteOn {
+                tick: 0,
+                channel: 0,
+                pitch: 60,
+                velocity: 90,
+            }],
+            muted: false,
+        });
+        h.core.mark_project_edit();
+        h.tick(QUIET_PERIODS);
+        let pf = h.edit_rx.try_recv().expect("snapshot");
+        assert_eq!(pf.project.takes.len(), 1, "takes ride along");
+        assert_eq!(pf.project.takes[0].name, "Layer");
     }
 
     #[test]

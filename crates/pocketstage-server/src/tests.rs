@@ -199,11 +199,13 @@ async fn put_forwards_valid_project_to_engine_channel() {
     cleanup(&path);
     let (tx, rx) = std::sync::mpsc::channel::<EngineCommand>();
     let (_ptx, prx) = std::sync::mpsc::channel::<pocketstage_model::Take>();
+    let (_etx, erx) = std::sync::mpsc::channel::<ProjectFile>();
     let app = router(AppState::embedded(
         std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap()),
         tx,
         std::sync::Arc::new(crate::LiveStatus::default()),
         prx,
+        erx,
     ));
 
     // Invalid payload → 400 and NOTHING reaches the engine.
@@ -247,11 +249,13 @@ fn drain_takes_appends_to_stored_project() {
     let path = temp_path("drain");
     cleanup(&path);
     let (ptx, prx) = std::sync::mpsc::channel::<pocketstage_model::Take>();
+    let (_etx, erx) = std::sync::mpsc::channel::<ProjectFile>();
     let state = AppState::embedded(
         std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap()),
         std::sync::mpsc::channel::<EngineCommand>().0,
         std::sync::Arc::new(crate::LiveStatus::default()),
         prx,
+        erx,
     );
 
     let take = pocketstage_model::Take {
@@ -277,17 +281,54 @@ fn drain_takes_appends_to_stored_project() {
     cleanup(&path);
 }
 
+#[test]
+fn drain_edits_persists_latest_snapshot_only() {
+    // D24 write-through lane: engine snapshots supersede each other, so a
+    // burst drains to ONE persist of the newest — a fader ride costs one
+    // file write, not one per debounced batch.
+    let path = temp_path("edit-drain");
+    cleanup(&path);
+    let store = std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap());
+    let (etx, erx) = std::sync::mpsc::channel::<ProjectFile>();
+    let state = AppState::embedded(
+        store,
+        std::sync::mpsc::channel::<EngineCommand>().0,
+        std::sync::Arc::new(crate::LiveStatus::default()),
+        std::sync::mpsc::channel::<pocketstage_model::Take>().1,
+        erx,
+    );
+
+    assert_eq!(state.drain_edits(), 0, "quiet lane drains to nothing");
+
+    let mut pf = ProjectFile {
+        version: SCHEMA_VERSION,
+        project: Project::default_project(),
+    };
+    pf.project.name = "stale".into();
+    etx.send(pf.clone()).unwrap();
+    pf.project.name = "latest".into();
+    etx.send(pf).unwrap();
+    assert_eq!(state.drain_edits(), 2, "both consumed");
+
+    let reloaded = ProjectStore::open_or_default(&path).unwrap();
+    assert_eq!(reloaded.get().project.name, "latest");
+    assert_eq!(state.drain_edits(), 0);
+    cleanup(&path);
+}
+
 #[tokio::test]
 async fn remote_transport_routes() {
     let path = temp_path("remote");
     cleanup(&path);
     let (tx, rx) = std::sync::mpsc::channel::<EngineCommand>();
     let (_ptx, prx) = std::sync::mpsc::channel::<pocketstage_model::Take>();
+    let (_etx, erx) = std::sync::mpsc::channel::<ProjectFile>();
     let app = router(AppState::embedded(
         std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap()),
         tx,
         std::sync::Arc::new(crate::LiveStatus::default()),
         prx,
+        erx,
     ));
 
     for (uri, expect) in [
@@ -543,11 +584,13 @@ async fn rename_take_forwards_command_to_engine() {
     store.replace(pf).unwrap();
     let (tx, rx) = std::sync::mpsc::channel::<EngineCommand>();
     let (_ptx, prx) = std::sync::mpsc::channel::<pocketstage_model::Take>();
+    let (_etx, erx) = std::sync::mpsc::channel::<ProjectFile>();
     let app = router(AppState::embedded(
         store.clone(),
         tx,
         std::sync::Arc::new(crate::LiveStatus::default()),
         prx,
+        erx,
     ));
 
     assert_eq!(

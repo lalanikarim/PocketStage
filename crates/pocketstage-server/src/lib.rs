@@ -336,6 +336,13 @@ pub struct AppState {
     /// Drained by [`AppState::drain_takes`] on a timer; each one is appended
     /// to the stored project, so recordings survive reboot.
     take_feed: Option<Arc<Mutex<Receiver<Take>>>>,
+    /// Engine-originated project snapshots (D24 write-through lane): MIX/
+    /// SEQ edits mutate the engine's live project first, then a debounced
+    /// full snapshot flows OUT here for persistence — nothing ever travels
+    /// back in, so the single-writer rule (R5) holds. Drained by
+    /// [`AppState::drain_edits`]; races with a web PUT resolve
+    /// last-writer-wins on the store (accepted in R12 for mixer values).
+    edit_feed: Option<Arc<Mutex<Receiver<ProjectFile>>>>,
 }
 
 impl AppState {
@@ -346,23 +353,27 @@ impl AppState {
             engine: None,
             live: Arc::new(LiveStatus::default()),
             take_feed: None,
+            edit_feed: None,
         }
     }
 
     /// Embedded state: full duplex with the audio thread (commands out on
-    /// `engine`, finalized takes in on `take_feed`; `live` levels are written
-    /// by the audio thread and pushed to WS clients).
+    /// `engine`, finalized takes in on `take_feed`, engine-side project edits
+    /// in on `edit_feed`; `live` levels are written by the audio thread and
+    /// pushed to WS clients).
     pub fn embedded(
         store: Arc<ProjectStore>,
         engine: Sender<EngineCommand>,
         live: Arc<LiveStatus>,
         take_feed: Receiver<Take>,
+        edit_feed: Receiver<ProjectFile>,
     ) -> Self {
         Self {
             store,
             engine: Some(engine),
             live,
             take_feed: Some(Arc::new(Mutex::new(take_feed))),
+            edit_feed: Some(Arc::new(Mutex::new(edit_feed))),
         }
     }
 
@@ -384,6 +395,31 @@ impl AppState {
                 }
                 n += 1;
             }
+        }
+        n
+    }
+
+    /// Pull engine-originated snapshots from the write-through lane (D24)
+    /// and persist them. Snapshots are whole-project and supersede each
+    /// other, so only the LAST one drained is written — a fader ride that
+    /// produced several debounced batches costs one file write. Returns how
+    /// many snapshots were consumed.
+    pub fn drain_edits(&self) -> usize {
+        let Some(rx_slot) = &self.edit_feed else {
+            return 0;
+        };
+        let mut latest: Option<ProjectFile> = None;
+        let mut n = 0;
+        if let Ok(rx) = rx_slot.lock() {
+            while let Ok(pf) = rx.try_recv() {
+                latest = Some(pf);
+                n += 1;
+            }
+        }
+        if let Some(pf) = latest
+            && let Err(e) = self.store.replace(pf)
+        {
+            eprintln!("[server] write-through persist failed: {e}");
         }
         n
     }
@@ -471,6 +507,18 @@ pub fn spawn_engine_server(state: AppState, addr: std::net::SocketAddr) -> Resul
                         loop {
                             tokio::time::sleep(Duration::from_millis(250)).await;
                             s2.drain_takes();
+                        }
+                    });
+                }
+                // Periodic write-through drain (D24): the engine already
+                // debounced (~500 ms of quiet per snapshot); this tick only
+                // bounds how long a ride lags before hitting disk.
+                if state.edit_feed.is_some() {
+                    let s3 = state.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                            s3.drain_edits();
                         }
                     });
                 }

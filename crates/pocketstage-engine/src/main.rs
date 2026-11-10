@@ -189,6 +189,9 @@ fn main() {
     // Finalized takes flow back the other way: audio → HTTP layer, which
     // appends them to the saved project so recordings survive reboot.
     let (take_feed, take_rx) = mpsc::channel::<Take>();
+    // D24 write-through lane: engine-originated project edits (MIX/SEQ/B-key)
+    // go out as debounced full snapshots for persistence — outbound only.
+    let (edit_feed, edit_rx) = mpsc::channel::<ProjectFile>();
     let live = Arc::new(LiveStatus::default());
     let stats = Arc::new(Stats {
         live: Arc::clone(&live),
@@ -200,7 +203,8 @@ fn main() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(7777);
-    let http_state = AppState::embedded(Arc::clone(&store), ctx, Arc::clone(&live), take_rx);
+    let http_state =
+        AppState::embedded(Arc::clone(&store), ctx, Arc::clone(&live), take_rx, edit_rx);
     match pocketstage_server::spawn_engine_server(http_state, ([0, 0, 0, 0], port).into()) {
         Ok(()) => println!("[server] control plane on http://0.0.0.0:{port} (LAN-trusted)"),
         Err(e) => eprintln!("[server] NOT started ({e}) — audio unaffected"),
@@ -228,8 +232,13 @@ fn main() {
 
             // The core owns all per-period state; the fake-backend test twin
             // lives in core.rs harness_tests (device-free CI).
-            let mut core =
-                EngineCore::new(project, Arc::clone(&live), Arc::clone(&a_stats), take_feed);
+            let mut core = EngineCore::new(
+                project,
+                Arc::clone(&live),
+                Arc::clone(&a_stats),
+                take_feed,
+                edit_feed,
+            );
             let mut backend = FluidBackend(&synth);
             // Track programs + mixer (D3: track N → internal channel N).
             // Keys on channel 0 thus play track 1's instrument (and level).
