@@ -320,6 +320,9 @@ pub struct LiveStatus {
     pub takes: AtomicU8,
     /// Unit front-panel mode tracked from DAW/PRESET button pulses (D11/T6).
     pub daw_mode: AtomicBool,
+    /// Software overlay inside PRESET (D21): 0 = none, 1 = MIX, 2 = SEQ.
+    /// Written by the audio thread on pad 9/10 toggles; read by WS/stats.
+    pub overlay: AtomicU8,
 }
 
 // ----------------------------------------------------------------- routes
@@ -450,6 +453,11 @@ impl AppState {
                 } else {
                     "preset"
                 },
+                overlay: match live.overlay.load(Ordering::Relaxed) {
+                    1 => "mix",
+                    2 => "seq",
+                    _ => "none",
+                },
             },
             pf.project.takes.iter().map(|t| t.name.clone()).collect(),
         )
@@ -465,6 +473,8 @@ pub struct Status {
     pub scene: Option<u8>,
     /// "preset" | "daw" (D11).
     pub mode: &'static str,
+    /// "none" | "mix" | "seq" — software overlay inside PRESET (D21).
+    pub overlay: &'static str,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -575,6 +585,7 @@ async fn ws_pump(mut socket: WebSocket, state: AppState) {
             "beat": status.beat,
             "scene": status.scene,
             "mode": status.mode,
+            "overlay": status.overlay,
             "takes": takes,
         });
         let text = match serde_json::to_string(&frame) {

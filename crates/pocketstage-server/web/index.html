@@ -76,6 +76,7 @@
       <div class="cell"><b id="l-pos">–</b><span>bar : beat</span></div>
       <div class="cell"><b id="l-scene">–</b><span>scene</span></div>
       <div class="cell"><b id="l-mode">–</b><span>mode</span></div>
+      <div class="cell"><b id="l-overlay">–</b><span>overlay</span></div>
       <div class="cell"><b id="l-takes">–</b><span>takes</span></div>
     </div>
     <div id="remote" style="margin-top:12px; display:flex; gap:6px; flex-wrap:wrap">
@@ -385,6 +386,8 @@ function connect() {
     $("l-pos").textContent = f.bar + " : " + f.beat;
     $("l-scene").textContent = f.scene || "–";
     $("l-mode").textContent = f.mode;
+    const ov = f.overlay && f.overlay !== "none" ? f.overlay.toUpperCase() : "\u2013";
+    $("l-overlay").textContent = ov;
     lastTransport = f.transport;
     hlScene(f.scene);
     const n = Array.isArray(f.takes) ? f.takes.length : 0;

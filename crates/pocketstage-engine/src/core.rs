@@ -70,6 +70,35 @@ fn to_i16(x: f32) -> i16 {
 /// ohh tom crash. Used when the project leaves `drum_kit` unset.
 pub const DEFAULT_DRUM_KIT: [u8; 8] = [36, 38, 37, 39, 42, 46, 47, 49];
 
+/// D21: software overlays lived inside PRESET mode. The MKV's Play/Seq/Mix
+/// trims emit nothing the host can see, so SEQ/MIX are entered from controls
+/// we own: logical pad 9 toggles MIX, pad 10 toggles SEQ. Mutually exclusive;
+/// any DAW/PRESET mode switch exits both. Mirrored to `LiveStatus::overlay`
+/// (0 = none, 1 = mix, 2 = seq) for the WS/stats surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overlay {
+    None,
+    Mix,
+    Seq,
+}
+
+impl Overlay {
+    pub fn id(self) -> u8 {
+        match self {
+            Overlay::None => 0,
+            Overlay::Mix => 1,
+            Overlay::Seq => 2,
+        }
+    }
+}
+
+/// Overlay-entry/exit voice confirmation (T2: no LEDs — the ears are the
+/// display). D21: pad 9 on = kick, off = rim; pad 10 on = tom, off = rim.
+/// Distinct channels so a confirmation never cuts a live kit pad.
+pub const CONFIRM_KICK: (i32, i32) = (PAD_CH_BASE, 36);
+pub const CONFIRM_RIM: (i32, i32) = (PAD_CH_BASE + 1, 37);
+pub const CONFIRM_TOM: (i32, i32) = (PAD_CH_BASE + 2, 47);
+
 /// The live kit travels from the audio thread (boot + swaps write it) to
 /// the MIDI feeder (reads it on every pad hit) as one packed AtomicU64 —
 /// lock-free both ways, keeping the audio-thread no-locks rule. Layout:
@@ -194,6 +223,40 @@ pub enum Event {
     },
     /// D13 settings key (letter B in DAW mode): cycle loop_bars 2→4→8→16→2.
     CycleLoopBars,
+    /// D21: pad 9 — toggle the MIX overlay (entering it exits SEQ; toggling
+    /// again exits). Voice confirmation is emitted by the core, not the feeder.
+    ToggleMixOverlay,
+    /// D21: pad 10 — toggle the SEQ overlay (same exclusivity rules).
+    ToggleSeqOverlay,
+    /// Any DAW/PRESET mode switch exits both overlays (D21).
+    ExitOverlays,
+    /// D22: physical fader move (1-based index, 0..=127). The feeder forwards
+    /// these unconditionally; they are only interpreted while MIX is on.
+    MixFader {
+        index: u8,
+        value: u8,
+    },
+    /// D22: physical knob move (1-based index K1–K8).
+    MixKnob {
+        index: u8,
+        value: u8,
+    },
+    /// Fader-button press = channel selector (D14, honored by both overlays):
+    /// selects the detail page for track n, press again to clear.
+    SelectTrack {
+        index: u8,
+    },
+}
+
+/// Which mixer field a MIX-overlay control move writes (D22). The CC math
+/// mirrors `apply_track_voice` exactly, so a ride and a PUT land the same
+/// values on the synth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MixField {
+    Gain,
+    Pan,
+    Reverb,
+    Chorus,
 }
 
 /// An event plus the wall-clock time it was *intended* to fire. The audio
@@ -336,6 +399,12 @@ pub struct EngineCore {
     pub recording: Option<(u64, Vec<RecordedEvent>)>,
     /// Scene/launch state machine — pure & unit-tested (transport.rs).
     pub transport: Transport,
+    /// D21: active software overlay (None/Mix/Seq); mirrored to the shared
+    /// LiveStatus atomic so WS/stats see it without touching core state.
+    pub overlay: Overlay,
+    /// D22/D23: fader-button channel select — `Some(n)` = detail page for
+    /// track n (MIX knobs / SEQ edit target); `None` = 1:1 page mapping.
+    pub detail: Option<usize>,
     pub total_samples: u64, // frames rendered so far (master clock domain)
     pub playing_since: Option<u64>, // sample index where Play fired
     pub cycles: u64,
@@ -383,6 +452,8 @@ impl EngineCore {
             mine: Vec::new(),
             recording: None,
             transport: Transport::default(),
+            overlay: Overlay::None,
+            detail: None,
             total_samples: 0,
             playing_since: None,
             cycles: 0,
@@ -703,6 +774,70 @@ impl EngineCore {
                 // setting would silently vanish on reboot (no PUT ever saw it).
                 self.mark_project_edit();
             }
+            Event::ToggleMixOverlay => {
+                // D21: exclusive — entering MIX exits SEQ; re-press exits.
+                let on = self.overlay != Overlay::Mix;
+                self.set_overlay(if on { Overlay::Mix } else { Overlay::None });
+                self.confirm(synth, if on { CONFIRM_KICK } else { CONFIRM_RIM });
+            }
+            Event::ToggleSeqOverlay => {
+                let on = self.overlay != Overlay::Seq;
+                self.set_overlay(if on { Overlay::Seq } else { Overlay::None });
+                self.confirm(synth, if on { CONFIRM_TOM } else { CONFIRM_RIM });
+            }
+            Event::ExitOverlays => {
+                self.set_overlay(Overlay::None);
+                self.detail = None;
+            }
+            Event::MixFader { index, value } => {
+                // D22 page: F1–F4 → track 1–4 gain. F5–F9 unused until the
+                // model grows past 4 channels (R2). Inert outside MIX.
+                if self.overlay == Overlay::Mix && (1..=4).contains(&index) {
+                    self.mix_set(synth, (index - 1) as usize, MixField::Gain, value);
+                }
+            }
+            Event::MixKnob { index, value } => {
+                if self.overlay == Overlay::Mix {
+                    match self.detail {
+                        // Detail page: the knob row K1–K4 becomes ALL four
+                        // params of the selected track (D22 leaves the layout
+                        // to us; this is the one-page-per-channel reading of
+                        // "act on track n alone").
+                        Some(t) => {
+                            let field = match index {
+                                1 => MixField::Gain,
+                                2 => MixField::Pan,
+                                3 => MixField::Reverb,
+                                4 => MixField::Chorus,
+                                _ => return,
+                            };
+                            self.mix_set(synth, t, field, value);
+                        }
+                        // Default page: K1–K4 → pan of tracks 1–4, K5–K8 →
+                        // reverb send of tracks 1–4 (D22).
+                        None => {
+                            if (1..=4).contains(&index) {
+                                self.mix_set(synth, (index - 1) as usize, MixField::Pan, value);
+                            } else if (5..=8).contains(&index) {
+                                self.mix_set(synth, (index - 5) as usize, MixField::Reverb, value);
+                            }
+                        }
+                    }
+                }
+            }
+            Event::SelectTrack { index } => {
+                // Fader buttons are channel selectors, never scene triggers
+                // (D14). Press again clears the detail page. Only live inside
+                // an overlay (MIX/SEQ) — plain PRESET ignores them.
+                if self.overlay != Overlay::None && (1..=4).contains(&index) {
+                    let n = (index - 1) as usize;
+                    self.detail = if self.detail == Some(n) {
+                        None
+                    } else {
+                        Some(n)
+                    };
+                }
+            }
             Event::LaunchScene { index } => {
                 // Scenes the project does not have (e.g. pad 8 after a
                 // shrink) resolve to None and are IGNORED — transport.rs.
@@ -730,6 +865,66 @@ impl EngineCore {
                 }
             }
         }
+    }
+
+    /// Switch the active overlay (mutually exclusive by construction — a
+    /// plain assignment) and mirror it to the shared LiveStatus atomic.
+    fn set_overlay(&mut self, overlay: Overlay) {
+        if overlay == Overlay::None {
+            self.detail = None;
+        }
+        self.overlay = overlay;
+        self.live
+            .overlay
+            .store(overlay.id(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Voice confirmation on a private channel (D21, T2 LED-less UX). The
+    /// channel kill keeps rapid toggle-mashing tight — one-shots ignore
+    /// note-off (D17 lab), CC120 is the only reliable cut.
+    fn confirm<S: SynthBackend>(&self, synth: &mut S, (chan, note): (i32, i32)) {
+        synth.all_sounds_off(chan);
+        synth.note_on(chan, note, 100);
+        synth.note_off(chan, note);
+    }
+
+    /// D22 write-through mix edit: update the project field AND sound it out
+    /// immediately (CC math identical to `apply_track_voice`, so a hardware
+    /// ride and a web PUT cannot diverge), then flag the lane. Out-of-range
+    /// track indices (hostile or stale) resolve to nothing — D20.
+    fn mix_set<S: SynthBackend>(
+        &mut self,
+        synth: &mut S,
+        track: usize,
+        field: MixField,
+        value: u8,
+    ) {
+        let Some(t) = self.project.tracks.get_mut(track) else {
+            return;
+        };
+        let v = value as f64 / 127.0;
+        let (cc, cc_val) = match field {
+            // Mute wins over the ride (CC7=0), same rule as apply_track_voice.
+            MixField::Gain => {
+                t.gain = Some(v);
+                (7, if t.mute { 0 } else { value as i32 })
+            }
+            MixField::Pan => {
+                t.pan = Some(v * 2.0 - 1.0);
+                (10, value as i32)
+            }
+            MixField::Reverb => {
+                t.reverb = Some(v);
+                (91, value as i32)
+            }
+            MixField::Chorus => {
+                t.chorus = Some(v);
+                (93, value as i32)
+            }
+        };
+        let chan = self.project.track_channel(track) as i32;
+        synth.cc(chan, cc, cc_val);
+        self.mark_project_edit();
     }
 
     /// Flat (channel, key) index; events outside 0..16 ch or 0..128 keys
@@ -1728,6 +1923,210 @@ mod harness_tests {
         let pf = h.edit_rx.try_recv().expect("snapshot");
         assert_eq!(pf.project.takes.len(), 1, "takes ride along");
         assert_eq!(pf.project.takes[0].name, "Layer");
+    }
+
+    // ---- overlays (D21) + MIX (D22) ----------------------------------------
+
+    fn overlay_level(h: &Harness) -> u8 {
+        h.core.live.overlay.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn mix_toggle_is_voice_confirmed_kick_on_rim_off() {
+        let mut h = Harness::new();
+        h.send(Event::ToggleMixOverlay);
+        h.tick(1);
+        assert_eq!(overlay_level(&h), 1);
+        let calls = h.calls();
+        assert!(calls.contains(&Call::SoundsOff(8)), "kill before confirm");
+        assert!(calls.contains(&Call::On(8, 36, 100)), "kick on entry");
+
+        h.send(Event::ToggleMixOverlay);
+        h.tick(1);
+        assert_eq!(overlay_level(&h), 0);
+        assert!(h.has(Call::On(9, 37, 100)), "rim on exit");
+    }
+
+    #[test]
+    fn overlays_are_mutually_exclusive() {
+        let mut h = Harness::new();
+        h.send(Event::ToggleMixOverlay);
+        h.send(Event::ToggleSeqOverlay); // direct switch mix -> seq
+        h.tick(1);
+        assert_eq!(overlay_level(&h), 2, "seq replaced mix");
+        assert_eq!(h.core.overlay, Overlay::Seq);
+
+        h.send(Event::ToggleSeqOverlay); // toggling seq OFF must NOT revive mix
+        h.tick(1);
+        assert_eq!(overlay_level(&h), 0);
+    }
+
+    #[test]
+    fn mode_switch_exits_overlays() {
+        // The feeder turns any DAW/PRESET pulse into ExitOverlays (D21).
+        let mut h = Harness::new();
+        h.send(Event::ToggleMixOverlay);
+        h.send(Event::SelectTrack { index: 2 });
+        h.tick(1);
+        assert_eq!(overlay_level(&h), 1);
+        h.send(Event::ExitOverlays);
+        h.tick(1);
+        assert_eq!(overlay_level(&h), 0);
+        assert_eq!(h.core.detail, None, "detail page cleared too");
+    }
+
+    #[test]
+    fn mix_controls_are_inert_without_the_overlay() {
+        let mut h = Harness::new();
+        h.send(Event::MixFader {
+            index: 1,
+            value: 90,
+        });
+        h.send(Event::MixKnob {
+            index: 1,
+            value: 90,
+        });
+        h.send(Event::SelectTrack { index: 1 });
+        h.tick(1);
+        assert!(h.calls().is_empty(), "no synth calls outside MIX");
+        assert_eq!(h.core.project.tracks[0].gain, None);
+        assert_eq!(h.core.detail, None);
+    }
+
+    #[test]
+    fn mix_fader_sets_track_gain_and_sounds_it() {
+        let mut h = Harness::new();
+        h.send(Event::ToggleMixOverlay);
+        h.tick(1);
+        h.calls();
+        h.send(Event::MixFader {
+            index: 2,
+            value: 64,
+        });
+        h.tick(1);
+        assert_eq!(h.core.project.tracks[1].gain, Some(64.0 / 127.0));
+        // Track 2 -> channel 1 (D3); CC7 math matches apply_track_voice.
+        assert!(h.has(Call::Cc(1, 7, 64)));
+    }
+
+    #[test]
+    fn mix_fader_respects_mute() {
+        let mut h = Harness::new();
+        h.core.project.tracks[1].mute = true;
+        h.send(Event::ToggleMixOverlay);
+        h.tick(1);
+        h.calls();
+        h.send(Event::MixFader {
+            index: 2,
+            value: 100,
+        });
+        h.tick(1);
+        assert_eq!(h.core.project.tracks[1].gain, Some(100.0 / 127.0));
+        assert!(
+            h.has(Call::Cc(1, 7, 0)),
+            "mute keeps the channel silent (CC7=0)"
+        );
+    }
+
+    #[test]
+    fn mix_knob_page_maps_pan_and_reverb() {
+        let mut h = Harness::new();
+        h.send(Event::ToggleMixOverlay);
+        h.tick(1);
+        h.calls();
+        h.send(Event::MixKnob {
+            index: 1,
+            value: 127,
+        }); // K1 -> tr1 pan
+        h.send(Event::MixKnob {
+            index: 5,
+            value: 100,
+        }); // K5 -> tr1 reverb
+        h.tick(1);
+        assert_eq!(h.core.project.tracks[0].pan, Some(1.0));
+        assert_eq!(h.core.project.tracks[0].reverb, Some(100.0 / 127.0));
+        // NB: has() consumes the recorded log — check both in one take.
+        let calls = h.calls();
+        assert!(calls.contains(&Call::Cc(0, 10, 127)));
+        assert!(calls.contains(&Call::Cc(0, 91, 100)));
+    }
+
+    #[test]
+    fn detail_select_redirects_knobs_and_press_again_clears() {
+        let mut h = Harness::new();
+        h.send(Event::ToggleMixOverlay);
+        h.send(Event::SelectTrack { index: 3 });
+        h.tick(1);
+        assert_eq!(h.core.detail, Some(2));
+        h.calls();
+        // Detail page: K1 = gain of the SELECTED track only.
+        h.send(Event::MixKnob {
+            index: 1,
+            value: 77,
+        });
+        h.tick(1);
+        assert_eq!(h.core.project.tracks[2].gain, Some(77.0 / 127.0));
+        assert_eq!(h.core.project.tracks[0].gain, None, "others untouched");
+        assert!(h.has(Call::Cc(2, 7, 77)));
+        // K5–K8 have no role on the detail page.
+        h.calls();
+        h.send(Event::MixKnob {
+            index: 6,
+            value: 50,
+        });
+        h.tick(1);
+        assert!(h.calls().iter().all(|c| !matches!(c, Call::Cc(..))));
+        // Press again clears -> back to the 1:1 page.
+        h.send(Event::SelectTrack { index: 3 });
+        h.tick(1);
+        assert_eq!(h.core.detail, None);
+        h.calls();
+        h.send(Event::MixKnob {
+            index: 1,
+            value: 40,
+        }); // page: tr1 pan again
+        h.tick(1);
+        assert!(h.has(Call::Cc(0, 10, 40)));
+    }
+
+    #[test]
+    fn out_of_range_mix_controls_are_ignored() {
+        // D20: hostile/stale indices resolve to nothing, never a panic.
+        let mut h = Harness::new();
+        h.send(Event::ToggleMixOverlay);
+        h.tick(1);
+        h.calls();
+        for cmd in [
+            Event::MixFader {
+                index: 9,
+                value: 100,
+            },
+            Event::MixKnob {
+                index: 9,
+                value: 100,
+            },
+            Event::SelectTrack { index: 0 },
+            Event::SelectTrack { index: 9 },
+        ] {
+            h.send(cmd);
+            h.tick(1);
+        }
+        assert!(h.calls().is_empty());
+        assert_eq!(h.core.detail, None);
+    }
+
+    #[test]
+    fn mix_edits_ride_the_write_through_lane() {
+        let mut h = Harness::new();
+        h.send(Event::ToggleMixOverlay);
+        h.tick(1);
+        h.send(Event::MixFader {
+            index: 1,
+            value: 33,
+        });
+        h.tick(QUIET_PERIODS);
+        let pf = h.edit_rx.try_recv().expect("mix edit persisted");
+        assert_eq!(pf.project.tracks[0].gain, Some(33.0 / 127.0));
     }
 
     #[test]

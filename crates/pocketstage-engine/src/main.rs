@@ -321,11 +321,16 @@ fn main() {
                     format!("S{scene}")
                 };
                 let recording = s_stats.live.recording.load(Ordering::Relaxed);
+                let overlay = match s_stats.live.overlay.load(Ordering::Relaxed) {
+                    1 => "MIX",
+                    2 => "SEQ",
+                    _ => "-",
+                };
                 println!(
                     "[stats] cycles={cycles:5} busy={busy_pct:4.2}% ({:.1} us/{} us period) \
                      events={events:3} queue avg/max={q_avg:6.1}/{q_max:6} us \
                      feeder_jitter_max={feed_max:5} us xruns={xruns} out_queue~{:.1} ms \
-                     transport={} pos={bar}.{beat} scene={} takes={} swaps={}",
+                     transport={} pos={bar}.{beat} scene={} takes={} swaps={} overlay={}",
                     if cycles > 0 {
                         busy_ns as f64 / cycles as f64 / 1000.0
                     } else {
@@ -343,6 +348,7 @@ fn main() {
                     scene_str,
                     s_stats.live.takes.load(Ordering::Relaxed),
                     s_stats.project_updates.load(Ordering::Relaxed),
+                    overlay,
                 );
             }
         })
@@ -551,11 +557,42 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>) {
                                         Mode::Preset => "PRESET — perform (keys+drums)",
                                     }
                                 );
+                                // D21: any mode switch exits MIX/SEQ.
+                                send_event(&tx, m.received, Event::ExitOverlays);
                                 if new_mode == Mode::Daw {
                                     // D15: recording stops here; playback never does.
                                     send_event(&tx, m.received, Event::StopRecording);
                                 }
                             }
+                        }
+                        // Bank-2 pads = command buttons inside PRESET (D21):
+                        // pad 9 toggles MIX, pad 10 toggles SEQ. Rising edge
+                        // only; the core voice-confirms the switch (no LEDs).
+                        Action::Pad {
+                            index: index @ 9..=16,
+                            on: true,
+                            ..
+                        } if mode == Mode::Preset => match index {
+                            9 => send_event(&tx, m.received, Event::ToggleMixOverlay),
+                            10 => send_event(&tx, m.received, Event::ToggleSeqOverlay),
+                            _ => {} // 11+ gain roles while an overlay is live
+                        },
+                        // Faders/knobs/fader-buttons: forwarded unconditionally —
+                        // the core interprets them only while MIX is on (D22),
+                        // and fader buttons are channel selectors, never scene
+                        // triggers (D14).
+                        Action::Fader { index, value } => {
+                            send_event(&tx, m.received, Event::MixFader { index, value })
+                        }
+                        Action::Knob { index, value } => {
+                            send_event(&tx, m.received, Event::MixKnob { index, value })
+                        }
+                        Action::FaderButton {
+                            index,
+                            pressed: true,
+                        }
+                        | Action::FaderButtonTap { index } => {
+                            send_event(&tx, m.received, Event::SelectTrack { index })
                         }
                         Action::Play => {
                             println!("[transport] play");
@@ -572,7 +609,7 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>) {
                             println!("[transport] record");
                             send_event(&tx, m.received, Event::StartRecording);
                         }
-                        _ => {} // faders/knobs/mod/pitch/pads 9–16: no engine effect yet
+                        _ => {} // mod wheel, pitch lever, pad note-offs: no engine effect yet
                     }
                 }
             }
