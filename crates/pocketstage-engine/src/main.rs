@@ -6,13 +6,16 @@
 //!     no locks, no allocation on the render path.
 //!   * ALSA S16LE stereo, 256-frame periods x 3 @ 48 kHz, underrun recovery.
 //!
+//! The per-period *decision* logic (events, transport, recording, takes,
+//! swaps) lives in `core.rs` behind a [`SynthBackend`] trait — that's the
+//! device-free integration harness (backlog 13). This file keeps only what
+//! needs the platform: ALSA open/write/recover, FluidSynth boot setup, the
+//! MIDI pump feeder, stats printing, and the embedded HTTP server spawn.
+//!
 //! Event sources:
 //!   * default: live MIDI — `spawn_pump` → per-port Oxygen mappers (music +
 //!     HUI) → engine events. Keys drive track 1's voice; pads 1–8 launch
-//!     scenes (their clip column, D5-quantized); transport drives the master
-//!     clock (accented beat ticks while playing, position in stats).
-//!   * The boot project is `Project::default_project()` with placeholder demo
-//!     patterns in scenes 1–2; real project loading comes with the web server.
+//!     scenes or hit the drum kit depending on unit mode (D11–D13).
 //!   * `--demo`: scripted arpeggio feeder, no hardware needed (spike mode).
 //!
 //! Run:  cargo run --release -p pocketstage-engine            (live MIDI)
@@ -20,6 +23,7 @@
 //! ALSA device: positional arg > `POCKETSTAGE_DEVICE` env var > `default`.
 
 mod clock;
+mod core;
 mod ffi;
 mod transport;
 
@@ -27,107 +31,21 @@ use alsa::pcm::{Access, Format, Frames, PCM};
 use alsa::{Direction, ValueOr};
 use pocketstage_midi::{PumpMessage, spawn_pump};
 use pocketstage_model::{
-    Clip, Pattern, Project, ProjectFile, Quantize, RecordedEvent, SCHEMA_VERSION, STEPS_PER_BAR,
-    StepNote, Take, Track,
+    Clip, Pattern, ProjectFile, SCHEMA_VERSION, STEPS_PER_BAR, StepNote, Take,
 };
 use pocketstage_oxygen::{Action, Mapper, Mode, default_mapping, hui_mapping};
 use pocketstage_server::{AppState, EngineCommand, LiveStatus, ProjectStore};
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-// ---------------------------------------------------------------- constants
+use core::{EngineCore, Event, FluidBackend, LEAD_CH, PERIOD_FRAMES, RATE, Stats, TimedEvent};
 
-const RATE: u32 = 48_000;
-const PERIOD_FRAMES: usize = 256; // frames per period (buffer size knob)
 const N_PERIODS: u32 = 3;
 const SF2_PATH: &str = "/usr/share/sounds/sf2/FluidR3_GM.sf2";
-
-/// Keys play track 1's voice (D3: track N → internal channel N).
-const LEAD_CH: i32 = 0;
-/// Metronome tick channel. Shares with pad 1 (kick): striking the kick
-/// cuts the current click — the same collision the old single-drum-channel
-/// layout had, and harmless for a 30 ms click.
-const TICK_CH: i32 = 8;
-/// Each pad owns one channel (pad 1..8 → 8..=15). All Sound Off is
-/// per-channel, so per-pad channels make same-pad retrigger kills surgical
-/// (D17). One-shot GM samples ignore note-off AND live attenuation edits
-/// (lab-proven, see examples/retrigger_lab.rs); CC120 is the only reliable kill.
-const PAD_CH_BASE: i32 = 8;
-/// Channels reserved for pads/ticks (as opposed to lead/scene tracks on 0..=7).
-#[inline]
-fn is_pad_channel(chan: i32) -> bool {
-    (TICK_CH..=15).contains(&chan)
-}
-
-/// Apply a track's voice state — program + mixer — to its internal channel
-/// (D3: track N → channel N). Mute is CC7=0; gain 0..=2 maps onto CC7;
-/// pan −1..=+1 maps onto CC10. Called at boot and on every project swap, so
-/// mixer edits ride the existing PUT → SetProject path with no new plumbing.
-fn apply_track_voice(synth: &ffi::Synth, chan: i32, track: &Track) {
-    synth.program_change(chan, track.instrument.gm_program as i32);
-    let gain = if track.mute {
-        0.0
-    } else {
-        track.gain.unwrap_or(1.0)
-    };
-    synth.cc(chan, 7, (gain * 127.0).round() as i32);
-    let pan = ((track.pan.unwrap_or(0.0) + 1.0) * 63.5)
-        .round()
-        .clamp(0.0, 127.0) as i32;
-    synth.cc(chan, 10, pan);
-    // FX sends: None = leave the soundfont's own preset value untouched.
-    if let Some(v) = track.reverb {
-        synth.cc(chan, 91, (v * 127.0).round() as i32);
-    }
-    if let Some(v) = track.chorus {
-        synth.cc(chan, 93, (v * 127.0).round() as i32);
-    }
-}
-
-/// Apply a store-validated project swap to the audio thread's state.
-/// Takes adopt the incoming order/mute flags (a PUT can also delete); takes
-/// finalized this boot that the store has not absorbed yet are kept — the
-/// take-feed drains on its own tick and must not lose one to a racing swap.
-fn apply_swap(
-    pf: ProjectFile,
-    project: &mut Project,
-    bpm: &mut f64,
-    takes: &mut Vec<Take>,
-    mine: &mut Vec<(String, Instant)>,
-    synth: &ffi::Synth,
-) {
-    let mut new = pf.project;
-    // "Mine" only protects a take during the short window between finalize
-    // and store absorption (the feed drains every 250 ms). Beyond that a PUT
-    // deletion — e.g. clear-all — must actually delete, not resurrect.
-    mine.retain(|(_, when)| when.elapsed().as_secs() < 30);
-    let mut adopted = std::mem::take(&mut new.takes);
-    for t in takes.drain(..) {
-        if mine.iter().any(|(n, _)| *n == t.name) && !adopted.iter().any(|a| a.name == t.name) {
-            adopted.push(t);
-        }
-    }
-    *takes = adopted;
-    *bpm = new.bpm;
-    for (t, track) in new.tracks.iter().enumerate() {
-        apply_track_voice(synth, t as i32, track);
-    }
-    *project = new;
-}
-
-/// Voice reset on scene switch: silence every track; (re-)set the program
-/// only for tracks that actually have a clip in this column.
-fn apply_scene_voice(synth: &ffi::Synth, project: &Project, scene: usize) {
-    for (t, track) in project.tracks.iter().enumerate() {
-        synth.all_notes_off(t as i32);
-        if track.clips.get(scene).is_some_and(|c| c.is_some()) {
-            synth.program_change(t as i32, track.instrument.gm_program as i32);
-        }
-    }
-}
 
 /// Fixed 8-hit GM kit for PRESET-mode pads (D12): kick snare rim clap chh ohh tom crash.
 /// JSON-reassignable kits are on the roadmap; constants until then.
@@ -150,94 +68,6 @@ const PATCHES: [(u8, &str); 11] = [
 ];
 /// Letter B → loop-length settings key instead of a patch slot.
 const SETTINGS_KEY_SLOT: u8 = 11;
-
-// ------------------------------------------------------------------- events
-
-enum Event {
-    NoteOn {
-        chan: i32,
-        key: i32,
-        vel: i32,
-    },
-    NoteOff {
-        chan: i32,
-        key: i32,
-    },
-    /// Transport: start playback — master clock runs from the current sample.
-    Play,
-    /// Transport: stop playback — clock halts; position restarts on next play.
-    Stop,
-    /// Launch scene `index` (0-based). Stopped → starts playing immediately;
-    /// playing → applied at the scene's quantized boundary (D5).
-    LaunchScene {
-        index: usize,
-    },
-    /// ⏺ — start capturing a take (starts the clock if stopped); metronome
-    /// runs only while recording (D16).
-    StartRecording,
-    /// D15: entering DAW mode finalizes any live take but leaves playback,
-    /// scene, and sounding notes completely alone.
-    StopRecording,
-    /// D13: DAW-mode selector — the perform voice (lead channel) takes a new
-    /// GM program; the pressed key itself is forwarded as an audition.
-    SetLeadProgram {
-        program: u8,
-    },
-    /// D13 settings key (letter B in DAW mode): cycle loop_bars 2→4→8→16→2.
-    CycleLoopBars,
-}
-
-/// Wrap an engine event that arrived from the HTTP lane as a TimedEvent
-/// (both timestamps are "now" — latency for a web click is irrelevant).
-fn remote(event: Event) -> TimedEvent {
-    TimedEvent {
-        intended: Instant::now(),
-        sent: Instant::now(),
-        event,
-    }
-}
-
-/// An event plus the wall-clock time it was *intended* to fire. The audio
-/// thread records (consume_time - intended) as scheduling latency.
-struct TimedEvent {
-    intended: Instant, // when the feeder meant to emit it (feeder jitter = send - intended)
-    sent: Instant,     // when it hit the channel (engine latency = consume - sent)
-    event: Event,
-}
-
-// -------------------------------------------------------------------- stats
-
-#[derive(Default)]
-struct Stats {
-    cycles: AtomicU64,           // render+write iterations
-    busy_ns: AtomicU64,          // time spent in synth render + interleave (not blocking writes)
-    xruns: AtomicU64,            // ALSA underruns recovered
-    events: AtomicU64,           // MIDI events consumed
-    q_sum_us: AtomicU64,         // engine-internal queue wait: consumed - sent
-    q_max_us: AtomicU64,         // worst queue wait in window
-    feed_max_us: AtomicU64,      // worst feeder jitter (sent - intended) in window
-    delay_frames_max: AtomicU64, // max snd_pcm_delay seen in window (output-side queue)
-    // Transport *levels* — shared with the HTTP/WS layer (Arc'd so the
-    // server reads the very same atomics the audio thread writes).
-    live: Arc<LiveStatus>,
-    /// Live project swaps via HTTP (cumulative).
-    project_updates: std::sync::atomic::AtomicU64,
-}
-
-impl Stats {
-    fn snapshot_and_reset(&self) -> [u64; 8] {
-        [
-            self.cycles.swap(0, Ordering::Relaxed),
-            self.busy_ns.swap(0, Ordering::Relaxed),
-            self.xruns.swap(0, Ordering::Relaxed),
-            self.events.swap(0, Ordering::Relaxed),
-            self.q_sum_us.swap(0, Ordering::Relaxed),
-            self.q_max_us.swap(0, Ordering::Relaxed),
-            self.feed_max_us.swap(0, Ordering::Relaxed),
-            self.delay_frames_max.swap(0, Ordering::Relaxed),
-        ]
-    }
-}
 
 // --------------------------------------------------------------------- main
 
@@ -273,7 +103,7 @@ fn main() {
     // set_channel_type alone does NOT re-resolve the channel's preset — the
     // bank_select + program_change pair is what actually lands them on the
     // GM drum kit (lab: examples/drum_chan_lab.rs).
-    for ch in TICK_CH..=15 {
+    for ch in core::TICK_CH..=15 {
         synth.set_channel_type_drum(ch);
         synth.bank_select(ch, 128); // GM percussion bank
         synth.program_change(ch, 0);
@@ -393,396 +223,21 @@ fn main() {
                 .io_checked::<i16>()
                 .expect("could not create PCM IO handle");
 
-            let mut left = vec![0f32; PERIOD_FRAMES];
-            let mut right = vec![0f32; PERIOD_FRAMES];
-            let mut out = vec![0i16; PERIOD_FRAMES * 2]; // interleaved
-
+            // The core owns all per-period state; the fake-backend test twin
+            // lives in core.rs harness_tests (device-free CI).
+            let mut core =
+                EngineCore::new(project, Arc::clone(&live), Arc::clone(&a_stats), take_feed);
+            let mut backend = FluidBackend(&synth);
             // Track programs + mixer (D3: track N → internal channel N).
             // Keys on channel 0 thus play track 1's instrument (and level).
-            for (t, track) in project.tracks.iter().enumerate() {
-                apply_track_voice(&synth, t as i32, track);
-            }
+            core.apply_all_voices(&mut backend);
 
-            let mut bpm = project.bpm;
-            let mut cycle: u64 = 0;
-            let mut total_samples: u64 = 0; // frames rendered so far (master clock domain)
-            let mut playing_since: Option<u64> = None; // sample index where Play fired
-            // Scene/launch state machine — pure & unit-tested (transport.rs).
-            let mut transport = transport::Transport::default();
-            // Recording (D16): (base step, events with take-local ticks).
-            // Capture happens in the drain loop — the audio thread owns both
-            // the clock and the event stream, so stamping is exact and needs
-            // no atomics or main-thread changes.
-            let mut recording: Option<(u64, Vec<RecordedEvent>)> = None;
-            // Takes persisted in the project (earlier sessions) are live from
-            // t=0; new finalizes append to the file via the take feed.
-            let mut takes: Vec<Take> = std::mem::take(&mut project.takes);
-            // Names of takes finalized *this boot*: they survive a project swap
-            // until the take-feed has persisted them (swap-vs-drain race), but
-            // boot-seeded takes are purely store-owned and vanish when a PUT
-            // drops or mutes them.
-            let mut mine: Vec<(String, Instant)> = Vec::new();
-            // Remote (web) transport/scene commands, translated to Events in
-            // step 0 and consumed by the same drain as hardware events.
-            let mut remote_ev: std::collections::VecDeque<TimedEvent> = Default::default();
-            a_stats
-                .live
-                .takes
-                .store(takes.len().min(u8::MAX as usize) as u8, Ordering::Relaxed);
             loop {
-                // 0) HTTP commands. Payloads are store-validated; the swap +
-                // dealloc runs here (user-initiated, rare) — deliberate
-                // exception to the audio-thread no-allocation rule. Transport/
-                // scene triggers are translated into ordinary events and run
-                // through the same pipeline as hardware (step 1).
-                remote_ev.clear();
-                for _ in 0..16 {
-                    let Ok(cmd) = crx.try_recv() else { break };
-                    match cmd {
-                        EngineCommand::SetProject(pf) => {
-                            apply_swap(pf, &mut project, &mut bpm, &mut takes, &mut mine, &synth);
-                            // A PUT may shrink the scene list; drop any
-                            // dangling active/pending launch.
-                            if transport.clamp_scenes(project.scenes.len()) {
-                                a_stats.live.active_scene.store(0, Ordering::Relaxed);
-                            }
-                            a_stats
-                                .project_updates
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        EngineCommand::Play => remote_ev.push_back(remote(Event::Play)),
-                        EngineCommand::Stop => remote_ev.push_back(remote(Event::Stop)),
-                        EngineCommand::Record => {
-                            remote_ev.push_back(remote(Event::StartRecording));
-                        }
-                        EngineCommand::LaunchScene(n) if n >= 1 => {
-                            remote_ev.push_back(remote(Event::LaunchScene {
-                                index: n as usize - 1,
-                            }));
-                        }
-                        _ => {} // non_exhaustive: future commands ignored
-                    }
-                }
+                // One cycle: commands → events → clock → render (all in core).
+                core.period(&mut backend, &crx, &rx);
 
-                // 1) Drain pending events: queued remote commands first, then
-                // the MIDI lane (bounded per cycle — writes stay timely).
-                for _ in 0..80 {
-                    let te = match remote_ev.pop_front().or_else(|| rx.try_recv().ok()) {
-                        Some(te) => te,
-                        None => break,
-                    };
-                    {
-                        {
-                            let q_us = te.sent.elapsed().as_micros() as u64;
-                            let feed_us = te.intended.elapsed().as_micros() as u64 - q_us;
-                            a_stats.events.fetch_add(1, Ordering::Relaxed);
-                            a_stats.q_sum_us.fetch_add(q_us, Ordering::Relaxed);
-                            a_stats.q_max_us.fetch_max(q_us, Ordering::Relaxed);
-                            a_stats.feed_max_us.fetch_max(feed_us, Ordering::Relaxed);
-                            match te.event {
-                                Event::NoteOn { chan, key, vel } => {
-                                    // Per-key retrigger (D17): a strike resets
-                                    // the previous voice of this exact key;
-                                    // other keys stay fully polyphonic.
-                                    // Pads: All Sound Off on their private
-                                    // channel (one-shots ignore note-off).
-                                    // Leads: note-off works (release stage).
-                                    if is_pad_channel(chan) {
-                                        synth.all_sounds_off(chan);
-                                    } else {
-                                        synth.note_off(chan, key);
-                                    }
-                                    synth.note_on(chan, key, vel);
-                                    // Take capture: everything sounding while
-                                    // recording is stamped on the master clock.
-                                    if let Some((base, evs)) = recording.as_mut()
-                                        && let Some(start) = playing_since
-                                    {
-                                        let step =
-                                            clock::steps_elapsed(total_samples - start, RATE, bpm)
-                                                as u64;
-                                        evs.push(RecordedEvent::NoteOn {
-                                            tick: step.saturating_sub(*base) as u32,
-                                            channel: chan as u8,
-                                            pitch: key as u8,
-                                            velocity: vel as u8,
-                                        });
-                                    }
-                                }
-                                Event::NoteOff { chan, key } => {
-                                    synth.note_off(chan, key);
-                                    if let Some((base, evs)) = recording.as_mut()
-                                        && let Some(start) = playing_since
-                                    {
-                                        let step =
-                                            clock::steps_elapsed(total_samples - start, RATE, bpm)
-                                                as u64;
-                                        evs.push(RecordedEvent::NoteOff {
-                                            tick: step.saturating_sub(*base) as u32,
-                                            channel: chan as u8,
-                                            pitch: key as u8,
-                                        });
-                                    }
-                                }
-                                Event::Play => {
-                                    if playing_since.is_none() {
-                                        playing_since = Some(total_samples);
-                                        transport.playing = true;
-                                    }
-                                }
-                                Event::Stop => {
-                                    // Finalize any live take first (D15: stop
-                                    // means silent; playback waits for Play).
-                                    if let Some((_base, evs)) = recording.take()
-                                        && !evs.is_empty()
-                                    {
-                                        let take = Take {
-                                            name: format!("Take {}", takes.len() + 1),
-                                            events: evs,
-                                            muted: false,
-                                        };
-                                        a_stats.live.takes.fetch_add(1, Ordering::Relaxed);
-                                        // Hand the finalized take to the HTTP layer
-                                        // (clone + try_send: user-initiated, rare).
-                                        let _ = take_feed.send(take.clone());
-                                        mine.push((take.name.clone(), Instant::now()));
-                                        takes.push(take);
-                                    }
-                                    a_stats.live.recording.store(false, Ordering::Relaxed);
-                                    playing_since = None;
-                                    transport.stop();
-                                    a_stats.live.active_scene.store(0, Ordering::Relaxed);
-                                    for t in 0..project.tracks.len() as i32 {
-                                        synth.all_notes_off(t);
-                                    }
-                                }
-                                Event::StartRecording => {
-                                    if recording.is_none() {
-                                        if playing_since.is_none() {
-                                            playing_since = Some(total_samples);
-                                            transport.playing = true;
-                                        }
-                                        let base = clock::steps_elapsed(
-                                            total_samples - playing_since.unwrap_or(total_samples),
-                                            RATE,
-                                            bpm,
-                                        ) as u64;
-                                        recording = Some((base, Vec::new()));
-                                        a_stats.live.recording.store(true, Ordering::Relaxed);
-                                    }
-                                }
-                                Event::StopRecording => {
-                                    // D15: finalize the take if one is live;
-                                    // playback, scene and held notes untouched.
-                                    if let Some((_base, evs)) = recording.take()
-                                        && !evs.is_empty()
-                                    {
-                                        let take = Take {
-                                            name: format!("Take {}", takes.len() + 1),
-                                            events: evs,
-                                            muted: false,
-                                        };
-                                        a_stats.live.takes.fetch_add(1, Ordering::Relaxed);
-                                        let _ = take_feed.send(take.clone());
-                                        mine.push((take.name.clone(), Instant::now()));
-                                        takes.push(take);
-                                    }
-                                    a_stats.live.recording.store(false, Ordering::Relaxed);
-                                }
-                                Event::SetLeadProgram { program } => {
-                                    synth.program_change(LEAD_CH, program as i32);
-                                }
-                                Event::CycleLoopBars => {
-                                    project.loop_bars = match project.loop_bars {
-                                        2 => 4,
-                                        4 => 8,
-                                        8 => 16,
-                                        _ => 2,
-                                    };
-                                }
-                                Event::LaunchScene { index } => {
-                                    // Scenes the project does not have (e.g.
-                                    // pad 8 after a shrink) resolve to None
-                                    // and are IGNORED — see transport.rs.
-                                    let q = project
-                                        .scenes
-                                        .get(index)
-                                        .map(|s| s.quantize.unwrap_or(Quantize::NextBar));
-                                    match transport.launch(index, q) {
-                                        transport::Effect::Start { scene } => {
-                                            // Launching from stopped starts playback now.
-                                            playing_since = Some(total_samples);
-                                            a_stats
-                                                .live
-                                                .active_scene
-                                                .store(scene as u8 + 1, Ordering::Relaxed);
-                                            apply_scene_voice(&synth, &project, scene);
-                                        }
-                                        transport::Effect::Switch { scene } => {
-                                            a_stats
-                                                .live
-                                                .active_scene
-                                                .store(scene as u8 + 1, Ordering::Relaxed);
-                                            apply_scene_voice(&synth, &project, scene);
-                                        }
-                                        transport::Effect::Queued | transport::Effect::Ignore => {}
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 1b) Master clock: fire beat ticks for every beat boundary the
-                // playhead reaches inside this period (bounded — a 256-frame
-                // period spans ~1% of a beat at 120 BPM; the loop runs ≤1x).
-                match playing_since {
-                    Some(start) => {
-                        let b0 = clock::beats_elapsed(total_samples - start, RATE, bpm);
-                        let b1 = clock::beats_elapsed(
-                            total_samples + PERIOD_FRAMES as u64 - start,
-                            RATE,
-                            bpm,
-                        );
-                        let mut p = b0.ceil() as u64; // first beat position reached this period
-                        while (p as f64) < b1 {
-                            // Apply a pending scene launch at its quantized boundary.
-                            if let Some(i) = transport.tick(p) {
-                                a_stats
-                                    .live
-                                    .active_scene
-                                    .store(i as u8 + 1, Ordering::Relaxed);
-                                apply_scene_voice(&synth, &project, i);
-                            }
-                            // Metronome (D16): fires ONLY while recording —
-                            // never during plain playback, never captured.
-                            if recording.is_some() {
-                                // Accent the downbeat; kick self-decays.
-                                let vel: i32 = if p.is_multiple_of(4) { 110 } else { 70 };
-                                synth.note_on(TICK_CH, 36, vel);
-                                synth.note_off(TICK_CH, 36);
-                            }
-                            p += 1;
-                        }
-
-                        // Pattern playback: 16th-gated step notes for the active scene.
-                        if let Some(scene) = transport.active {
-                            let s0 = clock::steps_elapsed(total_samples - start, RATE, bpm);
-                            let s1 = clock::steps_elapsed(
-                                total_samples + PERIOD_FRAMES as u64 - start,
-                                RATE,
-                                bpm,
-                            );
-                            let (first, last) = transport::Transport::step_window(s0, s1);
-                            for k in first..last {
-                                for (t, track) in project.tracks.iter().enumerate() {
-                                    if let Some(Some(clip)) = track.clips.get(scene) {
-                                        let len = clip.pattern.steps.len() as u64;
-                                        // 16th gating: off the previous step's note,
-                                        // on this one (sustains = repeated pitches).
-                                        // saturating: k==0 when a launch starts the
-                                        // clock mid-period (used to underflow).
-                                        if let Some(n) =
-                                            clip.pattern.steps[(k.saturating_sub(1) % len) as usize]
-                                        {
-                                            synth.note_off(t as i32, n.pitch as i32);
-                                        }
-                                        if let Some(n) = clip.pattern.steps[(k % len) as usize] {
-                                            synth.note_on(
-                                                t as i32,
-                                                n.pitch as i32,
-                                                n.velocity as i32,
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Take playback (D16 + D18 overdub): every unmuted
-                        // finalized take loops together — and keeps looping
-                        // while a NEW take is being captured, so you can
-                        // layer. Capture only sees the input event lane,
-                        // never these direct synth calls: no feedback loop.
-                        {
-                            let ts0 = clock::steps_elapsed(total_samples - start, RATE, bpm);
-                            let ts1 = clock::steps_elapsed(
-                                total_samples + PERIOD_FRAMES as u64 - start,
-                                RATE,
-                                bpm,
-                            );
-                            let mut k = ts0.ceil() as u64;
-                            while (k as f64) < ts1 {
-                                for take in &takes {
-                                    if take.muted {
-                                        continue; // kept but silent (take mgmt)
-                                    }
-                                    let lt = take.loop_ticks(project.loop_bars) as u64;
-                                    for ev in take.events_at((k % lt) as u32) {
-                                        match *ev {
-                                            RecordedEvent::NoteOn {
-                                                channel,
-                                                pitch,
-                                                velocity,
-                                                ..
-                                            } => {
-                                                // Same retrigger semantics on
-                                                // take replay as live input:
-                                                // cuts last loop's still-
-                                                // ringing strikes.
-                                                if is_pad_channel(channel as i32) {
-                                                    synth.all_sounds_off(channel as i32);
-                                                } else {
-                                                    synth.note_off(channel as i32, pitch as i32);
-                                                }
-                                                synth.note_on(
-                                                    channel as i32,
-                                                    pitch as i32,
-                                                    velocity as i32,
-                                                )
-                                            }
-                                            RecordedEvent::NoteOff { channel, pitch, .. } => {
-                                                synth.note_off(channel as i32, pitch as i32)
-                                            }
-                                            RecordedEvent::ProgramChange {
-                                                channel,
-                                                program,
-                                                ..
-                                            } => {
-                                                synth.program_change(channel as i32, program as i32)
-                                            }
-                                        }
-                                    }
-                                }
-                                k += 1;
-                            }
-                        }
-
-                        a_stats.live.playing.store(true, Ordering::Relaxed);
-                        a_stats
-                            .live
-                            .pos_beats_x1000
-                            .store((b1 * 1000.0) as u32, Ordering::Relaxed);
-                    }
-                    None => {
-                        a_stats.live.playing.store(false, Ordering::Relaxed);
-                        a_stats.live.pos_beats_x1000.store(0, Ordering::Relaxed);
-                    }
-                }
-
-                // 2) Render float L/R -> interleave + soft-clip to i16.
-                let t0 = Instant::now();
-                synth.render(PERIOD_FRAMES, &mut left, &mut right);
-                for i in 0..PERIOD_FRAMES {
-                    let l = (left[i] * i32::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32);
-                    let r = (right[i] * i32::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32);
-                    out[2 * i] = l as i16;
-                    out[2 * i + 1] = r as i16;
-                }
-                let busy = t0.elapsed().as_nanos() as u64;
-
-                // 3) Blocking write; recover from underruns.
-                if let Err(e) = io.writei(&out) {
+                // Blocking write of the rendered period; recover from underruns.
+                if let Err(e) = io.writei(core.output()) {
                     a_stats.xruns.fetch_add(1, Ordering::Relaxed);
                     if let Err(re) = pcm.recover(e.errno(), true) {
                         eprintln!(
@@ -793,13 +248,8 @@ fn main() {
                     }
                 }
 
-                total_samples += PERIOD_FRAMES as u64;
-                cycle += 1;
-                a_stats.cycles.fetch_add(1, Ordering::Relaxed);
-                a_stats.busy_ns.fetch_add(busy, Ordering::Relaxed);
-
-                // 4) Sample the output queue depth occasionally (output-side latency).
-                if cycle.is_multiple_of(64)
+                // Sample the output queue depth occasionally (output-side latency).
+                if core.cycles.is_multiple_of(64)
                     && let Ok(delay) = pcm.delay()
                 {
                     a_stats
@@ -1046,7 +496,7 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>) {
                             Mode::Preset => {
                                 let key = DRUM_KIT[(index - 1) as usize] as i32;
                                 // One channel per pad so retriggers kill only this pad.
-                                let chan = PAD_CH_BASE + (index - 1) as i32;
+                                let chan = core::PAD_CH_BASE + (index - 1) as i32;
                                 let event = if on {
                                     Event::NoteOn {
                                         chan,
