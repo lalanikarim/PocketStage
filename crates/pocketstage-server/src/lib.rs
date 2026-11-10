@@ -49,6 +49,10 @@ pub enum EngineCommand {
     Record,
     /// Launch scene `n` (1-based as users count; engine maps to its 0-based).
     LaunchScene(u8),
+    /// Rename a live take so the audio thread's copy matches the store
+    /// (take adoption after later swaps keys on names — renaming only the
+    /// store side would duplicate the take on the next swap).
+    RenameTake { from: String, to: String },
 }
 
 // ------------------------------------------------------------------ store
@@ -442,6 +446,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/load", post(load_project))
         .route("/api/projects/delete", post(delete_project))
         .route("/api/projects/raw", get(raw_project))
+        .route("/api/takes/rename", post(rename_take))
         .with_state(state)
 }
 
@@ -654,6 +659,59 @@ async fn raw_project(
         text,
     )
         .into_response())
+}
+
+// ------------------------------------------------------------- take rename
+
+#[derive(Debug, serde::Deserialize)]
+struct RenameBody {
+    from: String,
+    to: String,
+}
+
+/// Rename a recorded take. Store first (durable), then the engine's live
+/// copy — same order as PUT /api/project. Names are the adoption key for
+/// takes, so duplicates are refused with 409.
+async fn rename_take(
+    State(state): State<AppState>,
+    Json(body): Json<RenameBody>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let to = body.to.trim().to_string();
+    if to.is_empty() || to.len() > 64 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "take name must be 1..=64 chars".into(),
+        ));
+    }
+    let mut pf = state.store.get();
+    if !pf.project.takes.iter().any(|t| t.name == body.from) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no take named '{}'", body.from),
+        ));
+    }
+    if pf.project.takes.iter().any(|t| t.name == to) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("a take named '{to}' already exists"),
+        ));
+    }
+    for t in &mut pf.project.takes {
+        if t.name == body.from {
+            t.name = to.clone();
+        }
+    }
+    state
+        .store
+        .replace(pf)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(tx) = &state.engine {
+        let _ = tx.send(EngineCommand::RenameTake {
+            from: body.from,
+            to,
+        });
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn put_project(

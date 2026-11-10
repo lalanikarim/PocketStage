@@ -267,6 +267,20 @@ function renderProject(pf) {
       await putProject(body, isSolo ? "unsoloed" : `soloed ${t.name}`);
     });
 
+    const ren = document.createElement("button");
+    ren.className = "alt"; ren.textContent = "\u270E"; ren.title = "rename take";
+    ren.style.margin = "0 0 0 8px"; ren.style.padding = "2px 9px";
+    ren.addEventListener("click", async () => {
+      const to = prompt("New name for " + t.name + ":", t.name);
+      if (!to || to.trim() === t.name) return;
+      const r = await fetch("/api/takes/rename", { method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ from: t.name, to: to.trim() }) });
+      if (!r.ok) { msg("rename rejected: " + (await r.text()), true); return; }
+      dirty = false; setSave();
+      await refresh();
+    });
+
     const del = document.createElement("button");
     del.className = "alt"; del.textContent = "\u2715"; del.title = "delete take";
     del.style.margin = "0 0 0 8px"; del.style.padding = "2px 9px";
@@ -282,7 +296,7 @@ function renderProject(pf) {
 
     const left = document.createElement("span");
     left.append(mute, label);
-    li.append(left, count, solo, del);
+    li.append(left, count, solo, ren, del);
     li.style.display = "flex"; li.style.alignItems = "center";
     li.style.justifyContent = "space-between";
     ul.appendChild(li);

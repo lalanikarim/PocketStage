@@ -458,3 +458,108 @@ async fn projects_routes_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
 }
+
+// ------------------------------------------------------------ take rename
+
+async fn rename(app: &axum::Router, body: &str) -> StatusCode {
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/api/takes/rename")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    )
+    .await;
+    status
+}
+
+#[tokio::test]
+async fn rename_take_route_validates_and_persists() {
+    let path = temp_path("rename");
+    cleanup(&path);
+    let store = std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap());
+    let mut pf = store.get();
+    pf.project.takes = vec![
+        pocketstage_model::Take {
+            name: "Take 1".into(),
+            events: vec![],
+            muted: false,
+        },
+        pocketstage_model::Take {
+            name: "Keep".into(),
+            events: vec![],
+            muted: false,
+        },
+    ];
+    store.replace(pf).unwrap();
+    let app = router(AppState::standalone(store.clone()));
+
+    // Valid rename → 204 and persisted to the store (and thus disk).
+    assert_eq!(
+        rename(&app, r#"{"from":"Take 1","to":"Main Riff"}"#).await,
+        StatusCode::NO_CONTENT
+    );
+    let names: Vec<String> = store
+        .get()
+        .project
+        .takes
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    assert!(names.contains(&"Main Riff".to_string()));
+    assert!(names.contains(&"Keep".to_string()));
+
+    // Target name already taken → 409.
+    assert_eq!(
+        rename(&app, r#"{"from":"Main Riff","to":"Keep"}"#).await,
+        StatusCode::CONFLICT
+    );
+    // Unknown source take → 404.
+    assert_eq!(
+        rename(&app, r#"{"from":"Nope","to":"X"}"#).await,
+        StatusCode::NOT_FOUND
+    );
+    // Blank target name → 400.
+    assert_eq!(
+        rename(&app, r#"{"from":"Main Riff","to":"   "}"#).await,
+        StatusCode::BAD_REQUEST
+    );
+    cleanup(&path);
+}
+
+#[tokio::test]
+async fn rename_take_forwards_command_to_engine() {
+    let path = temp_path("rename-cmd");
+    cleanup(&path);
+    let store = std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap());
+    let mut pf = store.get();
+    pf.project.takes = vec![pocketstage_model::Take {
+        name: "Take 1".into(),
+        events: vec![],
+        muted: false,
+    }];
+    store.replace(pf).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<EngineCommand>();
+    let (_ptx, prx) = std::sync::mpsc::channel::<pocketstage_model::Take>();
+    let app = router(AppState::embedded(
+        store.clone(),
+        tx,
+        std::sync::Arc::new(crate::LiveStatus::default()),
+        prx,
+    ));
+
+    assert_eq!(
+        rename(&app, r#"{"from":"Take 1","to":"Groove A"}"#).await,
+        StatusCode::NO_CONTENT
+    );
+    match rx.try_recv() {
+        Ok(EngineCommand::RenameTake { from, to }) => {
+            assert_eq!(from, "Take 1");
+            assert_eq!(to, "Groove A");
+        }
+        other => panic!("expected RenameTake, got {other:?}"),
+    }
+    cleanup(&path);
+}

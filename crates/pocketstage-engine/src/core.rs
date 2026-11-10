@@ -332,6 +332,7 @@ impl EngineCore {
                         index: n as usize - 1,
                     }));
                 }
+                EngineCommand::RenameTake { from, to } => self.rename_take(&from, &to),
                 _ => {} // non_exhaustive: future commands ignored
             }
         }
@@ -406,6 +407,22 @@ impl EngineCore {
         self.stats
             .project_updates
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Rename a live take (and its "mine" entry so the swap keep-rule keeps
+    /// matching after the store-side rename). Adoption keys on names, so
+    /// both copies must move together or the next swap duplicates.
+    fn rename_take(&mut self, from: &str, to: &str) {
+        for t in &mut self.takes {
+            if t.name == from {
+                t.name = to.to_string();
+            }
+        }
+        for (n, _) in &mut self.mine {
+            if n == from {
+                *n = to.to_string();
+            }
+        }
     }
 
     /// Finalize the live recording (if any) into a named take. Shared by
@@ -1112,6 +1129,43 @@ mod harness_tests {
             1,
             "project_updates counter"
         );
+    }
+
+    // ---- take rename -----------------------------------------------------------
+
+    #[test]
+    fn rename_moves_live_copy_and_mine_together() {
+        let mut h = Harness::new();
+        h.send(Event::Play);
+        h.send(Event::StartRecording);
+        h.send(Event::NoteOn {
+            chan: 0,
+            key: 60,
+            vel: 90,
+        });
+        h.tick(1);
+        h.send(Event::Stop); // "Take 1", in takes + mine
+        h.tick(1);
+        assert_eq!(h.core.takes[0].name, "Take 1");
+
+        h.tx_cmd
+            .send(EngineCommand::RenameTake {
+                from: "Take 1".into(),
+                to: "Bass Line".into(),
+            })
+            .unwrap();
+        h.tick(1);
+        assert_eq!(h.core.takes[0].name, "Bass Line");
+        assert_eq!(h.core.mine[0].0, "Bass Line");
+
+        // The store (already renamed) swaps in with the new name only —
+        // a stale mine entry would resurrect "Take 1" alongside it.
+        let mut pf = h.project();
+        pf.project.takes[0].name = "Bass Line".into();
+        h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
+        h.tick(1);
+        assert_eq!(h.core.takes.len(), 1, "no duplicate after rename+swap");
+        assert_eq!(h.core.takes[0].name, "Bass Line");
     }
 
     // ---- misc events ----------------------------------------------------------
