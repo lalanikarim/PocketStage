@@ -140,7 +140,13 @@ samples into a square wave; see `HANDOFF.md` §8/§10); synth gain rebased to
 0.3. Session 11 implemented R12 (D21–D24): write-through lane (engine →
 debounced outbound snapshots → store), MIX overlay (faders/knobs → mixer,
 fader-button detail pages) and SEQ overlay (bank-1 step programmer over the
-active scene) — pads 9/10 toggle overlays inside PRESET, voice-confirmed;
-overlay state surfaces in `/ws` + stats. 146 tests, CI gates green. Remaining
-(§6 item 14) is hardware-gated: ear-checks of sessions 8–11 features, pedal
-CC probe, Pi validation + deployment kit.
+active scene) — voice-confirmed overlay toggles; overlay state surfaces in
+`/ws` + stats. Session 11b implemented D25 (one voice at a time): PRESET
+sounds exactly one instrument; DAW mode is a white-key voice browser (C2 =
+Drums, next 11 white keys = GM patches); melodic voices play all 49 keys
+including pad-transmitted notes 36–51; Drums arms a 16-hit kit across both
+pad banks and silences the keybed; overlay entry lives on DAW pads 9/10,
+exits on PRESET bank 2 while an overlay is live; `active_voice` persists.
+152 tests, CI gates green. Next software candidate: §6 item 15 (live-apply
+web mixer edits). The rest (§6 items 14 + 16 ear-checks) is hardware-gated:
+pedal CC probe, Pi validation + deployment kit.

@@ -78,8 +78,23 @@ back in; `Track.root_note` added (additive, v1-safe). Overlay state rides
 `LiveStatus.overlay` → `/ws` frame + stats line + UI live card. Follow-up:
 `Project.master_gain` (0..=2, additive) → `fluid_synth_set_gain` at boot +
 swap — Master slider in the mixer card turns the output up live, no
-recompile; unset keeps the 0.3 boot default. 149 tests. See §10 "Session
+recompile; unset keeps the 0.3 boot default. See §10 "Session
 11" and scratchpad R12.
+
+**D25 IMPLEMENTED (session 11b): one voice at a time.** PRESET sounds
+exactly ONE instrument. DAW mode is a white-key voice browser anchored at
+C2: slot 0 (lowest white key) = Drums, the next 11 white keys = curated GM
+patches; black keys are inert. A melodic voice plays across all 49 keys —
+pad presses become melody notes too (pads transmit plain notes 36–51). The
+Drums voice flips that: pads 1–16 hit the kit across both banks
+(`drum_kit_2`, new additive field; bank-2 channels mirror bank 1), keybed
+silent. Overlay entry moved to DAW pads 9/10 (PRESET bank 2 is instrument
+now); exits stay reachable on PRESET bank 2 while an overlay lives. The
+voice persists via `Project.active_voice` (write-through lane) and rides
+`LiveStatus.active_voice` → `/ws` + stats line + UI "voice" cell.
+Dead events removed: SetLeadProgram, CycleLoopBars (B-key loop-length
+cycling is gone — loop bars are web-editable). 152 tests. See D25, §6 item
+16, §10 Session 11b.
 
 **A usable end-to-end loop exists**: boot → play keys/drum pads (PRESET) →
 ⏺ record takes → Stop → looping playback → overdub layers on top; DAW mode
@@ -375,19 +390,15 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     auto-save on slider release (or a lightweight per-control PATCH-style
     lane); mind the dirty-flag guard (refresh() must not clobber unsaved
     edits) and don't PUT per mousemove event. Todo, software-only.
-16. **One voice at a time + white-key patch browser** (DECIDED in principle,
-    session 11 feedback; supersedes the always-on kit half of D12):
-    a) Exactly ONE instrument is active in PRESET — no simultaneous piano +
-       drums layer.
-    b) Instrument changes in DAW mode by pressing a WHITE key; patches map
-       to white keys (black keys ignored). Replaces D13's pitch%12 slots.
-    c) Open semantics before implementation (see chat 2026-11-10): whether
-       pad-shadowed notes 36–51 become playable melody when a melodic voice
-       is selected (they are physically indistinguishable from pads — same
-       port, channel, notes); where DRUMS sits in the white-key list; per-
-       take vs cross-take layering under strict one-voice; whether the
-       selected voice persists in the project file. Answer these, write the
-       decision as D25, then implement test-first.
+16. **One voice at a time + white-key browser — IMPLEMENTED (session 11b,
+    D25)** ✅: exactly one active voice in PRESET; DAW white-key selection;
+    kit spans both pad banks in Drums; melodic pads play the voice. Layering
+    workflow under strict one-voice: record a drums take → switch voice to
+    piano → overdub (capture is lane-based, cross-take multitracking works).
+    **Hardware ear-checks owed:** white-key select/audition feel, melodic pad
+    presses (must play melody notes), 16-hit kit bank 2, keybed silence in
+    Drums, overlay entry from DAW pads 9/10 only, voice persistence across
+    reboot.
 
 ---
 
@@ -418,7 +429,8 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D21 | **Overlay entry** (R12): SEQ/MIX are software overlays inside PRESET (the Play/Seq/Mix trims emit nothing). Logical pad 9 toggles MIX, pad 10 toggles SEQ; mutually exclusive; any mode switch exits both; voice-confirmed (no LEDs) | ✅ Implemented (s11) |
 | D22 | **MIX overlay** (R12): F1–F4→track gain, K1–K4→pan, K5–K8→reverb send; fader buttons = per-track detail select (D14); write-through to project with ~500 ms debounced persist. Detail-page layout chosen at implementation: K1–K4 = gain/pan/reverb/chorus of the selected track | ✅ Implemented (s11) |
 | D23 | **SEQ overlay** (R12): live step programmer — bank-1 pads 1–8 toggle steps of an 8-step window on the selected track; bank 2 keeps commands (pad 10 exit, pad 11 next bar, pad 12 flip half-window); edits quantize to the engine's 16th grid | ✅ Implemented (s11) |
-| D24 | **Write-through lane** (R12): engine-originated project edits flow out on a dedicated mpsc to the store (debounced), never back in — single writer intact; engine applies edits locally first. Debounce is sample-counted in the engine; the server drain coalesces bursts to one persist. First rider: CycleLoopBars — B-key survives reboot now | ✅ Implemented (s11) |
+| D24 | **Write-through lane** (R12): engine-originated project edits flow out on a dedicated mpsc to the store (debounced), never back in — single writer intact; engine applies edits locally first. Debounce is sample-counted in the engine; the server drain coalesces bursts to one persist. First rider: CycleLoopBars — B-key survives reboot now (event itself removed by D25) | ✅ Implemented (s11) |
+| D25 | **One voice at a time** (session 11 feedback; supersedes D12's always-on kit layer + D13's pitch%12 browser): PRESET has exactly ONE active performance voice. Selection = DAW-mode white-key browser anchored at C2 — slot 0 is Drums, next 11 white keys are the curated GM patches; black keys inert. Melodic voice: all 49 keys play it and pad presses are melody notes too (pads transmit plain notes 36–51, nothing to disambiguate). Drums voice: pads 1–16 = kit across both banks (`drum_kit_2` additive field; bank-2 channels mirror bank 1 — same kill group, documented trade-off), keybed silent. Overlay entry moved to DAW pads 9/10; exits stay reachable on PRESET bank 2 while an overlay lives. Voice persists via `Project.active_voice` + write-through; mirrored on `LiveStatus.active_voice` (VOICE_DRUMS sentinel) → /ws + stats + UI | ✅ Implemented (s11b), ear-checks owed |
 
 ---
 
@@ -477,20 +489,18 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 
 ## 9. How to resume (suggested prompt for next session)
 
-> Read HANDOFF.md (§3 state, §6 backlog item 14, §7 decisions D21–D24) and
-> AGENTS.md. Session 11 implemented R12 end to end: D24 write-through lane
-> (debounced engine→store snapshots; CycleLoopBars was the first rider),
-> MIX overlay (F/K → gain/pan/reverb, fader-button detail pages) and SEQ
-> overlay (bank-1 step programmer over the active scene, pad 11 bar,
-> pad 12 half-window) — 146 tests, all gates green, every behavior covered
-> device-free on the core.rs harness. Next: the work is hardware-gated —
-> ear-check list in §6 item 14 (overlay voice confirmations, mix rides,
-> step painting feel, sessions 8–10 features), pedal probe, Pi validation.
-> Software niceties: live CC values in the /ws frame, fader ramp
-> smoothing, pitch-per-step SEQ editing (deferred). Live env: engine runs
-> detached on :7777, project library in ~/.pocketstage/projects (test
-> artifacts: "Gig" snapshot, "UI Test Clip" in S1, reverb 0.5 on track 1 —
-> user may want to clean).
+> Read HANDOFF.md (§3 state, §6 backlog items 14–16, §7 decisions D21–D25)
+> and AGENTS.md. Session 11b implemented D25 (one voice at a time: DAW
+> white-key browser with Drums on the lowest C, melodic pads play the voice,
+> kit spans both pad banks in Drums mode, overlay entry moved to DAW pads
+> 9/10, active_voice persisted) — 152 tests, all gates green. Next software
+> candidate: §6 item 15 (web mixer edits should apply live without Save).
+> Everything else is hardware-gated: ear-check lists in §6 items 14 + 16
+> (sessions 8–11 features), pedal probe, Pi validation. Software niceties:
+> live CC values in the /ws frame, fader ramp smoothing, pitch-per-step SEQ
+> editing (deferred). Live env: engine runs detached on :7777, project
+> library in ~/.pocketstage/projects (test artifacts: "Gig" snapshot,
+> "UI Test Clip" in S1, reverb 0.5 on track 1 — user may want to clean).
 
 ---
 
@@ -741,3 +751,27 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   values even past store validation; FFI symbol verified against the
   linked libfluidsynth3). Still one PUT away from `LiveStatus`, so no WS
   surfacing of the live value yet.
+- **Session 11b**: **D25 — one voice at a time** (user feedback: piano and
+  drums were layered always-on; wanted single-instrument performance with
+  white-key selection in DAW mode). Semantics settled with the user: Q1 keep
+  the 11-patch list + Drums; Q2 melodic voice plays notes 36–51 like any key
+  (pad presses included — full 49-key instrument, pad-shadow trap gone); Q3
+  kit extends across both pad banks in Drums mode (`drum_kit_2`, defaults
+  [35,40,56,57,45,48,50,55], channels mirror bank 1). Model: `ActiveVoice`
+  enum (externally tagged serde) + `Project.active_voice` (persisted via the
+  D24 write-through lane; boot applies it over track 1's program; swaps
+  re-mirror). Engine: `Event::SelectVoice` (program → prog-change on lead,
+  Drums → kick confirm), `LiveStatus.active_voice` u32 atomic with
+  `VOICE_DRUMS` sentinel (server crate, shared) → /ws `"voice"` + stats
+  `voice=` + UI live-card cell. Feeder rewrite: DAW white-key browser
+  (anchor C2, slot 0 = Drums, black keys inert, programs audition); PRESET
+  routes by voice — melodic pads become lead notes, Drums silences keybed
+  and arms 16-hit kit; overlay ENTRY moved to DAW pads 9/10, exits stay on
+  PRESET bank 2 while an overlay lives (mode-switch-exits rule now applies
+  to entering DAW only). Removed dead events SetLeadProgram + CycleLoopBars
+  (B-key loop cycling gone; loop bars web-only). New core tests: select ×
+  persist/atomic/kick-confirm, boot program override, swap re-mirror,
+  bank-2 kit atomic; model serde/validation test. 152 tests (+3 net),
+  clippy -D warnings + fmt green; engine restarted and smoke-tested live
+  (PUT active_voice=drums → stats `voice=drums`, /ws `"voice":"drums"`,
+  restore clean, xruns=0). Hardware ear-checks listed in §6 item 16.

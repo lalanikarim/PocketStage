@@ -698,3 +698,25 @@ then SEQ (grid edits + clip mutation). Each is a standalone commit with harness 
 Former working title: PiDAW. Alternatives considered: NetSynth, WireDAW, LooseEnds, Stagehand.
 Repo folder still `PiDaw`; rename to `PocketStage` when convenient (`mv ~/Projects/PiDaw ~/Projects/PocketStage`).
 Binary name: `pocketstage`. Crate prefix: `pocketstage-*`.
+
+## R13. One voice at a time (session 11b — D25, IMPLEMENTED)
+
+User feedback after R12: always-on piano + drums felt wrong; the stage-keyboard
+mental model is ONE instrument at a time, changed from DAW mode via white keys.
+Three questions resolved with the user: keep the curated 11 patches + Drums
+(slot 0 = lowest white key C2); melodic voices play notes 36–51 like any other
+key (pad presses are melody — pads transmit plain notes, nothing to
+disambiguate once there's one instrument); the kit extends across BOTH pad
+banks in Drums mode (pads 9–16 = `drum_kit_2`, channels mirror bank 1 — same
+kill group per pair, accepted trade-off).
+
+Consequences that touched earlier decisions: D12's always-on kit layer and
+D13's pitch%12 browser are gone (SetLeadProgram/CycleLoopBars events deleted;
+B-key loop cycling now web-only). D21's overlay entry moved to DAW pads 9/10
+— PRESET bank 2 is instrument now — while exits stay reachable on PRESET bank
+2 whenever an overlay lives; "mode switch exits overlays" narrowed to
+entering DAW, so an overlay armed in DAW survives the trip back to PRESET.
+Layering still works, just sequentially: drums take → switch voice → overdub
+(capture is lane-based). Voice persistence (`Project.active_voice`, additive)
+rides the D24 write-through lane; `LiveStatus.active_voice` (u32 atomic,
+VOICE_DRUMS sentinel) feeds feeder + /ws + stats + UI.
