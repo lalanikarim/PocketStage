@@ -76,6 +76,7 @@
       <div class="cell"><b id="l-pos">–</b><span>bar : beat</span></div>
       <div class="cell"><b id="l-scene">–</b><span>scene</span></div>
       <div class="cell"><b id="l-mode">–</b><span>mode</span></div>
+      <div class="cell"><b id="l-voice">–</b><span>voice</span></div>
       <div class="cell"><b id="l-overlay">–</b><span>overlay</span></div>
       <div class="cell"><b id="l-takes">–</b><span>takes</span></div>
     </div>
@@ -384,6 +385,19 @@ async function save() {
   await putProject(body, "saved — engine applies at next safe point");
 }
 
+// D25 voice display: "drums" or a GM program number -> friendly name
+// (mirrors the engine's VOICES browser table).
+const GM_NAMES = {
+  0: "Grand Piano", 4: "Electric Piano", 6: "Harpsichord", 11: "Vibraphone",
+  19: "Organ", 24: "Nylon Guitar", 29: "Overdrive", 32: "Acoustic Bass",
+  38: "Synth Bass", 48: "Strings", 65: "Alto Sax",
+};
+function voiceName(v) {
+  if (v === "drums") return "Drums";
+  if (typeof v === "number") return GM_NAMES[v] || ("gm" + v);
+  return "\u2013";
+}
+
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -399,6 +413,7 @@ function connect() {
     $("l-pos").textContent = f.bar + " : " + f.beat;
     $("l-scene").textContent = f.scene || "–";
     $("l-mode").textContent = f.mode;
+    $("l-voice").textContent = voiceName(f.voice);
     const ov = f.overlay && f.overlay !== "none" ? f.overlay.toUpperCase() : "\u2013";
     $("l-overlay").textContent = ov;
     lastTransport = f.transport;

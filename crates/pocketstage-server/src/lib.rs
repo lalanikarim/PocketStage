@@ -323,7 +323,15 @@ pub struct LiveStatus {
     /// Software overlay inside PRESET (D21): 0 = none, 1 = MIX, 2 = SEQ.
     /// Written by the audio thread on pad 9/10 toggles; read by WS/stats.
     pub overlay: AtomicU8,
+    /// D25 single active voice: GM program 0..=127, or [`VOICE_DRUMS`].
+    /// Written by the audio thread (boot / swap / SelectVoice); read by the
+    /// MIDI feeder for routing and by WS for display.
+    pub active_voice: AtomicU32,
 }
+
+/// Sentinel value of [`LiveStatus::active_voice`] meaning "the kit".
+/// Real programs are 0..=127, so this can never alias.
+pub const VOICE_DRUMS: u32 = u32::MAX;
 
 // ----------------------------------------------------------------- routes
 
@@ -577,6 +585,7 @@ async fn ws_pump(mut socket: WebSocket, state: AppState) {
     let mut tick = tokio::time::interval(WS_TICK);
     loop {
         let (status, takes) = state.status();
+        let voice = state.live.active_voice.load(Ordering::Relaxed);
         let frame = serde_json::json!({
             "type": "status",
             "bpm": status.bpm,
@@ -586,6 +595,12 @@ async fn ws_pump(mut socket: WebSocket, state: AppState) {
             "scene": status.scene,
             "mode": status.mode,
             "overlay": status.overlay,
+            // D25: current performance voice — GM program number or "drums".
+            "voice": if voice == VOICE_DRUMS {
+                serde_json::json!("drums")
+            } else {
+                serde_json::json!(voice)
+            },
             "takes": takes,
         });
         let text = match serde_json::to_string(&frame) {
