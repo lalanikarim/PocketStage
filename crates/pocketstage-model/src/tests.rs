@@ -238,6 +238,47 @@ fn master_gain_round_trips_and_validates() {
     );
 }
 
+#[test]
+fn d25_fields_round_trip_and_default_to_none() {
+    // active_voice + drum_kit_2 are additive v1-safe fields.
+    let p = Project::default_project();
+    assert_eq!(p.active_voice, None);
+    assert_eq!(p.drum_kit_2, None);
+
+    for voice in [ActiveVoice::Drums, ActiveVoice::Program(42)] {
+        let mut p = Project::default_project();
+        p.active_voice = Some(voice);
+        p.validate().unwrap();
+        let json = ProjectFile {
+            version: SCHEMA_VERSION,
+            project: p,
+        }
+        .to_json_pretty()
+        .unwrap();
+        let back = ProjectFile::from_json_str(&json).unwrap();
+        assert_eq!(back.project.active_voice, Some(voice));
+    }
+    // Wire format is the documented externally-tagged shape.
+    assert!(
+        serde_json::to_string(&ActiveVoice::Drums)
+            .unwrap()
+            .contains("drums"),
+    );
+
+    // Out-of-range program rejected.
+    let mut p = Project::default_project();
+    p.active_voice = Some(ActiveVoice::Program(200));
+    assert_eq!(p.validate(), Err(ValidationError::ProgramOutOfRange(200)));
+
+    // Bank-2 kit validated like bank 1.
+    let mut p = Project::default_project();
+    p.drum_kit_2 = Some([35, 40, 56, 57, 45, 48, 50, 99]);
+    assert_eq!(
+        p.validate(),
+        Err(ValidationError::DrumNoteOutOfRange { note: 99 })
+    );
+}
+
 // --------------------------------------------------- slice A: record prep
 
 #[test]

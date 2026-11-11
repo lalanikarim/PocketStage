@@ -183,6 +183,16 @@ pub struct Project {
     /// in the GM percussion range 35..=81; pads keep one channel each.
     #[serde(default)]
     pub drum_kit: Option<[u8; 8]>,
+    /// Bank-2 kit for pads 9–16 while the DRUMS voice is selected (D25
+    /// extends the kit across both pad banks). Same rules as `drum_kit`;
+    /// `None` = engine defaults. Channels mirror bank 1 (pad 9 ≙ pad 1).
+    #[serde(default)]
+    pub drum_kit_2: Option<[u8; 8]>,
+    /// The ONE active performance voice (D25): keys in PRESET play exactly
+    /// this. `None` = track 1's instrument (the pre-D25 lead). Changed from
+    /// the DAW-mode white-key browser; persisted so reboot resumes it.
+    #[serde(default)]
+    pub active_voice: Option<ActiveVoice>,
     /// Master output gain — live-adjustable scale on the synth's final mix
     /// (the `synth.gain` setting, applied via `fluid_synth_set_gain`).
     /// `None` = leave whatever the engine booted with (0.3 since session
@@ -243,6 +253,8 @@ impl Project {
             fx_reverb: None,
             fx_chorus: None,
             drum_kit: None,
+            drum_kit_2: None,
+            active_voice: None,
             master_gain: None,
         }
     }
@@ -277,15 +289,20 @@ impl Project {
                 return Err(ValidationError::FxOutOfRange { name, value: v });
             }
         }
-        if let Some(kit) = self.drum_kit
-            && let Some(&bad) = kit.iter().find(|&&n| !(35..=81).contains(&n))
-        {
-            return Err(ValidationError::DrumNoteOutOfRange { note: bad });
+        for kit in [self.drum_kit, self.drum_kit_2].into_iter().flatten() {
+            if let Some(&bad) = kit.iter().find(|&&n| !(35..=81).contains(&n)) {
+                return Err(ValidationError::DrumNoteOutOfRange { note: bad });
+            }
         }
         if let Some(v) = self.master_gain
             && !(0.0..=2.0).contains(&v)
         {
             return Err(ValidationError::MasterGainOutOfRange { value: v });
+        }
+        if let Some(ActiveVoice::Program(p)) = self.active_voice
+            && p > 127
+        {
+            return Err(ValidationError::ProgramOutOfRange(p));
         }
         for track in &self.tracks {
             if track.clips.len() != self.scenes.len() {
@@ -451,6 +468,19 @@ pub struct Scene {
     /// Per-scene launch quantize override (D5); `None` = project default.
     #[serde(default)]
     pub quantize: Option<Quantize>,
+}
+
+/// The single active performance voice (D25). Externally tagged serde:
+/// `"drums"` or `{"program": 42}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActiveVoice {
+    /// GM program on the lead channel (keys play it; pads are keys too,
+    /// notes 36–51 included — no pad/key ambiguity in melody mode).
+    Program(u8),
+    /// The kit: pads 1–16 hit `drum_kit` + `drum_kit_2` (D17 retrigger per
+    /// channel, bank 2 mirroring bank 1's channels); the keybed is silent.
+    Drums,
 }
 
 /// When a scene-launch request actually starts playing (D5).
