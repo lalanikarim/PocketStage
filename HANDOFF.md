@@ -369,6 +369,20 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     checks of sessions 8/9/10/11 features (overlay toggles, mix rides, step
     painting), pedal probe, T2 round 2, Pi validation + deployment kit
     (user deferred).
+15. **Web UX: mixer edits should apply immediately** (user report, session
+    11): volume/gain sliders in the web UI only take effect after an
+    explicit Save click — dragging should be audible live. Sketch: debounced
+    auto-save on slider release (or a lightweight per-control PATCH-style
+    lane); mind the dirty-flag guard (refresh() must not clobber unsaved
+    edits) and don't PUT per mousemove event. Todo, software-only.
+16. **One instrument at a time?** (user question, session 11 — DISCUSS,
+    do not implement yet): PRESET currently sounds the lead voice on keys
+    AND the drum kit on pads simultaneously. That is the implemented design
+    (D11/D12: "one performance voice at a time" = one *melodic* patch on
+    keys; pads are drums by design and shadow the lowest 16 notes). User
+    expects exclusive instrument selection — needs a semantics decision
+    first (toggle pad vs auto-switch; auto-switch collides with D18
+    overdub layering, where one take commonly stacks keys + drums).
 
 ---
 
