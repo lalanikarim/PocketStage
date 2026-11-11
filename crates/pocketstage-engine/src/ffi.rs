@@ -12,7 +12,7 @@
 #![allow(dead_code)]
 
 use std::ffi::CString;
-use std::os::raw::{c_char, c_double, c_int};
+use std::os::raw::{c_char, c_double, c_float, c_int};
 
 /// Opaque FluidSynth types (uninhabited enums = zero-sized, can only be held by pointer).
 pub enum fluid_settings_t {}
@@ -82,6 +82,10 @@ unsafe extern "C" {
         fx_group: c_int,
         level: c_double,
     ) -> c_int;
+    // Master gain, live-adjustable (FluidSynth >= 2.0): scales the same
+    // signal path as the `synth.gain` setting, so a running engine can be
+    // turned up from the web UI without a reboot. Returns void.
+    pub fn fluid_synth_set_gain(synth: *mut fluid_synth_t, gain: c_float);
     pub fn fluid_synth_write_float(
         synth: *mut fluid_synth_t,
         len: c_int,
@@ -203,6 +207,15 @@ impl Synth {
     #[inline]
     pub fn set_channel_type_drum(&self, chan: i32) {
         unsafe { fluid_synth_set_channel_type(self.0, chan, 1) }; // CHANNEL_TYPE_DRUM
+    }
+
+    /// Master gain (project `master_gain`): live equivalent of the
+    /// `synth.gain` setting. Pure output level — no FX space params
+    /// involved. Clamped to 0..=4 defensively (the model validates
+    /// 0..=2; FluidSynth itself accepts anything finite).
+    #[inline]
+    pub fn set_gain(&self, gain: f64) {
+        unsafe { fluid_synth_set_gain(self.0, gain.clamp(0.0, 4.0) as c_float) }
     }
 
     /// Global FX amount knobs — LEVELS ONLY, and only where the project

@@ -237,9 +237,9 @@ function renderMixer(pf) {
   const gname = document.createElement("span");
   gname.className = "tname";
   gname.textContent = "Global FX";
-  const mkGlobal = (key, dflt, title) => {
+  const mkGlobal = (key, dflt, title, max = 1) => {
     const s = document.createElement("input");
-    s.type = "range"; s.min = 0; s.max = 1; s.step = 0.01;
+    s.type = "range"; s.min = 0; s.max = max; s.step = 0.01;
     s.value = pf.project[key] ?? dflt; s.title = title + " (unset = synth stock)";
     const v = document.createElement("span"); v.className = "mval";
     const upd = () => {
@@ -254,6 +254,19 @@ function renderMixer(pf) {
   const [gcho, gchov] = mkGlobal("fx_chorus", 0, "cho"); // unset/0 = untouched/off
   grow.append(gname, grev, grevv, gcho, gchov);
   box.appendChild(grow);
+
+  // Master gain: live overall output level (FluidSynth master gain). Applies
+  // on Save (PUT -> engine swap), no reboot. Unset = boot default 0.3;
+  // above ~1.5 dense chords may clip.
+  const mgRow = document.createElement("div");
+  mgRow.className = "mrow";
+  mgRow.style.gridTemplateColumns = "90px 1fr 72px";
+  const mgName = document.createElement("span");
+  mgName.className = "tname";
+  mgName.textContent = "Master";
+  const [gmg, gmgv] = mkGlobal("master_gain", 0.3, "gain", 2);
+  mgRow.append(mgName, gmg, gmgv);
+  box.appendChild(mgRow);
 }
 
 function renderProject(pf) {

@@ -213,6 +213,31 @@ fn root_note_round_trips_and_validates() {
     assert_eq!(p.validate(), Err(ValidationError::PitchOutOfRange(128)));
 }
 
+#[test]
+fn master_gain_round_trips_and_validates() {
+    // Additive v1-safe field: optional, defaults None (= boot setting), 0..=2.
+    let mut p = Project::default_project();
+    assert_eq!(p.master_gain, None);
+    p.validate().unwrap();
+
+    p.master_gain = Some(0.6);
+    p.validate().unwrap();
+    let json = ProjectFile {
+        version: SCHEMA_VERSION,
+        project: p.clone(),
+    }
+    .to_json_pretty()
+    .unwrap();
+    let back = ProjectFile::from_json_str(&json).unwrap();
+    assert_eq!(back.project.master_gain, Some(0.6));
+
+    p.master_gain = Some(2.5);
+    assert_eq!(
+        p.validate(),
+        Err(ValidationError::MasterGainOutOfRange { value: 2.5 })
+    );
+}
+
 // --------------------------------------------------- slice A: record prep
 
 #[test]

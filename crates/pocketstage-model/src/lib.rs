@@ -85,6 +85,8 @@ pub enum ValidationError {
     FxOutOfRange { name: &'static str, value: f64 },
     #[error("drum kit note {note} out of range 35..=81 (GM percussion)")]
     DrumNoteOutOfRange { note: u8 },
+    #[error("master_gain {value} out of range 0..=2")]
+    MasterGainOutOfRange { value: f64 },
 }
 
 // ---------------------------------------------------------------- top level
@@ -181,6 +183,13 @@ pub struct Project {
     /// in the GM percussion range 35..=81; pads keep one channel each.
     #[serde(default)]
     pub drum_kit: Option<[u8; 8]>,
+    /// Master output gain — live-adjustable scale on the synth's final mix
+    /// (the `synth.gain` setting, applied via `fluid_synth_set_gain`).
+    /// `None` = leave whatever the engine booted with (0.3 since session
+    /// 10c). Range 0..=2: above 1 a dense max-velocity chord can clip —
+    /// the render path clamps, it just sounds worse past ~1.5.
+    #[serde(default)]
+    pub master_gain: Option<f64>,
 }
 
 fn default_bpm() -> f64 {
@@ -234,6 +243,7 @@ impl Project {
             fx_reverb: None,
             fx_chorus: None,
             drum_kit: None,
+            master_gain: None,
         }
     }
 
@@ -271,6 +281,11 @@ impl Project {
             && let Some(&bad) = kit.iter().find(|&&n| !(35..=81).contains(&n))
         {
             return Err(ValidationError::DrumNoteOutOfRange { note: bad });
+        }
+        if let Some(v) = self.master_gain
+            && !(0.0..=2.0).contains(&v)
+        {
+            return Err(ValidationError::MasterGainOutOfRange { value: v });
         }
         for track in &self.tracks {
             if track.clips.len() != self.scenes.len() {

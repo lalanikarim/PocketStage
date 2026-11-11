@@ -147,6 +147,11 @@ pub trait SynthBackend {
     fn all_sounds_off(&mut self, chan: i32);
     /// Render `frames` audio frames into separate L / R float buffers.
     fn render(&mut self, frames: usize, left: &mut [f32], right: &mut [f32]);
+    /// Master output gain (`Project::master_gain`), applied at boot and on
+    /// every swap. `None` = touch nothing (keep the `synth.gain` the engine
+    /// booted with). Pure level — unlike reverb/chorus there are no space
+    /// params to stomp; safe to ride live.
+    fn set_master_gain(&mut self, gain: Option<f64>);
     /// Global reverb + chorus amount knobs (normalized 0..=1); applied at
     /// boot and on every project swap. `None` means LEAVE THE SYNTH'S
     /// BUILT-IN CONFIG ALONE — do not push any values. Session 10 learned
@@ -189,6 +194,12 @@ impl SynthBackend for FluidBackend<'_> {
     #[inline]
     fn render(&mut self, frames: usize, left: &mut [f32], right: &mut [f32]) {
         self.0.render(frames, left, right)
+    }
+    #[inline]
+    fn set_master_gain(&mut self, gain: Option<f64>) {
+        if let Some(v) = gain {
+            self.0.set_gain(v);
+        }
     }
     #[inline]
     fn set_global_fx(&mut self, reverb: Option<f64>, chorus: Option<f64>) {
@@ -502,10 +513,11 @@ impl EngineCore {
         self.apply_global_fx(synth);
     }
 
-    /// Global FX amount knobs: project values onto the synth; unset fields
-    /// pass `None` = leave the built-in config untouched (see trait docs).
-    /// Rides the boot + SetProject paths — no new command needed.
+    /// Global output knobs: master gain + FX amounts onto the synth; unset
+    /// fields pass `None` = leave the built-in config untouched (see trait
+    /// docs). Rides the boot + SetProject paths — no new command needed.
     fn apply_global_fx<S: SynthBackend>(&self, synth: &mut S) {
+        synth.set_master_gain(self.project.master_gain.map(|v| v.clamp(0.0, 2.0)));
         synth.set_global_fx(
             self.project.fx_reverb.map(|v| v.clamp(0.0, 1.0)),
             self.project.fx_chorus.map(|v| v.clamp(0.0, 1.0)),
@@ -1251,6 +1263,7 @@ mod harness_tests {
         NotesOff(i32),
         SoundsOff(i32),
         Fx(Option<f64>, Option<f64>),
+        Gain(Option<f64>),
     }
 
     #[derive(Default)]
@@ -1280,6 +1293,9 @@ mod harness_tests {
         fn render(&mut self, frames: usize, l: &mut [f32], r: &mut [f32]) {
             l[..frames].fill(0.0);
             r[..frames].fill(0.0);
+        }
+        fn set_master_gain(&mut self, gain: Option<f64>) {
+            self.calls.push(Call::Gain(gain));
         }
         fn set_global_fx(&mut self, reverb: Option<f64>, chorus: Option<f64>) {
             self.calls.push(Call::Fx(reverb, chorus));
@@ -1886,6 +1902,42 @@ mod harness_tests {
         h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
         h.tick(1);
         assert!(h.has(Call::Fx(None, None)));
+    }
+
+    // ---- master gain --------------------------------------------------------
+
+    #[test]
+    fn boot_without_master_gain_leaves_the_boot_setting() {
+        // Unset must pass None through: the engine's synth.gain=0.3 boot
+        // default (main.rs) stays in effect.
+        let mut h = Harness::new();
+        h.core.apply_all_voices(&mut h.fake);
+        assert!(h.has(Call::Gain(None)));
+    }
+
+    #[test]
+    fn master_gain_lands_on_swap_and_clamps() {
+        let mut h = Harness::new();
+        let mut pf = h.project();
+        pf.project.master_gain = Some(0.6);
+        h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
+        h.tick(1);
+        assert!(h.has(Call::Gain(Some(0.6))));
+
+        // Out-of-range input (a hand-edited file that skipped validation)
+        // clamps instead of blasting the speakers.
+        let mut pf = h.project();
+        pf.project.master_gain = Some(9.0);
+        h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
+        h.tick(1);
+        assert!(h.has(Call::Gain(Some(2.0))));
+
+        // Back to None -> touch nothing (NOT some engine-pushed default).
+        let mut pf = h.project();
+        pf.project.master_gain = None;
+        h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
+        h.tick(1);
+        assert!(h.has(Call::Gain(None)));
     }
 
     // ---- take rename -----------------------------------------------------------
