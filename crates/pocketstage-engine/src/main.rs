@@ -31,10 +31,10 @@ use alsa::pcm::{Access, Format, Frames, PCM};
 use alsa::{Direction, ValueOr};
 use pocketstage_midi::{PumpMessage, spawn_pump};
 use pocketstage_model::{
-    Clip, Pattern, ProjectFile, SCHEMA_VERSION, STEPS_PER_BAR, StepNote, Take,
+    ActiveVoice, Clip, Pattern, ProjectFile, SCHEMA_VERSION, STEPS_PER_BAR, StepNote, Take,
 };
 use pocketstage_oxygen::{Action, Mapper, Mode, default_mapping, hui_mapping};
-use pocketstage_server::{AppState, EngineCommand, LiveStatus, ProjectStore};
+use pocketstage_server::{AppState, EngineCommand, LiveStatus, ProjectStore, VOICE_DRUMS};
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -47,23 +47,37 @@ use core::{EngineCore, Event, FluidBackend, LEAD_CH, PERIOD_FRAMES, RATE, Stats,
 const N_PERIODS: u32 = 3;
 const SF2_PATH: &str = "/usr/share/sounds/sf2/FluidR3_GM.sf2";
 
-/// Curated patch browser for DAW mode (D13): slot = pitch % 12. Letter B
-/// (slot 11) is the settings key, so there are eleven patches.
-const PATCHES: [(u8, &str); 11] = [
-    (0, "Grand Piano"),
-    (4, "Electric Piano"),
-    (6, "Harpsichord"),
-    (11, "Vibraphone"),
-    (19, "Church Organ"),
-    (24, "Nylon Guitar"),
-    (29, "Overdrive Guitar"),
-    (32, "Acoustic Bass"),
-    (38, "Synth Bass 1"),
-    (48, "Strings"),
-    (65, "Alto Sax"),
+/// D25 white-key patch browser (replaces D13's pitch%12 slots). Slot 0 is
+/// the lowest white key (C2) = the kit; slots 1..=11 walk up the white keys
+/// (D2 E2 F2 G2 A2 B2 C3 D3 E3 F3 G3) with the curated GM patches. In DAW
+/// mode a white-key press selects + auditions; black keys are inert.
+const VOICES: [(ActiveVoice, &str); 12] = [
+    (ActiveVoice::Drums, "Drums"),
+    (ActiveVoice::Program(0), "Grand Piano"),
+    (ActiveVoice::Program(4), "Electric Piano"),
+    (ActiveVoice::Program(6), "Harpsichord"),
+    (ActiveVoice::Program(11), "Vibraphone"),
+    (ActiveVoice::Program(19), "Church Organ"),
+    (ActiveVoice::Program(24), "Nylon Guitar"),
+    (ActiveVoice::Program(29), "Overdrive Guitar"),
+    (ActiveVoice::Program(32), "Acoustic Bass"),
+    (ActiveVoice::Program(38), "Synth Bass 1"),
+    (ActiveVoice::Program(48), "Strings"),
+    (ActiveVoice::Program(65), "Alto Sax"),
 ];
-/// Letter B → loop-length settings key instead of a patch slot.
-const SETTINGS_KEY_SLOT: u8 = 11;
+
+/// Browser slot of a note: white keys count from the anchor C2 (36); black
+/// keys and notes past the table return None (inert in the browser).
+fn white_slot(note: u8) -> Option<usize> {
+    const WHITE_PC: [bool; 12] = [
+        true, false, true, false, true, true, false, true, false, true, false, true,
+    ];
+    if !(36..=84).contains(&note) || !WHITE_PC[(note % 12) as usize] {
+        return None;
+    }
+    let idx = (36..=note).filter(|k| WHITE_PC[(*k % 12) as usize]).count() - 1;
+    (idx < VOICES.len()).then_some(idx)
+}
 
 // --------------------------------------------------------------------- main
 
@@ -326,11 +340,17 @@ fn main() {
                     2 => "SEQ",
                     _ => "-",
                 };
+                let voice = s_stats.live.active_voice.load(Ordering::Relaxed);
+                let voice_str = if voice == VOICE_DRUMS {
+                    "drums".to_string()
+                } else {
+                    format!("gm{voice}")
+                };
                 println!(
                     "[stats] cycles={cycles:5} busy={busy_pct:4.2}% ({:.1} us/{} us period) \
                      events={events:3} queue avg/max={q_avg:6.1}/{q_max:6} us \
                      feeder_jitter_max={feed_max:5} us xruns={xruns} out_queue~{:.1} ms \
-                     transport={} pos={bar}.{beat} scene={} takes={} swaps={} overlay={}",
+                     transport={} pos={bar}.{beat} scene={} takes={} swaps={} overlay={} voice={}",
                     if cycles > 0 {
                         busy_ns as f64 / cycles as f64 / 1000.0
                     } else {
@@ -349,6 +369,7 @@ fn main() {
                     s_stats.live.takes.load(Ordering::Relaxed),
                     s_stats.project_updates.load(Ordering::Relaxed),
                     overlay,
+                    voice_str,
                 );
             }
         })
@@ -442,6 +463,8 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>) {
     }
     let mut music = Mapper::new(default_mapping());
     let mut hui = Mapper::new(hui_mapping());
+    // Fixed pad note base for melodic pad routing (D25 Q2).
+    let pad_base = music.mapping().pad_note_base as i32;
 
     let (mtx, mrx) = mpsc::channel::<PumpMessage>();
     // Keep the handle alive for as long as we consume — dropping it shuts the
@@ -469,64 +492,104 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>) {
                 }
                 for action in out {
                     match action {
-                        // Keys: PRESET plays the perform voice; DAW turns the
-                        // whole keyboard into a patch browser (D13) — every
-                        // note selects via pitch % 12 and auditions it live.
+                        // Keys: DAW = white-key voice browser (D25); PRESET
+                        // plays the ONE selected voice — melodic programs on
+                        // all 49 keys, Drums silences the keybed.
                         Action::Key { note, on, velocity } => {
-                            if on && mode == Mode::Daw {
-                                let slot = note % 12;
-                                if slot == SETTINGS_KEY_SLOT {
-                                    println!("[daw] B — cycle loop length");
-                                    send_event(&tx, m.received, Event::CycleLoopBars);
-                                } else {
-                                    let (prog, name) = PATCHES[slot as usize];
-                                    println!("[daw] select #{slot} {name} (gm {prog})");
-                                    send_event(
-                                        &tx,
-                                        m.received,
-                                        Event::SetLeadProgram { program: prog },
-                                    );
+                            if mode == Mode::Daw {
+                                // White key press selects its voice; programs
+                                // also audition (the note sounds); Drums is
+                                // confirmed by the core's kick. Black keys
+                                // are inert.
+                                if let Some(slot) = white_slot(note) {
+                                    let (voice, name) = VOICES[slot];
+                                    if on {
+                                        println!("[daw] select #{slot} {name}");
+                                        send_event(&tx, m.received, Event::SelectVoice { voice });
+                                    }
+                                    if voice != ActiveVoice::Drums {
+                                        let event = if on {
+                                            Event::NoteOn {
+                                                chan: LEAD_CH,
+                                                key: note as i32,
+                                                vel: velocity as i32,
+                                            }
+                                        } else {
+                                            Event::NoteOff {
+                                                chan: LEAD_CH,
+                                                key: note as i32,
+                                            }
+                                        };
+                                        send_event(&tx, m.received, event);
+                                    }
                                 }
-                            }
-                            // Notes always sound (perform in PRESET, audition
-                            // in DAW); the keyboard's own note-off releases.
-                            let event = if on {
-                                Event::NoteOn {
-                                    chan: LEAD_CH,
-                                    key: note as i32,
-                                    vel: velocity as i32,
-                                }
+                            } else if stats.live.active_voice.load(Ordering::Relaxed) == VOICE_DRUMS
+                            {
+                                // DRUMS voice: the keybed is silent — pads
+                                // are the instrument (D25).
                             } else {
-                                Event::NoteOff {
-                                    chan: LEAD_CH,
-                                    key: note as i32,
-                                }
-                            };
-                            send_event(&tx, m.received, event);
+                                // Melodic voice: keys play it — all 49 of
+                                // them, no dead pad-shadow octave (Q2).
+                                let event = if on {
+                                    Event::NoteOn {
+                                        chan: LEAD_CH,
+                                        key: note as i32,
+                                        vel: velocity as i32,
+                                    }
+                                } else {
+                                    Event::NoteOff {
+                                        chan: LEAD_CH,
+                                        key: note as i32,
+                                    }
+                                };
+                                send_event(&tx, m.received, event);
+                            }
                         }
-                        // Pads: PRESET = fixed drum kit (D12); DAW = scene
-                        // launching (R2: pad N = scene N).
+                        // PRESET pads (D25): instrument first — the kit
+                        // across both banks in DRUMS voice, melody notes
+                        // otherwise. Command roles only while an overlay is
+                        // live (exit must stay reachable).
                         Action::Pad {
                             index,
                             on,
                             velocity,
-                        } if (1..=8).contains(&index) => match mode {
-                            Mode::Preset if stats.live.overlay.load(Ordering::Relaxed) == 2 => {
-                                // SEQ overlay: bank-1 pads program steps,
-                                // they do NOT hit the drum kit (D23).
+                        } if mode == Mode::Preset => {
+                            let ov = stats.live.overlay.load(Ordering::Relaxed);
+                            let bank2 = (9..=16).contains(&index);
+                            if ov != 0 && bank2 {
+                                if on {
+                                    match index {
+                                        9 => send_event(&tx, m.received, Event::ToggleMixOverlay),
+                                        10 => send_event(&tx, m.received, Event::ToggleSeqOverlay),
+                                        11 if ov == 2 => {
+                                            send_event(&tx, m.received, Event::SeqNextBar)
+                                        }
+                                        12 if ov == 2 => {
+                                            send_event(&tx, m.received, Event::SeqFlipWindow)
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            } else if ov == 2 && !bank2 {
+                                // SEQ programmer on bank 1 (D23) — wins over
+                                // any voice.
                                 if on {
                                     send_event(&tx, m.received, Event::SeqStep { step: index });
                                 }
-                            }
-                            Mode::Preset => {
-                                // Live kit (project.drum_kit or the engine
-                                // default), read lock-free from the atomic
-                                // the audio thread keeps current.
-                                let kit =
-                                    core::kit_or_default(stats.drum_kit.load(Ordering::Relaxed));
-                                let key = kit[(index - 1) as usize] as i32;
-                                // One channel per pad so retriggers kill only this pad.
-                                let chan = core::PAD_CH_BASE + (index - 1) as i32;
+                            } else if stats.live.active_voice.load(Ordering::Relaxed) == VOICE_DRUMS
+                            {
+                                // Kit spans both pad banks (Q3); channels
+                                // mirror across banks (pad 9 shares pad 1's
+                                // kill group — documented trade-off).
+                                let packed = if bank2 {
+                                    stats.drum_kit_2.load(Ordering::Relaxed)
+                                } else {
+                                    stats.drum_kit.load(Ordering::Relaxed)
+                                };
+                                let kit = core::kit_or_default(packed);
+                                let slot = if bank2 { index - 9 } else { index - 1 };
+                                let key = kit[slot as usize] as i32;
+                                let chan = core::PAD_CH_BASE + slot as i32;
                                 let event = if on {
                                     Event::NoteOn {
                                         chan,
@@ -537,19 +600,38 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>) {
                                     Event::NoteOff { chan, key }
                                 };
                                 send_event(&tx, m.received, event);
+                            } else {
+                                // Melodic voice: every pad press is a key of
+                                // the voice — pads transmit plain notes and
+                                // with one instrument there is nothing to
+                                // disambiguate (D25 Q2).
+                                let key = pad_base + index as i32 - 1;
+                                let event = if on {
+                                    Event::NoteOn {
+                                        chan: LEAD_CH,
+                                        key,
+                                        vel: velocity.max(1) as i32,
+                                    }
+                                } else {
+                                    Event::NoteOff { chan: LEAD_CH, key }
+                                };
+                                send_event(&tx, m.received, event);
                             }
-                            Mode::Daw => {
-                                if on {
-                                    send_event(
-                                        &tx,
-                                        m.received,
-                                        Event::LaunchScene {
-                                            index: (index - 1) as usize,
-                                        },
-                                    );
-                                }
-                            }
-                        },
+                        }
+                        // DAW pads 1–8 = scene launching (R2).
+                        Action::Pad {
+                            index: index @ 1..=8,
+                            on: true,
+                            ..
+                        } if mode == Mode::Daw => {
+                            send_event(
+                                &tx,
+                                m.received,
+                                Event::LaunchScene {
+                                    index: (index - 1) as usize,
+                                },
+                            );
+                        }
                         Action::ModeChanged(new_mode) => {
                             if new_mode != mode {
                                 mode = new_mode;
@@ -560,37 +642,39 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>) {
                                 println!(
                                     "[mode] {}",
                                     match new_mode {
-                                        Mode::Daw => "DAW — manage (pads=scenes, keys=patches)",
-                                        Mode::Preset => "PRESET — perform (keys+drums)",
+                                        Mode::Daw => {
+                                            "DAW — manage (pads=scenes, white keys=voices)"
+                                        }
+                                        Mode::Preset => {
+                                            "PRESET — perform (one voice at a time)"
+                                        }
                                     }
                                 );
-                                // D21: any mode switch exits MIX/SEQ.
-                                send_event(&tx, m.received, Event::ExitOverlays);
                                 if new_mode == Mode::Daw {
+                                    // D21/D25: the manage mode is a clean
+                                    // slate — exit MIX/SEQ. Overlay ENTRY
+                                    // lives on DAW pads 9/10 now; an overlay
+                                    // armed there survives the trip back to
+                                    // PRESET (that's the point).
+                                    send_event(&tx, m.received, Event::ExitOverlays);
                                     // D15: recording stops here; playback never does.
                                     send_event(&tx, m.received, Event::StopRecording);
                                 }
                             }
                         }
-                        // Bank-2 pads = command buttons inside PRESET (D21):
-                        // pad 9 toggles MIX, pad 10 toggles SEQ. Rising edge
-                        // only; the core voice-confirms the switch (no LEDs).
+                        // DAW bank 2 pads 9/10 = overlay ENTRY (D25: PRESET
+                        // bank 2 is instrument now, so entering MIX/SEQ
+                        // belongs to the manage mode). Exit stays on PRESET
+                        // bank 2 while an overlay lives.
                         Action::Pad {
-                            index: index @ 9..=16,
+                            index: index @ (9 | 10),
                             on: true,
                             ..
-                        } if mode == Mode::Preset => {
-                            // Pad 10 doubles as the SEQ exit (same key that
-                            // entered); pads 11/12 are the bank-2 management
-                            // roles of D23 — only while SEQ is live. Bank
-                            // flip is deliberate: edit on bank 1, manage on 2.
-                            let seq_live = stats.live.overlay.load(Ordering::Relaxed) == 2;
-                            match index {
-                                9 => send_event(&tx, m.received, Event::ToggleMixOverlay),
-                                10 => send_event(&tx, m.received, Event::ToggleSeqOverlay),
-                                11 if seq_live => send_event(&tx, m.received, Event::SeqNextBar),
-                                12 if seq_live => send_event(&tx, m.received, Event::SeqFlipWindow),
-                                _ => {}
+                        } if mode == Mode::Daw => {
+                            if index == 9 {
+                                send_event(&tx, m.received, Event::ToggleMixOverlay);
+                            } else {
+                                send_event(&tx, m.received, Event::ToggleSeqOverlay);
                             }
                         }
                         // Faders/knobs/fader-buttons: forwarded unconditionally —

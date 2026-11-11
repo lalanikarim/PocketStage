@@ -18,10 +18,10 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::Instant;
 
 use pocketstage_model::{
-    Clip, Pattern, Project, ProjectFile, Quantize, RecordedEvent, SCHEMA_VERSION, STEPS_PER_BAR,
-    StepNote, Take, Track,
+    ActiveVoice, Clip, Pattern, Project, ProjectFile, Quantize, RecordedEvent, SCHEMA_VERSION,
+    STEPS_PER_BAR, StepNote, Take, Track,
 };
-use pocketstage_server::{EngineCommand, LiveStatus};
+use pocketstage_server::{EngineCommand, LiveStatus, VOICE_DRUMS};
 
 use crate::clock;
 use crate::transport::Transport;
@@ -70,6 +70,11 @@ fn to_i16(x: f32) -> i16 {
 /// Fixed 8-hit GM kit for PRESET-mode pads (D12): kick snare rim clap chh
 /// ohh tom crash. Used when the project leaves `drum_kit` unset.
 pub const DEFAULT_DRUM_KIT: [u8; 8] = [36, 38, 37, 39, 42, 46, 47, 49];
+
+/// Bank-2 defaults (D25): pads 9–16 extend the kit — deep kick, electric
+/// snare, cowbell, crash, low/mid/high tom, gong. Channels mirror bank 1
+/// (pad 9 ≙ pad 1: same kill group, different sound — noted trade-off).
+pub const DEFAULT_DRUM_KIT_2: [u8; 8] = [35, 40, 56, 57, 45, 48, 50, 55];
 
 /// D21: software overlays lived inside PRESET mode. The MKV's Play/Seq/Mix
 /// trims emit nothing the host can see, so SEQ/MIX are entered from controls
@@ -235,13 +240,6 @@ pub enum Event {
     /// D15: entering DAW mode finalizes any live take but leaves playback,
     /// scene, and sounding notes completely alone.
     StopRecording,
-    /// D13: DAW-mode selector — the perform voice (lead channel) takes a new
-    /// GM program; the pressed key itself is forwarded as an audition.
-    SetLeadProgram {
-        program: u8,
-    },
-    /// D13 settings key (letter B in DAW mode): cycle loop_bars 2→4→8→16→2.
-    CycleLoopBars,
     /// D21: pad 9 — toggle the MIX overlay (entering it exits SEQ; toggling
     /// again exits). Voice confirmation is emitted by the core, not the feeder.
     ToggleMixOverlay,
@@ -264,6 +262,12 @@ pub enum Event {
     /// selects the detail page for track n, press again to clear.
     SelectTrack {
         index: u8,
+    },
+    /// D25: select THE active performance voice (DAW-mode white-key browser).
+    /// Persisted into the project (write-through) and mirrored to
+    /// `LiveStatus::active_voice` for the feeder + WS.
+    SelectVoice {
+        voice: ActiveVoice,
     },
     /// D23: bank-1 pad while SEQ is on — toggle step `step` (1–8) of the
     /// current window on the selected track of the active scene.
@@ -329,6 +333,8 @@ pub struct Stats {
     /// [`KIT_SET`] once written). Written by the audio thread at boot and
     /// on every swap; read lock-free by the MIDI feeder on pad hits.
     pub drum_kit: AtomicU64,
+    /// Bank-2 kit (pads 9–16, D25) — same packing as `drum_kit`.
+    pub drum_kit_2: AtomicU64,
 }
 
 impl Stats {
@@ -370,6 +376,21 @@ pub fn apply_track_voice<S: SynthBackend>(synth: &mut S, chan: i32, track: &Trac
     }
     if let Some(v) = track.chorus {
         synth.cc(chan, 93, (v * 127.0).round() as i32);
+    }
+}
+
+/// Wire value of `LiveStatus::active_voice` for a project (D25): the drums
+/// sentinel, an explicit program, or — when unset — track 1's patch (the
+/// pre-D25 behaviour: keys simply play track 1).
+pub fn voice_code(project: &Project) -> u32 {
+    match project.active_voice {
+        Some(ActiveVoice::Drums) => VOICE_DRUMS,
+        Some(ActiveVoice::Program(p)) => p as u32,
+        None => project
+            .tracks
+            .first()
+            .map(|t| t.instrument.gm_program as u32)
+            .unwrap_or(0),
     }
 }
 
@@ -447,7 +468,7 @@ pub struct EngineCore {
     /// reboot); tests keep the receiving end.
     take_feed: Sender<Take>,
     /// D24 write-through lane out: engine-originated project edits (MIX/
-    /// SEQ/CycleLoopBars) mutate `self.project` immediately, then one
+    /// SEQ/SelectVoice) mutate `self.project` immediately, then one
     /// debounced full snapshot goes to the HTTP layer for persistence.
     /// Owned snapshots outbound only — nothing comes back (R5).
     edit_feed: Sender<ProjectFile>,
@@ -478,6 +499,12 @@ impl EngineCore {
             pack_kit(&project.drum_kit.unwrap_or(DEFAULT_DRUM_KIT)),
             Ordering::Relaxed,
         );
+        stats.drum_kit_2.store(
+            pack_kit(&project.drum_kit_2.unwrap_or(DEFAULT_DRUM_KIT_2)),
+            Ordering::Relaxed,
+        );
+        live.active_voice
+            .store(voice_code(&project), Ordering::Relaxed);
         Self {
             bpm: project.bpm,
             project,
@@ -509,6 +536,12 @@ impl EngineCore {
     pub fn apply_all_voices<S: SynthBackend>(&self, synth: &mut S) {
         for (t, track) in self.project.tracks.iter().enumerate() {
             apply_track_voice(synth, t as i32, track);
+        }
+        // D25: the selected voice overrides track 1's program on the lead
+        // channel (tracks first, voice wins). Drums needs no synth call —
+        // the feeder silences the keybed and routes pads to the kit.
+        if let Some(ActiveVoice::Program(p)) = self.project.active_voice {
+            synth.program_change(LEAD_CH, p as i32);
         }
         self.apply_global_fx(synth);
     }
@@ -674,6 +707,13 @@ impl EngineCore {
             pack_kit(&self.project.drum_kit.unwrap_or(DEFAULT_DRUM_KIT)),
             Ordering::Relaxed,
         );
+        self.stats.drum_kit_2.store(
+            pack_kit(&self.project.drum_kit_2.unwrap_or(DEFAULT_DRUM_KIT_2)),
+            Ordering::Relaxed,
+        );
+        // A swap can change the voice (web PUT edited active_voice).
+        let code = voice_code(&self.project);
+        self.live.active_voice.store(code, Ordering::Relaxed);
         self.apply_global_fx(synth);
         self.stats
             .project_updates
@@ -796,18 +836,17 @@ impl EngineCore {
                 // held notes untouched.
                 self.finalize_take();
             }
-            Event::SetLeadProgram { program } => {
-                synth.program_change(LEAD_CH, program as i32);
-            }
-            Event::CycleLoopBars => {
-                self.project.loop_bars = match self.project.loop_bars {
-                    2 => 4,
-                    4 => 8,
-                    8 => 16,
-                    _ => 2,
-                };
-                // Engine-originated edit: without write-through the B-key
-                // setting would silently vanish on reboot (no PUT ever saw it).
+            Event::SelectVoice { voice } => {
+                // D25: THE active voice — persisted (write-through), mirrored
+                // for the feeder/WS, and sounded: programs re-program the
+                // lead channel, Drums answers with a kick (voice-confirm).
+                self.project.active_voice = Some(voice);
+                let code = voice_code(&self.project);
+                self.live.active_voice.store(code, Ordering::Relaxed);
+                match voice {
+                    ActiveVoice::Program(p) => synth.program_change(LEAD_CH, p as i32),
+                    ActiveVoice::Drums => self.confirm(synth, CONFIRM_KICK),
+                }
                 self.mark_project_edit();
             }
             Event::ToggleMixOverlay => {
@@ -1940,6 +1979,91 @@ mod harness_tests {
         assert!(h.has(Call::Gain(None)));
     }
 
+    // ---- active voice (D25) ----------------------------------------------------
+
+    #[test]
+    fn select_program_voice_reprograms_lead_and_persists() {
+        let mut h = Harness::new();
+        h.send(Event::SelectVoice {
+            voice: ActiveVoice::Program(42),
+        });
+        h.tick(1);
+        assert!(h.has(Call::Prog(0, 42)), "lead channel re-programs");
+        assert_eq!(
+            h.core.live.active_voice.load(Ordering::Relaxed),
+            42,
+            "feeder/WS mirror"
+        );
+        h.tick(QUIET_PERIODS);
+        let pf = h.edit_rx.try_recv().expect("voice change persisted");
+        assert_eq!(pf.project.active_voice, Some(ActiveVoice::Program(42)));
+    }
+
+    #[test]
+    fn select_drums_voice_confirms_with_kick_and_flags_atomic() {
+        let mut h = Harness::new();
+        h.send(Event::SelectVoice {
+            voice: ActiveVoice::Drums,
+        });
+        h.tick(1);
+        let calls = h.calls();
+        assert!(calls.contains(&Call::SoundsOff(8)));
+        assert!(calls.contains(&Call::On(8, 36, 100)), "kick = kit armed");
+        assert_eq!(
+            h.core.live.active_voice.load(Ordering::Relaxed),
+            VOICE_DRUMS
+        );
+    }
+
+    #[test]
+    fn boot_applies_selected_program_over_track_one() {
+        let mut h = Harness::new();
+        h.core.project.active_voice = Some(ActiveVoice::Program(38));
+        h.core.apply_all_voices(&mut h.fake);
+        let calls = h.calls();
+        assert!(
+            calls.contains(&Call::Prog(0, 38)),
+            "voice wins over track 1's program"
+        );
+    }
+
+    #[test]
+    fn swap_remirrors_active_voice() {
+        let mut h = Harness::new();
+        let mut pf = h.project();
+        pf.project.active_voice = Some(ActiveVoice::Drums);
+        h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
+        h.tick(1);
+        assert_eq!(
+            h.core.live.active_voice.load(Ordering::Relaxed),
+            VOICE_DRUMS
+        );
+        // Back to unset -> track 1's patch (pre-D25 behaviour).
+        let mut pf = h.project();
+        pf.project.active_voice = None;
+        h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
+        h.tick(1);
+        assert_eq!(h.core.live.active_voice.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn bank2_kit_lands_on_the_feeder_atomic() {
+        let mut h = Harness::new();
+        assert_eq!(
+            kit_or_default(h.core.stats.drum_kit_2.load(Ordering::Relaxed)),
+            DEFAULT_DRUM_KIT_2
+        );
+        let custom: [u8; 8] = [35, 36, 37, 38, 39, 40, 41, 42];
+        let mut pf = h.project();
+        pf.project.drum_kit_2 = Some(custom);
+        h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
+        h.tick(1);
+        assert_eq!(
+            kit_or_default(h.core.stats.drum_kit_2.load(Ordering::Relaxed)),
+            custom
+        );
+    }
+
     // ---- take rename -----------------------------------------------------------
 
     #[test]
@@ -1975,27 +2099,6 @@ mod harness_tests {
         h.tick(1);
         assert_eq!(h.core.takes.len(), 1, "no duplicate after rename+swap");
         assert_eq!(h.core.takes[0].name, "Bass Line");
-    }
-
-    // ---- misc events ----------------------------------------------------------
-
-    #[test]
-    fn cycle_loop_bars_walks_the_ladder() {
-        let mut h = Harness::new();
-        assert_eq!(h.core.project.loop_bars, 4);
-        for expect in [8, 16, 2, 4] {
-            h.send(Event::CycleLoopBars);
-            h.tick(1);
-            assert_eq!(h.core.project.loop_bars, expect);
-        }
-    }
-
-    #[test]
-    fn set_lead_program_hits_channel_zero() {
-        let mut h = Harness::new();
-        h.send(Event::SetLeadProgram { program: 42 });
-        h.tick(1);
-        assert!(h.has(Call::Prog(0, 42)));
     }
 
     // ---- write-through lane (D24) ------------------------------------------
@@ -2046,16 +2149,6 @@ mod harness_tests {
         assert!(h.edit_rx.try_recv().is_ok());
         h.tick(QUIET_PERIODS * 2);
         assert!(h.edit_rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn cycle_loop_bars_rides_the_write_through_lane() {
-        // The B-key setting used to be boot-only: now it survives reboots.
-        let mut h = Harness::new();
-        h.send(Event::CycleLoopBars);
-        h.tick(QUIET_PERIODS);
-        let pf = h.edit_rx.try_recv().expect("loop_bars edit persisted");
-        assert_eq!(pf.project.loop_bars, 8);
     }
 
     #[test]
