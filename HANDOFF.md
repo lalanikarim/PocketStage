@@ -375,14 +375,19 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     auto-save on slider release (or a lightweight per-control PATCH-style
     lane); mind the dirty-flag guard (refresh() must not clobber unsaved
     edits) and don't PUT per mousemove event. Todo, software-only.
-16. **One instrument at a time?** (user question, session 11 — DISCUSS,
-    do not implement yet): PRESET currently sounds the lead voice on keys
-    AND the drum kit on pads simultaneously. That is the implemented design
-    (D11/D12: "one performance voice at a time" = one *melodic* patch on
-    keys; pads are drums by design and shadow the lowest 16 notes). User
-    expects exclusive instrument selection — needs a semantics decision
-    first (toggle pad vs auto-switch; auto-switch collides with D18
-    overdub layering, where one take commonly stacks keys + drums).
+16. **One voice at a time + white-key patch browser** (DECIDED in principle,
+    session 11 feedback; supersedes the always-on kit half of D12):
+    a) Exactly ONE instrument is active in PRESET — no simultaneous piano +
+       drums layer.
+    b) Instrument changes in DAW mode by pressing a WHITE key; patches map
+       to white keys (black keys ignored). Replaces D13's pitch%12 slots.
+    c) Open semantics before implementation (see chat 2026-11-10): whether
+       pad-shadowed notes 36–51 become playable melody when a melodic voice
+       is selected (they are physically indistinguishable from pads — same
+       port, channel, notes); where DRUMS sits in the white-key list; per-
+       take vs cross-take layering under strict one-voice; whether the
+       selected voice persists in the project file. Answer these, write the
+       decision as D25, then implement test-first.
 
 ---
 
