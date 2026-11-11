@@ -144,9 +144,11 @@ active scene) — voice-confirmed overlay toggles; overlay state surfaces in
 `/ws` + stats. Session 11b implemented D25 (one voice at a time): PRESET
 sounds exactly one instrument; DAW mode is a white-key voice browser (C2 =
 Drums, next 11 white keys = GM patches); melodic voices play all 49 keys
-including pad-transmitted notes 36–51; Drums arms a 16-hit kit across both
-pad banks and silences the keybed; overlay entry lives on DAW pads 9/10,
-exits on PRESET bank 2 while an overlay is live; `active_voice` persists.
-152 tests, CI gates green. Next software candidate: §6 item 15 (live-apply
+including pad-transmitted notes 36–51; Drums arms a 16-hit kit across the
+pad-note range. **Pads are NOT special** (user rule): the feeder merges Key
+and Pad actions into one raw-note stream — no pad lane, hardware scene
+launching removed (web/HTTP only); overlay enter/exit on black-key command
+notes G#3/A#3 (+ C#4/D#4 SEQ management while live), ordinary voice notes
+elsewhere; `active_voice` persists. 154 tests, CI gates green. Next software candidate: §6 item 15 (live-apply
 web mixer edits). The rest (§6 items 14 + 16 ear-checks) is hardware-gated:
 pedal CC probe, Pi validation + deployment kit.

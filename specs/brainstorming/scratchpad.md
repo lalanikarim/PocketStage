@@ -712,10 +712,17 @@ kill group per pair, accepted trade-off).
 
 Consequences that touched earlier decisions: D12's always-on kit layer and
 D13's pitch%12 browser are gone (SetLeadProgram/CycleLoopBars events deleted;
-B-key loop cycling now web-only). D21's overlay entry moved to DAW pads 9/10
-— PRESET bank 2 is instrument now — while exits stay reachable on PRESET bank
-2 whenever an overlay lives; "mode switch exits overlays" narrowed to
-entering DAW, so an overlay armed in DAW survives the trip back to PRESET.
+B-key loop cycling now web-only). **Session 11c follow-up — the unified note
+rule** ("don't treat pads different than notes"): the first ear-test found
+the browser dead below E3 because pad-classified notes never reached it.
+The fix enshrined the rule instead of re-anchoring: the feeder reconstructs
+raw notes from Key AND Pad actions and routes ONE stream. Notes 36–51 can't
+be instrument and buttons at once, so hardware scene launching was removed
+(web UI / HTTP only) and overlay enter/exit moved to black-key command notes
+above the browser span (G#3 MIX, A#3 SEQ; C#4 next bar, D#4 flip while SEQ
+lives) — armed in either mode, ordinary voice notes everywhere else. "Mode
+switch exits overlays" narrowed to entering DAW, so an overlay armed in DAW
+survives the trip back to PRESET.
 Layering still works, just sequentially: drums take → switch voice → overdub
 (capture is lane-based). Voice persistence (`Project.active_voice`, additive)
 rides the D24 write-through lane; `LiveStatus.active_voice` (u32 atomic,

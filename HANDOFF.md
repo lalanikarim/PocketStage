@@ -88,8 +88,13 @@ patches; black keys are inert. A melodic voice plays across all 49 keys —
 pad presses become melody notes too (pads transmit plain notes 36–51). The
 Drums voice flips that: pads 1–16 hit the kit across both banks
 (`drum_kit_2`, new additive field; bank-2 channels mirror bank 1), keybed
-silent. Overlay entry moved to DAW pads 9/10 (PRESET bank 2 is instrument
-now); exits stay reachable on PRESET bank 2 while an overlay lives. The
+silent. **Unified note router (user rule: pads are NOT different from
+notes):** the feeder reconstructs raw notes from Key AND Pad actions and
+routes one stream — no pad special-casing anywhere. Hardware scene launching
+is gone with it (scenes live in the web UI / HTTP); overlay enter/exit moved
+to black-key command notes above the browser span: G#3 = MIX, A#3 = SEQ,
+C#4 = next bar, D#4 = flip window (buttons only while an overlay lives or in
+DAW mode; ordinary voice notes elsewhere). The
 voice persists via `Project.active_voice` (write-through lane) and rides
 `LiveStatus.active_voice` → `/ws` + stats line + UI "voice" cell.
 Dead events removed: SetLeadProgram, CycleLoopBars (B-key loop-length
@@ -397,8 +402,9 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     piano → overdub (capture is lane-based, cross-take multitracking works).
     **Hardware ear-checks owed:** white-key select/audition feel, melodic pad
     presses (must play melody notes), 16-hit kit bank 2, keybed silence in
-    Drums, overlay entry from DAW pads 9/10 only, voice persistence across
-    reboot.
+    Drums, black-key commands (G#3/A#3 enter/exit overlays in both modes,
+    C#4/D#4 SEQ bar/window while live), hardware scene launch REMOVED (web
+    UI / HTTP only), voice persistence across reboot.
 
 ---
 
@@ -430,7 +436,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D22 | **MIX overlay** (R12): F1–F4→track gain, K1–K4→pan, K5–K8→reverb send; fader buttons = per-track detail select (D14); write-through to project with ~500 ms debounced persist. Detail-page layout chosen at implementation: K1–K4 = gain/pan/reverb/chorus of the selected track | ✅ Implemented (s11) |
 | D23 | **SEQ overlay** (R12): live step programmer — bank-1 pads 1–8 toggle steps of an 8-step window on the selected track; bank 2 keeps commands (pad 10 exit, pad 11 next bar, pad 12 flip half-window); edits quantize to the engine's 16th grid | ✅ Implemented (s11) |
 | D24 | **Write-through lane** (R12): engine-originated project edits flow out on a dedicated mpsc to the store (debounced), never back in — single writer intact; engine applies edits locally first. Debounce is sample-counted in the engine; the server drain coalesces bursts to one persist. First rider: CycleLoopBars — B-key survives reboot now (event itself removed by D25) | ✅ Implemented (s11) |
-| D25 | **One voice at a time** (session 11 feedback; supersedes D12's always-on kit layer + D13's pitch%12 browser): PRESET has exactly ONE active performance voice. Selection = DAW-mode white-key browser anchored at C2 — slot 0 is Drums, next 11 white keys are the curated GM patches; black keys inert. Melodic voice: all 49 keys play it and pad presses are melody notes too (pads transmit plain notes 36–51, nothing to disambiguate). Drums voice: pads 1–16 = kit across both banks (`drum_kit_2` additive field; bank-2 channels mirror bank 1 — same kill group, documented trade-off), keybed silent. Overlay entry moved to DAW pads 9/10; exits stay reachable on PRESET bank 2 while an overlay lives. Voice persists via `Project.active_voice` + write-through; mirrored on `LiveStatus.active_voice` (VOICE_DRUMS sentinel) → /ws + stats + UI | ✅ Implemented (s11b), ear-checks owed |
+| D25 | **One voice at a time** (session 11 feedback; supersedes D12's always-on kit layer + D13's pitch%12 browser): PRESET has exactly ONE active performance voice. Selection = DAW-mode white-key browser anchored at C2 — slot 0 is Drums, next 11 white keys are the curated GM patches; black keys carry only overlay commands. Melodic voice: all 49 keys play it and pad presses are melody notes too (pads transmit plain notes 36–51, nothing to disambiguate). Drums voice: notes 36–51 = kit across both banks (`drum_kit_2` additive field; bank-2 channels mirror bank 1 — same kill group, documented trade-off), other notes silent. Overlay enter/exit = black-key command notes (G#3 MIX, A#3 SEQ; +C#4 next bar, D#4 flip while SEQ lives), armed in either mode — a follow-up to the user's unified-note rule replaced the earlier "DAW pads 9/10" scheme and REMOVED hardware scene launching (web UI / HTTP only): with one note stream, notes 36–51 cannot be both instrument and buttons. Voice persists via `Project.active_voice` + write-through; mirrored on `LiveStatus.active_voice` (VOICE_DRUMS sentinel) → /ws + stats + UI | ✅ Implemented (s11b), ear-checks owed |
 
 ---
 
@@ -775,3 +781,20 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   clippy -D warnings + fmt green; engine restarted and smoke-tested live
   (PUT active_voice=drums → stats `voice=drums`, /ws `"voice":"drums"`,
   restore clean, xruns=0). Hardware ear-checks listed in §6 item 16.
+- **Session 11c**: **Unified note router** (user rule: "don't treat pads
+  different than notes"). First D25 ear-test failed — "only E, F, G work" in
+  the browser: pad-shadow notes 36–51 were mapper-classified as Pad actions,
+  so DAW-mode presses there went to scene launching / overlay entry instead
+  of the browser (E3/F3/G3 above the shadow were the only real Keys). Fix
+  is not a re-anchor: the feeder now reconstructs the raw note from Key AND
+  Pad actions into ONE routing path and the artificial pad lane is gone.
+  Consequences: browser back at C2 anchor (pad presses ARE browser events
+  in DAW mode); hardware scene launching removed (notes can't be instrument
+  and buttons at once — scenes live in web UI/HTTP); overlay commands moved
+  to black keys above the span (G#3 MIX, A#3 SEQ, C#4 next bar, D#4 flip),
+  armed in either mode, ordinary notes elsewhere; PRESET+SEQ step editing
+  now triggers on notes 36–43. Drum kit unchanged (notes 36–51 = 16 slots).
+  Browser unit tests added to the bin (anchor C2..G3 coverage + inert keys);
+  154 tests, clippy -D warnings + fmt green; engine restarted on the new
+  binary. Ear-checks owed: full white-key sweep incl. pad presses selecting
+  voices, G#3/A#3 overlay entry in both modes, SEQ editing via low keys.
