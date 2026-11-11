@@ -75,8 +75,11 @@ steps of the active scene with bank-1 pads (pad 11 next bar, pad 12 flip
 half-window), creating 1-bar clips on demand. Engine-originated edits
 persist via a debounced (~500 ms) outbound snapshot lane — nothing flows
 back in; `Track.root_note` added (additive, v1-safe). Overlay state rides
-`LiveStatus.overlay` → `/ws` frame + stats line + UI live card. 146 tests.
-See §10 "Session 11" and scratchpad R12.
+`LiveStatus.overlay` → `/ws` frame + stats line + UI live card. Follow-up:
+`Project.master_gain` (0..=2, additive) → `fluid_synth_set_gain` at boot +
+swap — Master slider in the mixer card turns the output up live, no
+recompile; unset keeps the 0.3 boot default. 149 tests. See §10 "Session
+11" and scratchpad R12.
 
 **A usable end-to-end loop exists**: boot → play keys/drum pads (PRESET) →
 ⏺ record takes → Stop → looping playback → overdub layers on top; DAW mode
@@ -712,3 +715,10 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   pattern clock. Feeder reads the overlay atomic (drum-kit pattern) to route
   bank-1 pads away from the kit. 146 tests total (+28), clippy -D warnings +
   fmt green throughout. All of it device-free; hardware ear-checks still owed.
+  Follow-up (same session): **master_gain** — optional project field
+  (0..=2) applied via `fluid_synth_set_gain` at boot + every swap, so the
+  web UI's new Master slider sets live output level without a recompile
+  (unset = keep the 0.3 synth.gain boot default; engine clamps hostile
+  values even past store validation; FFI symbol verified against the
+  linked libfluidsynth3). Still one PUT away from `LiveStatus`, so no WS
+  surfacing of the live value yet.
