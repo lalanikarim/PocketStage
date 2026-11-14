@@ -159,6 +159,38 @@ Key architectural facts proven so far:
 
 ---
 
+## 3b. Session 12: full-code review + fix sweep (✅ done, hardware smoke-tested)
+
+End-to-end review of all five crates; findings tracked in `CODE_REVIEW.md`
+(all ✅ now). Seven fixes, each test-first on the harness — suite grew
+154 → 162, clippy/fmt green throughout:
+
+- **P1-1** project swap silently dropped the D25 voice from the synth
+  (atomics said gm65, keys played track 1) — `apply_voice_override()` now
+  runs on boot AND swap.
+- **P1-2** `Track.channel` overrides were only honored by `mix_set`; every
+  synth-facing site now resolves through `track_channel()`, and Stop also
+  silences LEAD_CH regardless of track 1 routing.
+- **P2-4** `SelectVoice` kills held lead notes (feeder re-routes releases
+  by the NEW voice — held notes used to sustain forever).
+- **P1-3** `store.replace()` could rename a torn tmp file over the live
+  project under concurrent writers (PUT vs drain_takes vs drain_edits);
+  path mutex now covers write+rename. Verified live: 16 concurrent PUTs,
+  file always whole, zero leftovers.
+- **P2-6** `.ps-tmp-*` crash leftovers swept on library open + hidden from
+  listings (they could become the boot project).
+- **P2-7** take events validate channel/velocity/program; take names
+  unique (engine adoption key); finalize picks next free "Take N".
+- **P2-5** SEQ overlay refuses entry while in DAW mode (was live-but-
+  unusable there); MIX still enters from either mode.
+
+API-side smoke (voice swap cycle, concurrency stress) and the hardware
+smoke test both passed on the rebuilt binary. Residual documented edges
+in CODE_REVIEW.md (held key across PRESET→DAW press; LoopToggle still a
+no-op button).
+
+---
+
 ## 4. Environment facts (verified this session)
 
 | Item | Status |
@@ -800,3 +832,10 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   154 tests, clippy -D warnings + fmt green; engine restarted on the new
   binary. Ear-checks owed: full white-key sweep incl. pad presses selecting
   voices, G#3/A#3 overlay entry in both modes, SEQ editing via low keys.
+- **Session 12**: full-code review of all five crates → `CODE_REVIEW.md`
+  working checklist; fixed all 7 findings test-first (voice-after-swap,
+  track_channel() everywhere + Stop/SelectVoice note kills, atomic store
+  persist + tmp sweep, take event/name validation + unique "Take N",
+  SEQ refused in DAW, doc drift). 162 tests, gates green. API smoke
+  (voice swap cycle, 16-way concurrent PUT stress) + hardware smoke test
+  passed on the rebuilt binary.

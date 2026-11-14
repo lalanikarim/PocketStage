@@ -6,6 +6,10 @@ oxygen, plus the web UI), performed at `f70724d`. This document is the
 working checklist: findings get ✅ with a commit hash when fixed; the prose
 explains *why* so re-review doesn't need this context resurrected.
 
+**STATUS (session 12): all findings FIXED and verified** — 162 tests,
+API smoke + hardware smoke passed on the fixed binary. Residual edges are
+documented inline, not bugs to chase.
+
 **Overall verdict.** Single-writer discipline holds (no shared state into
 the audio thread); the render loop is panic-free by construction (clamped
 guards, `Option` totals, bounded drains); schema evolution is additive and
