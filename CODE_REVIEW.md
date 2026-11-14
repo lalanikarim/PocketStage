@@ -50,7 +50,9 @@ application, all-notes-off). Harness test with a channel-override track
 proving program/CC/notes all land on the overridden channel.
 
 ### 3. `store.replace()` races on a shared tmp file
-**Status: OPEN.**
+**Status: FIXED** — the path mutex is now held across write+rename (the
+three concurrent callers serialize; replaces are rare and this is the
+durability path). Test: `concurrent_replaces_leave_a_whole_file`.
 
 Three concurrent callers exist by design (axum PUT handlers, the 250 ms
 `drain_takes` task, the `drain_edits` task). All write the *same*
@@ -92,7 +94,9 @@ keys). MIX is fine there (faders are mode-independent).
 the feeder owns the mode variable), so A#3 answers with nothing in DAW.
 
 ### 6. `.ps-tmp-*.json` crash leftovers pollute the library
-**Status: OPEN.**
+**Status: FIXED** — `open_library` sweeps `.ps-tmp-*` leftovers on open;
+`list()` and the most-recent pick skip hidden stems. Test:
+`library_ignores_and_sweeps_tmp_leftovers`.
 
 `list()` and `open_library`'s "most recent" pick match any `*.json`,
 including save-as temp files (`.ps-tmp-Foo.json`). A crash between write

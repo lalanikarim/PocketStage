@@ -606,3 +606,82 @@ async fn rename_take_forwards_command_to_engine() {
     }
     cleanup(&path);
 }
+
+// ------------------------------------------------------------ durability
+
+#[test]
+fn concurrent_replaces_leave_a_whole_file() {
+    // Review P1-3: PUT handlers, drain_takes and drain_edits call replace()
+    // concurrently by design. Before the path mutex covered write+rename,
+    // two writers shared X.json.tmp and could rename a torn file over the
+    // real project. Post-fix: whatever lands must always parse and equal
+    // exactly one of the candidate payloads.
+    let path = temp_path("concurrent");
+    cleanup(&path);
+    let store = std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap());
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            let s = store.clone();
+            std::thread::spawn(move || {
+                for k in 0..12 {
+                    let mut pf = s.get();
+                    pf.project.name = format!("p{i}-{k}");
+                    s.replace(pf).unwrap();
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    let text = std::fs::read_to_string(&path).unwrap();
+    let pf = ProjectFile::from_json_str(&text).expect("disk file parses — no interleaved writes");
+    assert!(
+        pf.project.name.starts_with("p") && pf.project.name.contains('-'),
+        "file is one whole candidate, got '{}'",
+        pf.project.name
+    );
+    cleanup(&path);
+}
+
+#[test]
+fn library_ignores_and_sweeps_tmp_leftovers() {
+    // Review P2-6: a crash between save_as write and rename leaves
+    // ".ps-tmp-X.json" — extension json, so it used to be listed (and could
+    // even become the boot project). Now: swept on open, hidden from list().
+    let root = temp_path("libtmp");
+    let _ = std::fs::remove_dir_all(&root);
+    let lib = root.join("projects");
+    std::fs::create_dir_all(&lib).unwrap();
+
+    let store = ProjectStore::open_library(&lib).unwrap();
+    store.save_as("Gig").unwrap();
+    // Simulate the crash leftover, then reopen the library.
+    std::fs::write(lib.join(".ps-tmp-Ghost.json"), b"{ broken").unwrap();
+    assert!(list_names(&lib).contains(&".ps-tmp-Ghost".to_string()));
+
+    let store = ProjectStore::open_library(&lib).unwrap();
+    assert!(
+        !std::path::Path::new(&lib.join(".ps-tmp-Ghost.json")).exists(),
+        "leftover swept on open"
+    );
+    assert_eq!(store.list(), vec!["Default".to_string(), "Gig".to_string()]);
+    // The sweep must not eat a live save-as target.
+    assert!(std::path::Path::new(&lib.join("Gig.json")).exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn list_names(dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| {
+            e.path()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+        })
+        .collect();
+    v.sort();
+    v
+}

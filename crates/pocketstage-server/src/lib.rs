@@ -108,12 +108,27 @@ impl ProjectStore {
     pub fn open_library(dir: impl AsRef<Path>) -> Result<Self, StoreError> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir).map_err(|e| StoreError::Io(e.to_string()))?;
+        // Sweep save-as temp files orphaned by a crash between write and
+        // rename (review P2-6) — best-effort, never fatal.
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(".ps-tmp-"))
+                {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
         let mut names: Vec<(std::time::SystemTime, String)> = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for entry in rd.flatten() {
                 let p = entry.path();
                 if p.extension().and_then(|e| e.to_str()) == Some("json")
+                    // hidden files are never projects (see sweep above)
                     && let Some(stem) = p.file_stem().and_then(|s| s.to_str())
+                    && !stem.starts_with('.')
                 {
                     let mt = entry
                         .metadata()
@@ -180,7 +195,12 @@ impl ProjectStore {
                         if p.extension().and_then(|x| x.to_str()) != Some("json") {
                             return None;
                         }
-                        Some(p.file_stem()?.to_str()?.to_string())
+                        let stem = p.file_stem()?.to_str()?;
+                        // Hidden entries (".ps-tmp-*" leftovers) are never projects.
+                        if stem.starts_with('.') {
+                            return None;
+                        }
+                        Some(stem.to_string())
                     })
                     .collect()
             })
@@ -285,13 +305,22 @@ impl ProjectStore {
         let json =
             serde_json::to_string_pretty(&incoming).map_err(|e| StoreError::Io(e.to_string()))?;
 
-        let path = self.path.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| StoreError::Io(e.to_string()))?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, &json).map_err(|e| StoreError::Io(e.to_string()))?;
-        std::fs::rename(&tmp, &path).map_err(|e| StoreError::Io(e.to_string()))?;
+        // Hold the path mutex across write+rename (review P1-3): PUT
+        // handlers, drain_takes and drain_edits run concurrently by design,
+        // and two writers sharing one X.json.tmp can rename a torn file
+        // over the real project. Serializing replaces is cheap — they are
+        // rare and this is the durability path.
+        let path = self.path.lock().unwrap_or_else(|p| p.into_inner());
+        let result = (|| {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| StoreError::Io(e.to_string()))?;
+            }
+            let tmp = path.with_extension("json.tmp");
+            std::fs::write(&tmp, &json).map_err(|e| StoreError::Io(e.to_string()))?;
+            std::fs::rename(&tmp, &*path).map_err(|e| StoreError::Io(e.to_string()))
+        })();
+        drop(path);
+        result?;
 
         *self.project.lock().unwrap_or_else(|p| p.into_inner()) = incoming;
         Ok(())
