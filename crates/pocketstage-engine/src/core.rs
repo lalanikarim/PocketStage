@@ -889,6 +889,15 @@ impl EngineCore {
                 self.confirm(synth, if on { CONFIRM_KICK } else { CONFIRM_RIM });
             }
             Event::ToggleSeqOverlay => {
+                // Review P2-5: refuse entry while the unit is in DAW mode —
+                // the step programmer only routes inside PRESET, so a SEQ
+                // overlay armed from DAW would be live but unusable. (An
+                // active SEQ never survives the trip INTO DAW either;
+                // entering DAW exits overlays.) MIX stays available: its
+                // faders route unconditionally.
+                if self.live.daw_mode.load(Ordering::Relaxed) {
+                    return;
+                }
                 let on = self.overlay != Overlay::Seq;
                 if on {
                     // Every entry starts from a known cursor (bar 1, low half).
@@ -1112,11 +1121,11 @@ impl EngineCore {
         self.mark_project_edit();
     }
 
-    /// Flat (channel, key) index; events outside 0..16 ch or 0..128 keys
-    /// bypass the guard entirely (returned slot always reads "up").
+    /// Flat (channel, key) index for the chatter table. Out-of-range
+    /// channels/keys are CLAMPED to the table edges — a stray remote event
+    /// can never panic the audio thread; at worst it shares an edge slot
+    /// with its neighbor (harmless: guards only delay note-offs by 40 ms).
     fn guard_slot(&mut self, chan: i32, key: i32) -> &mut KeyGuard {
-        // Chatter is a per-physical-key phenomenon; clamp defensively so a
-        // stray remote event can never panic the audio thread.
         let c = chan.clamp(0, 15) as usize;
         let k = key.clamp(0, 127) as usize;
         &mut self.key_guard[c][k]
@@ -2152,6 +2161,29 @@ mod harness_tests {
         h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
         h.tick(1);
         assert_eq!(h.core.live.active_voice.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn seq_overlay_refused_in_daw_mode() {
+        // Review P2-5: the step programmer is only routed in PRESET — a SEQ
+        // overlay entered from DAW would be live but unusable. MIX stays
+        // available there (faders route unconditionally).
+        let mut h = Harness::new();
+        h.core.live.daw_mode.store(true, Ordering::Relaxed);
+        h.send(Event::ToggleSeqOverlay);
+        h.tick(1);
+        assert_eq!(
+            h.core.live.overlay.load(Ordering::Relaxed),
+            0,
+            "SEQ must not arm while DAW owns the white keys"
+        );
+        h.send(Event::ToggleMixOverlay);
+        h.tick(1);
+        assert_eq!(
+            h.core.live.overlay.load(Ordering::Relaxed),
+            1,
+            "MIX still enters from DAW (faders are mode-independent)"
+        );
     }
 
     #[test]

@@ -83,7 +83,10 @@ branch swallows its note-off).
 voice-confirm sound.
 
 ### 5. SEQ overlay entered from DAW mode is inert
-**Status: OPEN.**
+**Status: FIXED** — `ToggleSeqOverlay` refuses while `live.daw_mode` (guard
+in core, not the feeder — policy lives with state). MIX stays available
+from DAW; an active SEQ already exits on entering DAW. Test:
+`seq_overlay_refused_in_daw_mode`.
 
 G#3/A#3 arm overlays in both modes, but step editing / CMD_NEXT / CMD_FLIP
 routing only exists in the PRESET branch of the router. Entering SEQ via
@@ -124,11 +127,12 @@ no schema bump; test that previously-valid files still parse.
 
 ## 🟢 P3 — polish / doc drift
 
-- `white_slot` doc (main.rs) says "Anchor at C4 (60), ABOVE the
-  pad-shadowed notes" — pre-unification leftover; anchor is 36/C2. Fixed.
-- `guard_slot` doc (core.rs) claims OOB events "bypass the guard
-  entirely (returned slot always reads 'up')" — the code *clamps*, so OOB
-  events share slots 0/15. Comment corrected to match behavior.
+- ✅ `white_slot` doc (main.rs) said "Anchor at C4 (60), ABOVE the
+  pad-shadowed notes" — pre-unification leftover; rewritten for the C2
+  anchor + unified note rule.
+- ✅ `guard_slot` doc (core.rs) claimed OOB events "bypass the guard
+  entirely (returned slot always reads 'up')" — the code *clamps*; comment
+  corrected to match behavior.
 - `Action::LoopToggle` prints "no behavior yet" every press — dead
   transport button, intentionally left (probes pending).
 - `ProjectFile::from_json_str` accepts `version: 0` (only upper bound

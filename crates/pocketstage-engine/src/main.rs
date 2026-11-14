@@ -79,15 +79,16 @@ const VOICES: [(ActiveVoice, &str); 12] = [
     (ActiveVoice::Program(65), "Alto Sax"),
 ];
 
-/// Browser slot of a note: white keys count upward from the anchor C4; black
-/// keys and notes outside the 12-slot span return None (inert in DAW).
+/// Browser slot of a note: white keys count upward from the anchor C2
+/// (slot 0) through G3 (slot 11). Black keys and notes outside that span
+/// return None — inert in DAW, ordinary voice notes elsewhere.
 fn white_slot(note: u8) -> Option<usize> {
     const WHITE_PC: [bool; 12] = [
         true, false, true, false, true, true, false, true, false, true, false, true,
     ];
-    // Anchor at C4 (60), ABOVE the pad-shadowed notes 36–51: those arrive
-    // from the device as pads (indistinguishable from pad presses), so a
-    // browser anchored at the bottom of the keybed could never see them.
+    // Anchored at C2 (36) — the unified note rule: pads transmit plain
+    // notes 36–51, so a pad press IS a low-key press and the browser sees
+    // both from the bottom of the keybed up.
     if note < VOICE_BROWSER_ANCHOR || !WHITE_PC[(note % 12) as usize] {
         return None;
     }
