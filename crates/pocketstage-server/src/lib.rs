@@ -365,6 +365,17 @@ pub struct LiveStatus {
 /// Real programs are 0..=127, so this can never alias.
 pub const VOICE_DRUMS: u32 = u32::MAX;
 
+/// One preset of a loaded soundfont, as served by `GET /api/presets`.
+/// Names come from the font itself — the web dropdown must never ship a
+/// hardcoded instrument table (session-13: a hand-typed GM list was wrong
+/// for most indices and mislabelled every pick).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PresetInfo {
+    pub bank: i32,
+    pub program: i32,
+    pub name: String,
+}
+
 // ----------------------------------------------------------------- routes
 
 /// Shared handler state: the store, live engine levels, and — when embedded —
@@ -375,6 +386,11 @@ pub struct AppState {
     /// `None` = standalone (file CRUD only, no live engine to notify).
     pub engine: Option<Sender<EngineCommand>>,
     pub live: Arc<LiveStatus>,
+    /// Preset catalog of the soundfont(s) the engine loaded — built once at
+    /// boot on the main thread (FluidSynth iteration is not thread-safe),
+    /// immutable afterwards. Served by `GET /api/presets` so the web UI's
+    /// voice dropdown is labelled by the FONT, not a hardcoded table.
+    pub presets: Arc<Vec<PresetInfo>>,
     /// Finalized takes streamed out of the audio thread (engine → server).
     /// Drained by [`AppState::drain_takes`] on a timer; each one is appended
     /// to the stored project, so recordings survive reboot.
@@ -395,9 +411,17 @@ impl AppState {
             store,
             engine: None,
             live: Arc::new(LiveStatus::default()),
+            presets: Default::default(),
             take_feed: None,
             edit_feed: None,
         }
+    }
+
+    /// Attach the boot-time preset catalog (engine calls this once, before
+    /// the server thread starts).
+    pub fn with_presets(mut self, presets: Vec<PresetInfo>) -> Self {
+        self.presets = Arc::new(presets);
+        self
     }
 
     /// Embedded state: full duplex with the audio thread (commands out on
@@ -415,6 +439,7 @@ impl AppState {
             store,
             engine: Some(engine),
             live,
+            presets: Default::default(),
             take_feed: Some(Arc::new(Mutex::new(take_feed))),
             edit_feed: Some(Arc::new(Mutex::new(edit_feed))),
         }
@@ -528,6 +553,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/transport/record", post(record))
         .route("/api/scene/{n}", post(launch_scene))
         .route("/api/voice", post(set_voice))
+        .route("/api/presets", get(list_presets))
         .route("/api/projects", get(list_projects))
         .route("/api/projects/save_as", post(save_as_project))
         .route("/api/projects/load", post(load_project))
@@ -687,6 +713,11 @@ async fn launch_scene(
 /// Body is the model's `ActiveVoice` serde form: `"drums"` or
 /// `{"program": 42}` — no new schema, and it matches what a project PUT
 /// carries in `active_voice`.
+/// Boot-time catalog of the engine's soundfont (may be empty in standalone
+/// mode — the UI then falls back to bare `gm N` labels).
+async fn list_presets(State(state): State<AppState>) -> Json<Vec<PresetInfo>> {
+    Json((*state.presets).clone())
+}
 async fn set_voice(
     State(state): State<AppState>,
     Json(voice): Json<ActiveVoice>,

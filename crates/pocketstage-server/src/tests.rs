@@ -245,6 +245,41 @@ async fn put_forwards_valid_project_to_engine_channel() {
 }
 
 #[tokio::test]
+async fn presets_route_serves_catalog() {
+    let path = temp_path("presets");
+    cleanup(&path);
+    // Standalone: empty catalog (no engine, no loaded font) — valid JSON.
+    let app = router(test_state(&path));
+    let (status, body) = call(
+        app.clone(),
+        Request::builder()
+            .uri("/api/presets")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "[]");
+
+    // With a catalog attached: shape is {bank, program, name}.
+    let state = test_state(&path).with_presets(vec![crate::PresetInfo {
+        bank: 0,
+        program: 112,
+        name: "Taiko Drum".into(),
+    }]);
+    let (_, body) = call(
+        router(state),
+        Request::builder()
+            .uri("/api/presets")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert!(body.contains("\"program\":112") && body.contains("Taiko Drum"));
+    cleanup(&path);
+}
+
+#[tokio::test]
 async fn voice_route_forwards_select_voice() {
     let path = temp_path("voice");
     cleanup(&path);

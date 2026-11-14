@@ -443,14 +443,23 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     reload; PRESET routing deliberately NOT expressible in the schema so
     it can't be remapped. Full multiphase plan + open questions Q1–Q7 in
     `specs/daw-keymap.md`; answer phase-0 questions before writing code.
-18. **Voice picker on the web — DONE**: dropdown (full 128-name GM table +
-    Drums) in the live card + `POST /api/voice` accepting the model's
-    `ActiveVoice` serde form (`"drums"` | `{"program": N}`, >127 → 400);
-    `EngineCommand::SelectVoice` runs as the ordinary `Event::SelectVoice`
-    through the same drain (harness test), picker stays in sync from the /ws
-    frame. Deliberately NOT catalog-shaped: voice stays a bare GM program —
-    item 19's `{sfont, bank, program}` references untouched, so the DAW
-    keymap schema (item 17) sees no new slot-mapping surface.
+18. **Voice picker on the web — DONE** (`POST /api/voice` accepting the
+    model's `ActiveVoice` serde form (`"drums"` | `{"program": N}`, >127 →
+    400); `EngineCommand::SelectVoice` runs as the ordinary
+    `Event::SelectVoice` through the same drain — harness test). Labels:
+    first cut shipped a hand-typed GM name table which was WRONG for most
+    indices (Violin→34=Fretless Bass, Sitar→101=Banjo; every pick mislabelled
+    — engine innocent, found by A/B against `examples/voice_ref.rs` ground-
+    truth renders). Replaced with **preset catalog read from the soundfont**
+    (mini item-19 phase A): engine iterates presets via FFI at boot (main
+    thread — FluidSynth iteration is not thread-safe; symbols are
+    `fluid_preset_get_num`/`_get_banknum` on 2.3.x), serves
+    `GET /api/presets`, dropdown builds itself from the FONT (189 entries,
+    real names: 104=Sitar, 112=Tinker Bell, "Yamaha Grand Piano"). Voice
+    stays a bare GM program — no `{sfont, bank, program}` refs yet, so item
+    17's keymap schema sees no new slot-mapping surface. Follow-up
+    candidate: the DAW-mode curated VOICES labels in main.rs could reuse
+    the catalog.
 19. **Patch catalog / soundfont sets — PLANNED, implements next after 18**
     (D27 reserved): runtime catalog built via FluidSynth FFI (preset
     iteration, no sf2 parser), patches referenced by `{sfont, bank,
@@ -863,3 +872,15 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   SEQ refused in DAW, doc drift). 162 tests, gates green. API smoke
   (voice swap cycle, 16-way concurrent PUT stress) + hardware smoke test
   passed on the rebuilt binary.
+- **Session 13**: voice picker on the web (§6 item 18) + hotfix. User:
+  "selecting Violin/Sitar sounds nothing like it" — root cause was MY
+  hand-typed GM_NAMES dropdown table (wrong for most indices; the engine had
+  applied exactly the picked program all along, stats log proved it). A/B
+  tooling born from the hunt: `examples/voice_ref.rs` renders any program
+  headlessly through the engine's own FFI + soundfont. Fix per user
+  suggestion: DROP the static table; boot-time preset catalog via
+  FluidSynth FFI iteration (`Synth::preset_list` → `GET /api/presets`),
+  dropdown generated from the loaded font (fallback `gm N`). Single-writer
+  intact: catalog built on the main thread pre-audio, immutable after.
+  Engine-restart discipline documented (pkill self-match + 15-char comm
+  truncation gotchas in AGENTS.md). 165 tests, gates green.

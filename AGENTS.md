@@ -95,8 +95,10 @@ Rules that keep this architecture intact:
 - **`pkill -f <pattern>` self-matches**: the pattern also appears in the
   command line of the very shell running it (and of prior wrapper shells), so
   pkill kills its own process (exit 143) and may take unrelated wrappers down
-  with it. Kill by PID instead: `pkill -x pocketstage-engine` (exact process
-  name, no `-f`) or `kill $(pgrep -x pocketstage-engine)`.
+  with it. And `pkill -x pocketstage-engine` silently matches NOTHING —
+  kernel `comm` is truncated to 15 chars. Working incantation:
+  `pkill -x pocketstage-eng` (exact truncated name), or resolve PIDs first
+  and `kill <pid>`.
 
 ## Device facts (dev box)
 

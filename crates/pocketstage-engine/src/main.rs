@@ -129,13 +129,29 @@ fn main() {
     // fx_reverb / fx_chorus knobs (levels); unset = touch nothing.
     let synth = ffi::Synth::new(&settings).expect("new_fluid_synth returned null");
 
-    match synth.load_soundfont(SF2_PATH) {
-        Ok(id) => println!("[init] soundfont loaded (id {id}): {SF2_PATH}"),
+    let sfont_id = match synth.load_soundfont(SF2_PATH) {
+        Ok(id) => {
+            println!("[init] soundfont loaded (id {id}): {SF2_PATH}");
+            id
+        }
         Err(e) => {
             eprintln!("[init] {e}");
             std::process::exit(1);
         }
-    }
+    };
+    // Preset catalog for the web voice dropdown — read from the FONT, not a
+    // hardcoded table. Must happen here on the main thread: FluidSynth's
+    // iteration is not thread-safe and the synth moves to ps-audio next.
+    let presets: Vec<pocketstage_server::PresetInfo> = synth
+        .preset_list(sfont_id)
+        .into_iter()
+        .map(|(bank, program, name)| pocketstage_server::PresetInfo {
+            bank,
+            program,
+            name,
+        })
+        .collect();
+    println!("[init] preset catalog: {} entries", presets.len());
     // Pads + metronome live on channels 8..=15; make them percussion. Note:
     // set_channel_type alone does NOT re-resolve the channel's preset — the
     // bank_select + program_change pair is what actually lands them on the
@@ -238,7 +254,8 @@ fn main() {
         .and_then(|p| p.parse().ok())
         .unwrap_or(7777);
     let http_state =
-        AppState::embedded(Arc::clone(&store), ctx, Arc::clone(&live), take_rx, edit_rx);
+        AppState::embedded(Arc::clone(&store), ctx, Arc::clone(&live), take_rx, edit_rx)
+            .with_presets(presets);
     match pocketstage_server::spawn_engine_server(http_state, ([0, 0, 0, 0], port).into()) {
         Ok(()) => println!("[server] control plane on http://0.0.0.0:{port} (LAN-trusted)"),
         Err(e) => eprintln!("[server] NOT started ({e}) — audio unaffected"),

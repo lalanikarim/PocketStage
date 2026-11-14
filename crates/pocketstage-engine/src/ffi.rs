@@ -17,6 +17,8 @@ use std::os::raw::{c_char, c_double, c_float, c_int};
 /// Opaque FluidSynth types (uninhabited enums = zero-sized, can only be held by pointer).
 pub enum fluid_settings_t {}
 pub enum fluid_synth_t {}
+pub enum fluid_sfont_t {}
+pub enum fluid_preset_t {}
 
 #[link(name = "fluidsynth")]
 unsafe extern "C" {
@@ -53,6 +55,18 @@ unsafe extern "C" {
     pub fn fluid_synth_cc(synth: *mut fluid_synth_t, chan: c_int, ctrl: c_int, val: c_int)
     -> c_int;
     pub fn fluid_synth_bank_select(synth: *mut fluid_synth_t, chan: c_int, bank: c_int) -> c_int;
+    // --- preset catalog (read-only; boot-time only, see Synth::preset_list) ---
+    pub fn fluid_synth_get_sfont_by_id(
+        synth: *mut fluid_synth_t,
+        sfont_id: c_int,
+    ) -> *mut fluid_sfont_t;
+    pub fn fluid_sfont_iteration_start(sfont: *mut fluid_sfont_t);
+    pub fn fluid_sfont_iteration_next(sfont: *mut fluid_sfont_t) -> *mut fluid_preset_t;
+    pub fn fluid_preset_get_name(preset: *mut fluid_preset_t) -> *const c_char;
+    // Symbol names on the 2.3.x soname (verified with nm -D): program is
+    // `get_num`, bank is `get_banknum` — NOT the newer get_program/get_bank.
+    pub fn fluid_preset_get_num(preset: *mut fluid_preset_t) -> c_int;
+    pub fn fluid_preset_get_banknum(preset: *mut fluid_preset_t) -> c_int;
     pub fn fluid_synth_all_sounds_off(synth: *mut fluid_synth_t, chan: c_int) -> c_int;
     pub fn fluid_synth_set_channel_type(
         synth: *mut fluid_synth_t,
@@ -155,6 +169,43 @@ impl Synth {
         } else {
             Ok(id)
         }
+    }
+
+    /// Enumerate the presets of a loaded soundfont as `(bank, program, name)`
+    /// sorted by (bank, program). Boot-time only: FluidSynth's iteration
+    /// state lives on the sfont handle and is NOT thread-safe — call this on
+    /// the main thread before the audio thread takes ownership of the synth,
+    /// then treat the returned Vec as immutable data.
+    pub fn preset_list(&self, sfont_id: i32) -> Vec<(i32, i32, String)> {
+        let sfont = unsafe { fluid_synth_get_sfont_by_id(self.0, sfont_id) };
+        if sfont.is_null() {
+            return Vec::new();
+        }
+        unsafe { fluid_sfont_iteration_start(sfont) };
+        let mut out = Vec::new();
+        loop {
+            let preset = unsafe { fluid_sfont_iteration_next(sfont) };
+            if preset.is_null() {
+                break;
+            }
+            let name = {
+                let p = unsafe { fluid_preset_get_name(preset) };
+                if p.is_null() {
+                    String::new()
+                } else {
+                    unsafe { std::ffi::CStr::from_ptr(p) }
+                        .to_string_lossy()
+                        .into_owned()
+                }
+            };
+            out.push((
+                unsafe { fluid_preset_get_banknum(preset) },
+                unsafe { fluid_preset_get_num(preset) },
+                name,
+            ));
+        }
+        out.sort();
+        out
     }
 
     #[inline]

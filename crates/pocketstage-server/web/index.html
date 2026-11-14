@@ -387,57 +387,55 @@ async function save() {
   await putProject(body, "saved — engine applies at next safe point");
 }
 
-// D25 voice display/picker: full GM name table (0..=127) + Drums.
-// The web picker exposes all programs; the hardware white-key browser
-// stays a curated subset of these.
-const GM_NAMES = [
-  "Acoustic Grand Piano", "Bright Acoustic Piano", "Electric Grand Piano",
-  "Warm Electric Piano", "Electric Piano 2", "Harpsichord", "Clavinet", "Celesta",
-  "Glockenspiel", "Music Box", "Vibraphone", "Marimba", "Xylophone",
-  "Tubular Bells", "Dulcimer", "Hammered Dulcimer", "Tremolo Guitar", "Steel Guitar",
-  "Acoustic Guitar (nylon)", "Acoustic Guitar (steel)", "Electric Guitar (clean)",
-  "Electric Guitar (muted)", "Overdriven Guitar", "Distortion Guitar",
-  "Guitar harmonics", "Acoustic Bass (finger)", "Acoustic Bass (pick)",
-  "Electric Bass (finger)", "Electric Bass (pick)", "Fretless Bass", "Slap Bass 1",
-  "Slap Bass 2", "Synth Bass 1", "Synth Bass 2", "Violin", "Viola", "Cello",
-  "Contrabass", "Tremolo Strings", "Pizzicato Strings", "Orchestral Harp",
-  "Timpani", "Pipe Organ", "Church Organ", "Rock Organ", "Accordion", "Harmonica",
-  "Sheng", "Strings Ensemble 1", "Strings Ensemble 2", "SynthStrings 1",
-  "SynthStrings 2", "Choir Aahs", "Voice Oohs", "Synthesized Voice", "Trumpet",
-  "Trombone", "Tuba", "Muted Trumpet", "French Horn", "Brass Ensemble",
-  "SynthBrass 1", "SynthBrass 2", "Soprano Sax", "Alto Sax", "Tenor Sax",
-  "Baritone Sax", "Oboe", "English Horn", "Bassoon", "Clarinet", "Piccolo",
-  "Flute", "Recorder", "Pan Flute", "Blown Bottle", "Shakuhachi", "Whistle",
-  "Ocarina", "Lead 1 (square)", "Lead 2 (sawtooth)", "Lead 3 (calliope)",
-  "Lead 4 (chiff)", "Lead 5 (charang)", "Lead 6 (voice)", "Pad 1 (new age)",
-  "Pad 2 (warm)", "Pad 3 (polysynth)", "Pad 4 (choir)", "Pad 5 (bowed)",
-  "Pad 6 (metallic)", "Pad 7 (halo)", "Pad 8 (sweep)", "FX 1 (rain)",
-  "FX 2 (soundcary)", "FX 3 (belltree)", "FX 4 (atmosphere)", "FX 5 (brightness)",
-  "FX 6 (goblins)", "FX 7 (echoes)", "FX 8 (sci-fi)", "Sitar", "Banjo",
-  "Shamisen", "Koto", "Kalimba", "Bagpipe", "Fiddle", "Shanai", "Tinkle Bell",
-  "Agogo", "Steel Drums", "Woodblock", "Taiko Drum", "Melodic Tom", "Synth Drum",
-  "Reverse Cymbal", "Guitar Noise", "Oscillator", "Fife", "Pan Flute (perc)",
-  "Blown Bottle (perc)", "Shaker", "Maracas", "Whistle (perc)", "Ocarina (perc)",
-  "Bass Drum 1", "(unused)",
-];
+// D25 voice display/picker. Labels come from GET /api/presets — i.e. the
+// LOADED SOUNDFONT itself — never a hardcoded table (a hand-typed GM list
+// was wrong for most indices in session 13 and mislabelled every pick).
+// Fallback before/without the catalog: bare "gm N".
+const PRESETS = new Map(); // program -> name (bank 0 of the loaded font)
+async function loadPresets() {
+  try {
+    const r = await fetch("/api/presets");
+    if (!r.ok) return;
+    const list = await r.json();
+    const sel = $("voice-pick");
+    sel.innerHTML = "";
+    const optDrums = document.createElement("option");
+    optDrums.value = "drums"; optDrums.textContent = "Drums";
+    sel.appendChild(optDrums);
+    let n = 0;
+    for (const p of list) {
+      if (p.bank !== 0 || p.program < 0 || p.program > 127) continue;
+      PRESETS.set(p.program, p.name);
+      const o = document.createElement("option");
+      o.value = String(p.program); o.textContent = `${p.program}: ${p.name}`;
+      sel.appendChild(o);
+      n++;
+    }
+    if (n === 0) fillFallbackPick(); // font answered nothing usable
+  } catch (e) { console.warn("preset catalog unavailable", e); fillFallbackPick(); }
+}
+function fillFallbackPick() {
+  const sel = $("voice-pick");
+  if (sel.options.length > 1) return; // real or fallback options already in
+  for (let p = 0; p < 128; p++) {
+    const o = document.createElement("option");
+    o.value = String(p); o.textContent = "gm" + p;
+    sel.appendChild(o);
+  }
+}
 function voiceName(v) {
   if (v === "drums") return "Drums";
-  if (typeof v === "number") return GM_NAMES[v] || ("gm" + v);
+  if (typeof v === "number") return PRESETS.get(v) || ("gm" + v);
   return "\u2013";
 }
 
-// D25 picker: value "drums" or a program number; POSTs the model's
-// ActiveVoice serde form. The /ws frame keeps it in sync.
+let lastVoice = null; // most recent /ws voice, for re-sync after relabel
+// Picker: value "drums" or a program number; POSTs the model's ActiveVoice
+// serde form. The /ws frame keeps it in sync with hardware selections.
 (function initVoicePick() {
   const sel = $("voice-pick");
-  const optDrums = document.createElement("option");
-  optDrums.value = "drums"; optDrums.textContent = "Drums";
-  sel.appendChild(optDrums);
-  for (let p = 0; p < 128; p++) {
-    const o = document.createElement("option");
-    o.value = String(p); o.textContent = `${p}: ${GM_NAMES[p]}`;
-    sel.appendChild(o);
-  }
+  fillFallbackPick();       // usable immediately...
+  loadPresets().then(() => syncVoicePick(lastVoice)); // ...then relabel
   sel.onchange = async () => {
     const body = sel.value === "drums" ? '"drums"' : JSON.stringify({ program: Number(sel.value) });
     try {
@@ -446,6 +444,7 @@ function voiceName(v) {
     } catch (e) { console.warn("voice pick failed", e); }
   };
   window.syncVoicePick = (v) => {
+    lastVoice = v;
     // Don't clobber while the dropdown is open/focused.
     if (document.activeElement === sel) return;
     const val = v === "drums" ? "drums" : String(v);
