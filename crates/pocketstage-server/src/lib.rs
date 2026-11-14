@@ -28,7 +28,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use pocketstage_model::{Project, ProjectFile, SCHEMA_VERSION, Take};
+use pocketstage_model::{ActiveVoice, Project, ProjectFile, SCHEMA_VERSION, Take};
 
 // ----------------------------------------------------------------- commands
 
@@ -49,6 +49,9 @@ pub enum EngineCommand {
     Record,
     /// Launch scene `n` (1-based as users count; engine maps to its 0-based).
     LaunchScene(u8),
+    /// D25: set the single active performance voice (web picker) — same
+    /// semantics as the DAW white-key browser's `Event::SelectVoice`.
+    SelectVoice(ActiveVoice),
     /// Rename a live take so the audio thread's copy matches the store
     /// (take adoption after later swaps keys on names — renaming only the
     /// store side would duplicate the take on the next swap).
@@ -524,6 +527,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/transport/stop", post(stop))
         .route("/api/transport/record", post(record))
         .route("/api/scene/{n}", post(launch_scene))
+        .route("/api/voice", post(set_voice))
         .route("/api/projects", get(list_projects))
         .route("/api/projects/save_as", post(save_as_project))
         .route("/api/projects/load", post(load_project))
@@ -679,6 +683,20 @@ async fn launch_scene(
         ));
     }
     send_ctrl(&state, EngineCommand::LaunchScene(n))
+}
+/// Body is the model's `ActiveVoice` serde form: `"drums"` or
+/// `{"program": 42}` — no new schema, and it matches what a project PUT
+/// carries in `active_voice`.
+async fn set_voice(
+    State(state): State<AppState>,
+    Json(voice): Json<ActiveVoice>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    // u8 deserializes up to 255; GM programs top out at 127. The store's
+    // validation never sees this body, so gate it here.
+    if matches!(voice, ActiveVoice::Program(p) if p > 127) {
+        return Err((StatusCode::BAD_REQUEST, "program must be 0..=127".into()));
+    }
+    send_ctrl(&state, EngineCommand::SelectVoice(voice))
 }
 
 fn send_ctrl(state: &AppState, cmd: EngineCommand) -> Result<StatusCode, (StatusCode, String)> {

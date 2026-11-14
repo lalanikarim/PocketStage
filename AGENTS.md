@@ -155,6 +155,7 @@ everywhere (Stop also kills LEAD_CH), `SelectVoice` silences held notes,
 project persist atomic under concurrent writers (+ `.ps-tmp-*` sweep),
 take event/name validation, SEQ overlay refused in DAW mode; findings +
 residual edges documented in `CODE_REVIEW.md`. 162 tests, CI gates green,
-hardware smoke passed. Next software candidate: §6 item 15 (live-apply
-web mixer edits). The rest (§6 items 14 + 16 ear-checks) is hardware-gated:
+hardware smoke passed. Voice picker on the web shipped (§6 item 18: `POST /api/voice`,
+full GM dropdown — voice stays a bare GM program, no catalog references).
+Next software candidate: §6 item 15 (live-apply web mixer edits). The rest (§6 items 14 + 16 ear-checks) is hardware-gated:
 pedal CC probe, Pi validation + deployment kit.

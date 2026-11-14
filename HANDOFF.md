@@ -443,9 +443,14 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     reload; PRESET routing deliberately NOT expressible in the schema so
     it can't be remapped. Full multiphase plan + open questions Q1–Q7 in
     `specs/daw-keymap.md`; answer phase-0 questions before writing code.
-18. **Voice picker on the web — IMPLEMENTS NEXT (patch-catalog phase A)**:
-    dropdown (full GM name table) + `POST /api/voice`; engine SelectVoice +
-    write-through already correct. No catalog dependency — ship first.
+18. **Voice picker on the web — DONE**: dropdown (full 128-name GM table +
+    Drums) in the live card + `POST /api/voice` accepting the model's
+    `ActiveVoice` serde form (`"drums"` | `{"program": N}`, >127 → 400);
+    `EngineCommand::SelectVoice` runs as the ordinary `Event::SelectVoice`
+    through the same drain (harness test), picker stays in sync from the /ws
+    frame. Deliberately NOT catalog-shaped: voice stays a bare GM program —
+    item 19's `{sfont, bank, program}` references untouched, so the DAW
+    keymap schema (item 17) sees no new slot-mapping surface.
 19. **Patch catalog / soundfont sets — PLANNED, implements next after 18**
     (D27 reserved): runtime catalog built via FluidSynth FFI (preset
     iteration, no sf2 parser), patches referenced by `{sfont, bank,

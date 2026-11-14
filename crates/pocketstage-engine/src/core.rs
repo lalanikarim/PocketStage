@@ -637,6 +637,9 @@ impl EngineCore {
                         index: n as usize - 1,
                     }));
                 }
+                EngineCommand::SelectVoice(v) => {
+                    remote_ev.push_back(TimedEvent::now(Event::SelectVoice { voice: v }));
+                }
                 EngineCommand::RenameTake { from, to } => self.rename_take(&from, &to),
                 _ => {} // non_exhaustive: future commands ignored
             }
@@ -1969,6 +1972,23 @@ mod harness_tests {
             h.calls().contains(&Call::NotesOff(0)),
             "voice change kills held lead notes"
         );
+    }
+
+    #[test]
+    fn select_voice_arrives_over_the_http_lane() {
+        // Web picker: POST /api/voice → EngineCommand::SelectVoice — the
+        // audio thread must run it exactly like the DAW white-key browser's
+        // Event (re-program the lead channel + persist via write-through).
+        let mut h = Harness::new();
+        h.tx_cmd
+            .send(EngineCommand::SelectVoice(ActiveVoice::Program(48)))
+            .unwrap();
+        h.tick(1);
+        assert!(
+            h.calls().contains(&Call::Prog(0, 48)),
+            "lead channel re-programmed"
+        );
+        assert_eq!(h.core.project.active_voice, Some(ActiveVoice::Program(48)));
     }
 
     #[test]

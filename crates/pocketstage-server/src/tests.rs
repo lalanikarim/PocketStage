@@ -244,6 +244,72 @@ async fn put_forwards_valid_project_to_engine_channel() {
     cleanup(&path);
 }
 
+#[tokio::test]
+async fn voice_route_forwards_select_voice() {
+    let path = temp_path("voice");
+    cleanup(&path);
+    let (tx, rx) = std::sync::mpsc::channel::<EngineCommand>();
+    let (_ptx, prx) = std::sync::mpsc::channel::<pocketstage_model::Take>();
+    let (_etx, erx) = std::sync::mpsc::channel::<ProjectFile>();
+    let app = router(AppState::embedded(
+        std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap()),
+        tx,
+        std::sync::Arc::new(crate::LiveStatus::default()),
+        prx,
+        erx,
+    ));
+
+    // Program voice → 202 + SelectVoice on the engine lane.
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .header("content-type", "application/json")
+            .uri("/api/voice")
+            .body(Body::from(r#"{"program": 65}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    match rx.try_recv() {
+        Ok(EngineCommand::SelectVoice(pocketstage_model::ActiveVoice::Program(65))) => {}
+        other => panic!("expected SelectVoice(Program(65)), got {other:?}"),
+    }
+
+    // Drums voice — bare tagged form.
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .header("content-type", "application/json")
+            .uri("/api/voice")
+            .body(Body::from(r#""drums""#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    match rx.try_recv() {
+        Ok(EngineCommand::SelectVoice(pocketstage_model::ActiveVoice::Drums)) => {}
+        other => panic!("expected SelectVoice(Drums), got {other:?}"),
+    }
+
+    // Out-of-range program → 400, nothing reaches the engine.
+    let (status, body) = call(
+        app,
+        Request::builder()
+            .method("POST")
+            .header("content-type", "application/json")
+            .uri("/api/voice")
+            .body(Body::from(r#"{"program": 200}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(!body.is_empty());
+    assert!(rx.try_recv().is_err());
+    cleanup(&path);
+}
+
 #[test]
 fn drain_takes_appends_to_stored_project() {
     let path = temp_path("drain");
