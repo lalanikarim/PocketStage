@@ -34,7 +34,10 @@ it in both places; harness test asserting `program_change(LEAD_CH, p)` is
 recorded after `SetProject`.
 
 ### 2. `Track.channel` overrides are half-wired
-**Status: OPEN.**
+**Status: FIXED** — boot/swap voices, pattern playback, scene-voice reset
+and stop now route through `project.track_channel()`; Stop additionally
+always silences `LEAD_CH` (keys live there regardless of track 1's
+routing). Test: `channel_override_routes_program_notes_and_cc_together`.
 
 `mix_set` uses `project.track_channel(track)` (override-aware), but
 `apply_track_voice` at boot/swap, pattern playback, and `all_notes_off` all
@@ -62,7 +65,12 @@ parseable, complete file.
 ## 🟡 P2 — correctness edges
 
 ### 4. Stuck notes when switching to Drums mid-hold
-**Status: OPEN.**
+**Status: FIXED** — `SelectVoice` issues `all_notes_off(LEAD_CH)` before
+switching. Test: `select_voice_silences_held_lead_notes`. Related residual edge
+(documented, not fixed): holding a key while pressing DAW — if the note
+is outside the browser span its note-off is inert in the DAW branch and
+the voice sustains until the next voice/stop action kills it. Rare in
+practice (mode switches happen hands-off from playing); revisit if heard.
 
 Held melodic note → select Drums (browser or PUT) → the key's note-off is
 now discarded (<36/>51 filter) or routed to a pad channel; the lead voice

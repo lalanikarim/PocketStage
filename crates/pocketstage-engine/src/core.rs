@@ -398,9 +398,10 @@ pub fn voice_code(project: &Project) -> u32 {
 /// only for tracks that actually have a clip in this column.
 pub fn apply_scene_voice<S: SynthBackend>(synth: &mut S, project: &Project, scene: usize) {
     for (t, track) in project.tracks.iter().enumerate() {
-        synth.all_notes_off(t as i32);
+        let chan = project.track_channel(t) as i32;
+        synth.all_notes_off(chan);
         if track.clips.get(scene).is_some_and(|c| c.is_some()) {
-            synth.program_change(t as i32, track.instrument.gm_program as i32);
+            synth.program_change(chan, track.instrument.gm_program as i32);
         }
     }
 }
@@ -535,7 +536,8 @@ impl EngineCore {
     /// plus the global FX amounts.
     pub fn apply_all_voices<S: SynthBackend>(&self, synth: &mut S) {
         for (t, track) in self.project.tracks.iter().enumerate() {
-            apply_track_voice(synth, t as i32, track);
+            let chan = self.project.track_channel(t) as i32;
+            apply_track_voice(synth, chan, track);
         }
         self.apply_voice_override(synth);
         self.apply_global_fx(synth);
@@ -701,7 +703,8 @@ impl EngineCore {
         self.takes = adopted;
         self.bpm = new.bpm;
         for (t, track) in new.tracks.iter().enumerate() {
-            apply_track_voice(synth, t as i32, track);
+            let chan = new.track_channel(t) as i32;
+            apply_track_voice(synth, chan, track);
         }
         // A PUT may shrink the scene list; drop any dangling active/pending
         // launch before it becomes the project's truth.
@@ -823,9 +826,13 @@ impl EngineCore {
                 self.transport.stop();
                 self.live.active_scene.store(0, Ordering::Relaxed);
                 self.reset_key_guards();
-                for t in 0..self.project.tracks.len() as i32 {
-                    synth.all_notes_off(t);
+                for t in 0..self.project.tracks.len() {
+                    let chan = self.project.track_channel(t) as i32;
+                    synth.all_notes_off(chan);
                 }
+                // Keys live on LEAD_CH regardless of track 1's routing
+                // override — "stop means silent" must cover them too.
+                synth.all_notes_off(LEAD_CH);
             }
             Event::StartRecording => {
                 if self.recording.is_none() {
@@ -854,6 +861,10 @@ impl EngineCore {
                 self.project.active_voice = Some(voice);
                 let code = voice_code(&self.project);
                 self.live.active_voice.store(code, Ordering::Relaxed);
+                // Review P2-4: kill held lead notes BEFORE switching — the
+                // feeder re-routes releases by the NEW voice (Drums drops or
+                // redirects them), so anything still down would sustain.
+                synth.all_notes_off(LEAD_CH);
                 match voice {
                     ActiveVoice::Program(p) => synth.program_change(LEAD_CH, p as i32),
                     ActiveVoice::Drums => self.confirm(synth, CONFIRM_KICK),
@@ -1224,16 +1235,19 @@ impl EngineCore {
             for k in first..last {
                 for (t, track) in self.project.tracks.iter().enumerate() {
                     if let Some(Some(clip)) = track.clips.get(scene) {
+                        // Review P1-2: patterns ride the track's ROUTED
+                        // channel (Track.channel override), same as mix_set.
+                        let chan = self.project.track_channel(t) as i32;
                         let len = clip.pattern.steps.len() as u64;
                         // 16th gating: off the previous step's note, on this
                         // one (sustains = repeated pitches). saturating: k==0
                         // when a launch starts the clock mid-period (used to
                         // underflow).
                         if let Some(n) = clip.pattern.steps[(k.saturating_sub(1) % len) as usize] {
-                            synth.note_off(t as i32, n.pitch as i32);
+                            synth.note_off(chan, n.pitch as i32);
                         }
                         if let Some(n) = clip.pattern.steps[(k % len) as usize] {
-                            synth.note_on(t as i32, n.pitch as i32, n.velocity as i32);
+                            synth.note_on(chan, n.pitch as i32, n.velocity as i32);
                         }
                     }
                 }
@@ -1863,6 +1877,78 @@ mod harness_tests {
         assert!(calls.contains(&Call::Prog(1, 4)), "track 2 program");
         assert!(calls.contains(&Call::Cc(1, 7, 0)), "mute → CC7=0");
         assert!(calls.contains(&Call::Cc(1, 91, 127)), "reverb send full");
+    }
+
+    #[test]
+    fn channel_override_routes_program_notes_and_cc_together() {
+        // Review finding P1-2: Track.channel overrides were honored only by
+        // mix_set; boot/swap voices, pattern playback and stop used the raw
+        // track index — a ch-9 drum track played on 2 and took CCs on 9.
+        let mut h = Harness::new();
+        let mut pf = h.project();
+        pf.project.tracks[2].channel = Some(11);
+        pf.project.tracks[2].clips[0] = Some(Harness::clip("Hit", &[(0, 60, 100)]));
+        h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
+        h.tick(1);
+        let calls = h.calls();
+        assert!(
+            calls.contains(&Call::Prog(11, 89)),
+            "swap programs the OVERRIDDEN channel (track 3 -> ch 11)"
+        );
+        assert!(
+            !calls.contains(&Call::Prog(2, 89)),
+            "raw index channel must stay untouched"
+        );
+
+        // Scene launch: pattern notes land on the overridden channel too.
+        h.send(Event::LaunchScene { index: 0 });
+        h.tick(3);
+        let calls = h.calls();
+        assert!(
+            calls.iter().any(|c| matches!(c, Call::On(11, 60, _))),
+            "pattern note_on rides the override: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| matches!(c, Call::On(2, 60, _))),
+            "no pattern notes on the raw index channel"
+        );
+
+        // Stop silences the overridden channel AND the lead channel that
+        // keys play on even when track 1 is routed elsewhere.
+        h.send(Event::NoteOn {
+            chan: LEAD_CH,
+            key: 72,
+            vel: 90,
+        });
+        h.tick(1);
+        h.calls();
+        h.send(Event::Stop);
+        h.tick(1);
+        let calls = h.calls();
+        assert!(calls.contains(&Call::NotesOff(11)), "stop hits ch 11");
+        assert!(calls.contains(&Call::NotesOff(0)), "stop hits lead ch 0");
+    }
+
+    #[test]
+    fn select_voice_silences_held_lead_notes() {
+        // Review finding P2-4: held melodic note + switch to Drums — the
+        // note-off is filtered out by the drums router, so without a kill
+        // the lead voice sustains forever.
+        let mut h = Harness::new();
+        h.send(Event::NoteOn {
+            chan: 0,
+            key: 60,
+            vel: 100,
+        });
+        h.tick(1);
+        h.send(Event::SelectVoice {
+            voice: ActiveVoice::Drums,
+        });
+        h.tick(1);
+        assert!(
+            h.calls().contains(&Call::NotesOff(0)),
+            "voice change kills held lead notes"
+        );
     }
 
     #[test]
