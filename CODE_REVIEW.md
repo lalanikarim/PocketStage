@@ -17,7 +17,10 @@ chorus signature). The findings below are cracks, not structural problems.
 ## 🔴 P1 — real bugs
 
 ### 1. Project swap silently drops the D25 voice override
-**Status: OPEN.**
+**Status: FIXED** — `apply_voice_override()` helper, called by boot and
+`apply_swap` (after `self.project = new`, reads the incoming voice); test
+`swap_reapplies_voice_program_on_lead` asserts the last lead-channel
+program change is the voice.
 
 `core.rs apply_swap()` runs `apply_track_voice` for every track — resetting
 channel 0 to track 1's program — but never re-applies `active_voice`. Boot

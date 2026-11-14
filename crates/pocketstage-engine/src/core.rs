@@ -537,13 +537,20 @@ impl EngineCore {
         for (t, track) in self.project.tracks.iter().enumerate() {
             apply_track_voice(synth, t as i32, track);
         }
-        // D25: the selected voice overrides track 1's program on the lead
-        // channel (tracks first, voice wins). Drums needs no synth call —
-        // the feeder silences the keybed and routes pads to the kit.
+        self.apply_voice_override(synth);
+        self.apply_global_fx(synth);
+    }
+
+    /// D25: the selected voice overrides track 1's program on the lead
+    /// channel (tracks first, voice wins — call AFTER applying track
+    /// voices). Drums needs no synth call; the feeder silences the keybed
+    /// and routes notes to the kit. Boot AND swap must layer this: a swap
+    /// re-programs channel 0 to track 1's patch, so without it the voice
+    /// is silently dropped while /ws still reports it (review P1-1).
+    fn apply_voice_override<S: SynthBackend>(&self, synth: &mut S) {
         if let Some(ActiveVoice::Program(p)) = self.project.active_voice {
             synth.program_change(LEAD_CH, p as i32);
         }
-        self.apply_global_fx(synth);
     }
 
     /// Global output knobs: master gain + FX amounts onto the synth; unset
@@ -702,6 +709,10 @@ impl EngineCore {
             self.live.active_scene.store(0, Ordering::Relaxed);
         }
         self.project = new;
+        // Tracks are on their channels — re-layer the D25 voice override so
+        // the swap cannot silently drop it (review P1-1). Reads the NEW
+        // project, hence after the assignment.
+        self.apply_voice_override(synth);
         self.reset_key_guards();
         self.stats.drum_kit.store(
             pack_kit(&self.project.drum_kit.unwrap_or(DEFAULT_DRUM_KIT)),
@@ -2044,6 +2055,32 @@ mod harness_tests {
         h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
         h.tick(1);
         assert_eq!(h.core.live.active_voice.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn swap_reapplies_voice_program_on_lead() {
+        // Review finding P1-1: apply_swap re-programmed channel 0 to track
+        // 1's patch and never layered the voice back — keys played piano
+        // while /ws reported the selected voice. The last program change
+        // on the lead channel must be the voice, not track 1.
+        let mut h = Harness::new();
+        let mut pf = h.project();
+        pf.project.active_voice = Some(ActiveVoice::Program(65));
+        h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
+        h.tick(1);
+        let calls = h.calls();
+        let lead_progs: Vec<i32> = calls
+            .iter()
+            .filter_map(|c| match c {
+                Call::Prog(0, p) => Some(*p),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lead_progs.last().copied(),
+            Some(65),
+            "voice wins over track 1 after swap: {lead_progs:?}"
+        );
     }
 
     #[test]
