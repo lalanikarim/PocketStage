@@ -33,8 +33,13 @@ use pocketstage_midi::{PumpMessage, spawn_pump};
 use pocketstage_model::{
     ActiveVoice, Clip, Pattern, ProjectFile, SCHEMA_VERSION, STEPS_PER_BAR, StepNote, Take,
 };
-use pocketstage_oxygen::{Action, Mapper, Mode, default_mapping, hui_mapping};
-use pocketstage_server::{AppState, EngineCommand, LiveStatus, ProjectStore, VOICE_DRUMS};
+use pocketstage_oxygen::{
+    Action, Command as KeymapCommand, DawKeymap, Mapper, Mode, Port as KeymapPort,
+    Source as KeymapSource, default_mapping, hui_mapping,
+};
+use pocketstage_server::{
+    AppState, EngineCommand, KeymapSlot, LiveStatus, ProjectStore, VOICE_DRUMS,
+};
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -47,56 +52,37 @@ use core::{EngineCore, Event, FluidBackend, LEAD_CH, PERIOD_FRAMES, RATE, Stats,
 const N_PERIODS: u32 = 3;
 const SF2_PATH: &str = "/usr/share/sounds/sf2/FluidR3_GM.sf2";
 
-/// D25 white-key patch browser (replaces D13's pitch%12 slots). Anchored at
-/// C2 — the bottom of the keybed — because pads are NOT special (user rule):
-/// they transmit plain notes 36–51 on the keys' channel, so in DAW mode a
-/// pad press and a low-key press are the SAME browser event. Slot 0 (C2) =
-/// the kit; slots 1..=11 walk up the white keys (D2..G3) with the curated GM
-/// patches. In DAW mode a white-key press selects + auditions; black keys
-/// carry only the command notes below.
-const VOICE_BROWSER_ANCHOR: u8 = 36;
+// D25's white-key browser table and the overlay command notes used to be
+// hardcoded here. Keymap phase 3 (D26): they are DATA — `DawKeymap::default()`
+// reproduces the old table exactly (regression-locked in the oxygen crate),
+// and the feeder resolves every DAW-mode note through `route_daw_note`.
 
-/// Overlay command notes (unified note model): black keys ABOVE the browser
-/// span, so they never collide with instrument roles (browser ≤ 55, kit
-/// slots 36–51). Buttons while an overlay is live or in DAW mode;
-/// perfectly ordinary notes of the voice everywhere else.
-pub const CMD_MIX: u8 = 56; // G#3 — toggle MIX
-pub const CMD_SEQ: u8 = 58; // A#3 — toggle SEQ
-pub const CMD_NEXT: u8 = 61; // C#4 — SEQ next bar
-pub const CMD_FLIP: u8 = 63; // D#4 — SEQ flip window
-const VOICES: [(ActiveVoice, &str); 12] = [
-    (ActiveVoice::Drums, "Drums"),
-    (ActiveVoice::Program(0), "Grand Piano"),
-    (ActiveVoice::Program(4), "Electric Piano"),
-    (ActiveVoice::Program(6), "Harpsichord"),
-    (ActiveVoice::Program(11), "Vibraphone"),
-    (ActiveVoice::Program(19), "Church Organ"),
-    (ActiveVoice::Program(24), "Nylon Guitar"),
-    (ActiveVoice::Program(29), "Overdrive Guitar"),
-    (ActiveVoice::Program(32), "Acoustic Bass"),
-    (ActiveVoice::Program(38), "Synth Bass 1"),
-    (ActiveVoice::Program(48), "Strings"),
-    (ActiveVoice::Program(65), "Alto Sax"),
-];
+/// Per-message DAW-mode routing decision for one raw note. Pure + total —
+/// table-tested without MIDI (phase-3 test-first rule).
+#[derive(Debug, PartialEq, Eq)]
+enum DawRoute {
+    /// Voice binding: a press selects (voice-confirm sounds); the pressed
+    /// pitch rides through for melodic voices (Q3 WYSIWYG audition).
+    Voice { voice: ActiveVoice, label: String },
+    /// Command binding: momentary, fires on note-on only.
+    Command(KeymapCommand),
+    /// Nothing bound — inert in DAW mode.
+    Inert,
+}
 
-/// Browser slot of a note: white keys count upward from the anchor C2
-/// (slot 0) through G3 (slot 11). Black keys and notes outside that span
-/// return None — inert in DAW, ordinary voice notes elsewhere.
-fn white_slot(note: u8) -> Option<usize> {
-    const WHITE_PC: [bool; 12] = [
-        true, false, true, false, true, true, false, true, false, true, false, true,
-    ];
-    // Anchored at C2 (36) — the unified note rule: pads transmit plain
-    // notes 36–51, so a pad press IS a low-key press and the browser sees
-    // both from the bottom of the keybed up.
-    if note < VOICE_BROWSER_ANCHOR || !WHITE_PC[(note % 12) as usize] {
-        return None;
+fn route_daw_note(km: &DawKeymap, note: u8, port: KeymapPort) -> DawRoute {
+    // Validation guarantees a source is never bound twice, so the two
+    // lookups cannot disagree.
+    if let Some(b) = km.voice_for(note, port) {
+        return DawRoute::Voice {
+            voice: b.voice,
+            label: b.label.clone(),
+        };
     }
-    let idx = (VOICE_BROWSER_ANCHOR..=note)
-        .filter(|k| WHITE_PC[(*k % 12) as usize])
-        .count()
-        - 1;
-    (idx < VOICES.len()).then_some(idx)
+    if let Some(cmd) = km.command_for(KeymapSource::note(note), port) {
+        return DawRoute::Command(cmd);
+    }
+    DawRoute::Inert
 }
 
 // --------------------------------------------------------------------- main
@@ -431,7 +417,7 @@ fn main() {
     if demo {
         run_demo_feeder(tx);
     } else {
-        run_live_midi(tx, Arc::clone(&stats));
+        run_live_midi(tx, Arc::clone(&stats), Arc::clone(&keymap));
     }
 }
 
@@ -507,7 +493,7 @@ fn run_demo_feeder(tx: mpsc::Sender<TimedEvent>) {
 /// audio thread stays untouched. All notes (keys AND pad-transmitted ones)
 /// flow through one router: mode + active voice decide the destination.
 /// Transport buttons drive the master clock.
-fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>) {
+fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>, keymap: Arc<KeymapSlot>) {
     for m in [default_mapping(), hui_mapping()] {
         if let Err(e) = m.validate() {
             eprintln!("internal default mapping invalid: {e}");
@@ -537,6 +523,18 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>) {
     loop {
         match mrx.recv() {
             Ok(PumpMessage::Midi(m)) => {
+                // Live DawKeymap view (D26 phase 3): an Arc clone per
+                // message picks up hot reloads instantly — the feeder is
+                // the main thread, never the render path (R5). Routing is
+                // stateless per message, so a remap while a note is held
+                // can orphan its note-off under the new map; accepted +
+                // documented risk (specs/daw-keymap.md).
+                let km = keymap.get();
+                let kport = if m.port.ends_with(",1") {
+                    KeymapPort::Hui
+                } else {
+                    KeymapPort::Music
+                };
                 let mut out = Vec::new();
                 if m.port.ends_with(",1") {
                     hui.map(&m.event, &mut out);
@@ -560,49 +558,75 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>) {
                                 _ => continue,
                             };
                             if mode == Mode::Daw {
-                                // Command black keys first…
-                                if on && note == CMD_MIX {
-                                    send_event(&tx, m.received, Event::ToggleMixOverlay);
-                                } else if on && note == CMD_SEQ {
-                                    send_event(&tx, m.received, Event::ToggleSeqOverlay);
-                                } else if let Some(slot) = white_slot(note) {
-                                    // …then the white-key browser: a press
-                                    // selects; programs audition (the note
-                                    // sounds), Drums answers with the core's
-                                    // kick. Other black keys are inert.
-                                    let (voice, name) = VOICES[slot];
-                                    if on {
-                                        println!("[daw] select #{slot} {name}");
-                                        send_event(&tx, m.received, Event::SelectVoice { voice });
+                                // Keymap-driven browser (phase 3): voice
+                                // bindings select + audition at the pressed
+                                // pitch, command bindings are momentary,
+                                // everything else is inert. With the default
+                                // map this routes exactly like the old
+                                // white_slot/VOICES table.
+                                match route_daw_note(&km, note, kport) {
+                                    DawRoute::Voice { voice, label } => {
+                                        if on {
+                                            println!("[daw] select {label}");
+                                            send_event(
+                                                &tx,
+                                                m.received,
+                                                Event::SelectVoice { voice },
+                                            );
+                                        }
+                                        if voice != ActiveVoice::Drums {
+                                            let event = if on {
+                                                Event::NoteOn {
+                                                    chan: LEAD_CH,
+                                                    key: note as i32,
+                                                    vel: velocity as i32,
+                                                }
+                                            } else {
+                                                Event::NoteOff {
+                                                    chan: LEAD_CH,
+                                                    key: note as i32,
+                                                }
+                                            };
+                                            send_event(&tx, m.received, event);
+                                        }
                                     }
-                                    if voice != ActiveVoice::Drums {
-                                        let event = if on {
-                                            Event::NoteOn {
-                                                chan: LEAD_CH,
-                                                key: note as i32,
-                                                vel: velocity as i32,
-                                            }
-                                        } else {
-                                            Event::NoteOff {
-                                                chan: LEAD_CH,
-                                                key: note as i32,
-                                            }
-                                        };
-                                        send_event(&tx, m.received, event);
-                                    }
+                                    DawRoute::Command(cmd) if on => match cmd {
+                                        KeymapCommand::MixToggle => {
+                                            send_event(&tx, m.received, Event::ToggleMixOverlay)
+                                        }
+                                        KeymapCommand::SeqToggle => {
+                                            send_event(&tx, m.received, Event::ToggleSeqOverlay)
+                                        }
+                                        // Harmless unless SEQ is live (the
+                                        // core gates; SEQ can't be in DAW).
+                                        KeymapCommand::SeqNextBar => {
+                                            send_event(&tx, m.received, Event::SeqNextBar)
+                                        }
+                                        KeymapCommand::SeqFlip => {
+                                            send_event(&tx, m.received, Event::SeqFlipWindow)
+                                        }
+                                        // Bank paging awaits T7 wire
+                                        // measurements — no core behavior.
+                                        KeymapCommand::BankPrev | KeymapCommand::BankNext => {}
+                                    },
+                                    _ => {}
                                 }
                             } else {
                                 // PRESET: overlay commands (while live),
                                 // then the SEQ programmer's low octave, then
                                 // the ONE voice.
+                                // Q4: overlay commands follow the keymap
+                                // remap; instrument routing below stays
+                                // hardcoded BY DESIGN (D26 invariant).
                                 let ov = stats.live.overlay.load(Ordering::Relaxed);
-                                if ov != 0 && on && note == CMD_MIX {
+                                let cmd = km.command_for(KeymapSource::note(note), kport);
+                                if ov != 0 && on && cmd == Some(KeymapCommand::MixToggle) {
                                     send_event(&tx, m.received, Event::ToggleMixOverlay);
-                                } else if ov != 0 && on && note == CMD_SEQ {
+                                } else if ov != 0 && on && cmd == Some(KeymapCommand::SeqToggle) {
                                     send_event(&tx, m.received, Event::ToggleSeqOverlay);
-                                } else if ov == 2 && on && note == CMD_NEXT {
+                                } else if ov == 2 && on && cmd == Some(KeymapCommand::SeqNextBar) {
                                     send_event(&tx, m.received, Event::SeqNextBar);
-                                } else if ov == 2 && on && note == CMD_FLIP {
+                                } else if ov == 2 && on && cmd == Some(KeymapCommand::SeqFlip) {
                                     send_event(&tx, m.received, Event::SeqFlipWindow);
                                 } else if ov == 2 && (36..=43).contains(&note) {
                                     // SEQ programmer (D23): the low octave
@@ -826,47 +850,107 @@ fn try_realtime_priority() {
 }
 
 #[cfg(test)]
-mod browser_tests {
+mod keymap_routing_tests {
     use super::*;
 
+    fn default_km() -> DawKeymap {
+        DawKeymap::default()
+    }
+
     #[test]
-    fn browser_spans_c2_to_g3_white_keys() {
-        // Slot 0 = C2 (Drums — a pad press is the same note, same event),
-        // slot 11 = G3; black keys and everything above are inert.
-        assert_eq!(white_slot(36), Some(0));
-        assert_eq!(white_slot(55), Some(11));
-        for (note, slot) in [
-            (38, 1),
-            (40, 2),
-            (41, 3),
-            (43, 4),
-            (45, 5),
-            (47, 6),
-            (48, 7),
-        ] {
-            assert_eq!(white_slot(note), Some(slot));
+    fn defaults_route_like_the_old_hardcoded_table() {
+        // Regression lock for the deleted white_slot/VOICES/CMD_* constants:
+        // 12 white-key slots C2..G3 (Drums first, curated GM after), the
+        // four command notes, everything else inert in DAW mode.
+        let km = default_km();
+        let expect: [(u8, ActiveVoice); 12] = [
+            (36, ActiveVoice::Drums),
+            (38, ActiveVoice::Program(0)),
+            (40, ActiveVoice::Program(4)),
+            (41, ActiveVoice::Program(6)),
+            (43, ActiveVoice::Program(11)),
+            (45, ActiveVoice::Program(19)),
+            (47, ActiveVoice::Program(24)),
+            (48, ActiveVoice::Program(29)),
+            (50, ActiveVoice::Program(32)),
+            (52, ActiveVoice::Program(38)),
+            (53, ActiveVoice::Program(48)),
+            (55, ActiveVoice::Program(65)),
+        ];
+        for (note, voice) in expect {
+            match route_daw_note(&km, note, KeymapPort::Music) {
+                DawRoute::Voice { voice: v, .. } => assert_eq!(v, voice, "note {note}"),
+                other => panic!("note {note}: expected voice, got {other:?}"),
+            }
         }
-        for black in [37, 39, 42, 44, 46, 49] {
-            assert_eq!(white_slot(black), None);
+        let cmds = [
+            (56, KeymapCommand::MixToggle),
+            (58, KeymapCommand::SeqToggle),
+            (61, KeymapCommand::SeqNextBar),
+            (63, KeymapCommand::SeqFlip),
+        ];
+        for (note, cmd) in cmds {
+            assert_eq!(
+                route_daw_note(&km, note, KeymapPort::Music),
+                DawRoute::Command(cmd),
+                "command note {note}"
+            );
         }
-        // Above the browser span (includes every command note) and above
-        // the keybed: no slots.
-        for inert in [CMD_MIX, CMD_SEQ, CMD_NEXT, CMD_FLIP, 57, 60, 84, 127] {
-            assert_eq!(white_slot(inert), None);
+        // Old inert set: black keys below the span edge + everything above.
+        for inert in [37u8, 39, 42, 44, 46, 49, 57, 60, 84, 127] {
+            assert_eq!(
+                route_daw_note(&km, inert, KeymapPort::Music),
+                DawRoute::Inert,
+                "inert note {inert}"
+            );
         }
     }
 
     #[test]
-    fn browser_slots_cover_every_voice() {
-        // The lowest 12 white keys from C2 must reach every voice exactly
-        // once — no dead slot, no gap (G3 is the last; upper keys inert).
-        let mut seen = vec![None; VOICES.len()];
-        for note in 36..=55 {
-            if let Some(i) = white_slot(note) {
-                assert_eq!(seen[i], None, "slot {i} reached twice");
-                seen[i] = Some(note);
+    fn custom_map_reroutes_notes() {
+        // Black keys become legal browser slots; commands can move. This is
+        // exactly what the hardcoded table could not express (D26 goal).
+        let json = r#"{
+            "voices": [ { "source": {"note": 72}, "voice": {"program": 89}, "label": "Pad" } ],
+            "commands": [ { "source": {"note": 36}, "command": "mix_toggle" } ],
+            "fader_buttons": [],
+            "knobs": []
+        }"#;
+        let km = DawKeymap::from_json_str(json).unwrap();
+        match route_daw_note(&km, 72, KeymapPort::Music) {
+            DawRoute::Voice { voice, label } => {
+                assert_eq!(voice, ActiveVoice::Program(89));
+                assert_eq!(label, "Pad");
             }
+            other => panic!("expected voice, got {other:?}"),
         }
-        assert!(seen.iter().all(|s| s.is_some()));
+        assert_eq!(
+            route_daw_note(&km, 36, KeymapPort::Music),
+            DawRoute::Command(KeymapCommand::MixToggle)
+        );
+        // The old defaults are GONE once the file overrides them.
+        assert_eq!(route_daw_note(&km, 40, KeymapPort::Music), DawRoute::Inert);
+    }
+
+    #[test]
+    fn port_qualified_bindings_ignore_other_ports() {
+        let json = r#"{
+            "voices": [],
+            "commands": [ { "source": {"cc": 49, "port": "hui"}, "command": "bank_prev" } ],
+            "fader_buttons": [],
+            "knobs": []
+        }"#;
+        let km = DawKeymap::from_json_str(json).unwrap();
+        // Note routing never sees a CC binding…
+        assert_eq!(route_daw_note(&km, 49, KeymapPort::Music), DawRoute::Inert);
+        // …and the CC only answers on its declared port.
+        assert_eq!(
+            km.command_for(KeymapSource::cc(49), KeymapPort::Hui),
+            Some(KeymapCommand::BankPrev)
+        );
+        assert_eq!(
+            km.command_for(KeymapSource::cc(49), KeymapPort::Music),
+            None
+        );
     }
 }
