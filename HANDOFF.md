@@ -572,8 +572,10 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 > (sessions 8–11 features), pedal probe, Pi validation. Software niceties:
 > live CC values in the /ws frame, fader ramp smoothing, pitch-per-step SEQ
 > editing (deferred). Live env: engine runs detached on :7777, project
-> library in ~/.pocketstage/projects (test artifacts: "Gig" snapshot,
-> "UI Test Clip" in S1, reverb 0.5 on track 1 — user may want to clean).
+> library in ~/.pocketstage/projects (session-13 housekeeping done: "Gig"
+> test snapshot deleted, "UI Test Clip" removed, track-1 FX rides reset to
+> font defaults; Take 1–2 kept as real recordings; favicon now served from
+> the brand kit).
 
 ---
 
