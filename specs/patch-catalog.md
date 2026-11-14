@@ -106,7 +106,7 @@ back to) with a message that names the exact expected path.
 
 | Phase | Deliverable | Notes / test-first |
 |---|---|---|
-| **A** | Voice picker UI + `POST /api/voice` (GM-only, full 128-name table) | item 18; no catalog needed; server test on the in-process router; engine already handles SelectVoice+persist correctly (session-12 fixes) |
+| **A** ✅ (s13) | Voice picker UI + `POST /api/voice` (GM-only) | item 18 shipped. Shipped BETTER than planned: instead of the intended "full 128-name table", labels come from the loaded font — boot-time `Synth::preset_list` FFI iteration (main thread, pre-audio; symbols `fluid_preset_get_num`/`_get_banknum`) → immutable catalog on AppState → `GET /api/presets`. A hand-typed GM table was tried first and mislabelled most programs (session-13 post-mortem) — do not reintroduce static name tables. Phase B inherits: preset-iteration FFI already exists. |
 | **B** | Catalog core: FFI additions, scan dir + eager load, preset iteration, `GET /api/patches`, `has_percussion` flags | fake-backend harness can't cover FFI — pure catalog-shape logic (dedup, naming, fallback resolution fn) unit-tested; thin FFI walk verified by device smoke |
 | **C** | Patch references: `PatchRef` in model (+variants above), boot/swap/select via `program_select_by_sfont_name`, full fallback chain + `/ws` warning badge | resolution logic as a pure function over `Catalog` — table-driven CI tests incl. every fallback rung |
 | **D** | Patch browser UI: grouped/searchable list, **audition on ch 7** (`POST /api/preview`), voice picker fed from catalog; track instrument pickers | item 19 closes |
