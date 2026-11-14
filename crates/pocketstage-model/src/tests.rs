@@ -599,3 +599,112 @@ fn drum_kit_json_round_trip_and_wrong_length_rejected() {
     let short = json.replace("[35,36,37,38,39,40,41,42]", "[35,36,37,38,39,40,41]");
     assert!(ProjectFile::from_json_str(&short).is_err());
 }
+
+// ---- take event validation (review P2-7) ----------------------------------
+
+fn take_with(events: Vec<RecordedEvent>, name: &str) -> Project {
+    let mut p = Project::default_project();
+    p.takes = vec![Take {
+        name: name.into(),
+        events,
+        muted: false,
+    }];
+    p
+}
+
+#[test]
+fn validate_rejects_out_of_range_take_event_fields() {
+    // Hand-edited files must not smuggle values the synth never accepts.
+    let p = take_with(
+        vec![RecordedEvent::NoteOn {
+            tick: 0,
+            channel: 0,
+            pitch: 60,
+            velocity: 0,
+        }],
+        "t",
+    );
+    assert!(matches!(
+        p.validate(),
+        Err(ValidationError::VelocityOutOfRange(0))
+    ));
+
+    let p = take_with(
+        vec![RecordedEvent::NoteOn {
+            tick: 0,
+            channel: 16,
+            pitch: 60,
+            velocity: 100,
+        }],
+        "t",
+    );
+    assert!(matches!(
+        p.validate(),
+        Err(ValidationError::EventChannelOutOfRange(16))
+    ));
+
+    let p = take_with(
+        vec![RecordedEvent::NoteOff {
+            tick: 0,
+            channel: 99,
+            pitch: 200,
+        }],
+        "t",
+    );
+    assert!(p.validate().is_err(), "note-off pitch AND channel");
+
+    let p = take_with(
+        vec![RecordedEvent::ProgramChange {
+            tick: 0,
+            channel: 0,
+            program: 128,
+        }],
+        "t",
+    );
+    assert!(matches!(
+        p.validate(),
+        Err(ValidationError::ProgramOutOfRange(128))
+    ));
+
+    // The happy path stays valid (no regression for recorded files).
+    let p = take_with(
+        vec![
+            RecordedEvent::NoteOn {
+                tick: 0,
+                channel: 15,
+                pitch: 127,
+                velocity: 127,
+            },
+            RecordedEvent::NoteOff {
+                tick: 1,
+                channel: 15,
+                pitch: 127,
+            },
+        ],
+        "t",
+    );
+    assert_eq!(p.validate(), Ok(()));
+}
+
+#[test]
+fn validate_rejects_duplicate_take_names() {
+    // Names are the adoption key for swap/rename — duplicates silently make
+    // renames and keep-rules hit more than one take.
+    let mut p = Project::default_project();
+    p.takes = vec![
+        Take {
+            name: "Take 1".into(),
+            events: vec![],
+            muted: false,
+        },
+        Take {
+            name: "Take 1".into(),
+            events: vec![],
+            muted: false,
+        },
+    ];
+    assert!(matches!(
+        p.validate(),
+        Err(ValidationError::DuplicateTakeName { .. })
+    ));
+}

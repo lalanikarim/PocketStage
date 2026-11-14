@@ -106,7 +106,12 @@ and rename leaves a phantom project that can even become the boot project.
 leftover `.ps-tmp-*` on library open.
 
 ### 7. Model validation gaps for takes
-**Status: OPEN.**
+**Status: FIXED** — take events now validate channel (0..=15), velocity
+(1..=127) and program (0..=127) alongside pitch; take names must be
+unique (they are the engine's adoption key). Follow-up: engine finalize
+now picks the next free "Take N" so a user-occupied name can't make a
+fresh take unpersistable. Tests: `validate_rejects_out_of_range_take_
+event_fields`, `validate_rejects_duplicate_take_names`.
 
 `Project::validate()` checks pitch but not recorded `NoteOn.velocity`
 (1..=127) nor event `channel` (0..=15) — a hand-edited file reaches

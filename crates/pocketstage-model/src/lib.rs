@@ -63,6 +63,8 @@ pub enum ValidationError {
     PitchOutOfRange(u8),
     #[error("velocity {0} out of range 1..=127")]
     VelocityOutOfRange(u8),
+    #[error("take event channel {0} out of range 0..=15")]
+    EventChannelOutOfRange(u8),
     #[error("gm_program {0} out of range 0..=127")]
     ProgramOutOfRange(u8),
     #[error("track '{track}' channel override {channel} out of range 0..=15")]
@@ -75,6 +77,8 @@ pub enum ValidationError {
     LoopBarsOutOfRange(u8),
     #[error("take '{take}' events not sorted by tick")]
     UnsortedTake { take: String },
+    #[error("duplicate take name '{take}' (names are the adoption key)")]
+    DuplicateTakeName { take: String },
     #[error("track '{track}' gain {gain} out of range 0..=2")]
     GainOutOfRange { track: String, gain: f64 },
     #[error("track '{track}' pan {pan} out of range -1..=1")]
@@ -360,19 +364,57 @@ impl Project {
                 validate_pattern(&clip.pattern)?;
             }
         }
+        let mut take_names = std::collections::HashSet::new();
         for take in &self.takes {
             if !take.is_sorted() {
                 return Err(ValidationError::UnsortedTake {
                     take: take.name.clone(),
                 });
             }
+            // Names are the adoption key for swap/rename (engine "mine"
+            // rule) — duplicates would silently hit more than one take.
+            if !take_names.insert(take.name.as_str()) {
+                return Err(ValidationError::DuplicateTakeName {
+                    take: take.name.clone(),
+                });
+            }
             for ev in &take.events {
-                // Strict: hand-edited project files must not smuggle bad pitches.
-                if let RecordedEvent::NoteOff { pitch, .. } | RecordedEvent::NoteOn { pitch, .. } =
-                    ev
-                    && *pitch > 127
+                // Strict: hand-edited project files must not smuggle values
+                // the synth never accepts (review P2-7 extended this from
+                // pitch-only to the full event domain).
+                let (channel, pitch, velocity, program) = match *ev {
+                    RecordedEvent::NoteOn {
+                        channel,
+                        pitch,
+                        velocity,
+                        ..
+                    } => (Some(channel), Some(pitch), Some(velocity), None),
+                    RecordedEvent::NoteOff { channel, pitch, .. } => {
+                        (Some(channel), Some(pitch), None, None)
+                    }
+                    RecordedEvent::ProgramChange {
+                        channel, program, ..
+                    } => (Some(channel), None, None, Some(program)),
+                };
+                if let Some(c) = channel
+                    && c > 15
                 {
-                    return Err(ValidationError::PitchOutOfRange(*pitch));
+                    return Err(ValidationError::EventChannelOutOfRange(c));
+                }
+                if let Some(p) = pitch
+                    && p > 127
+                {
+                    return Err(ValidationError::PitchOutOfRange(p));
+                }
+                if let Some(v) = velocity
+                    && !(1..=127).contains(&v)
+                {
+                    return Err(ValidationError::VelocityOutOfRange(v));
+                }
+                if let Some(p) = program
+                    && p > 127
+                {
+                    return Err(ValidationError::ProgramOutOfRange(p));
                 }
             }
         }

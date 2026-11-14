@@ -756,8 +756,19 @@ impl EngineCore {
         if let Some((_base, evs)) = self.recording.take()
             && !evs.is_empty()
         {
+            // Unique name: user takes can occupy "Take N" slots, and the
+            // model now rejects duplicates (review P2-7) — a colliding name
+            // would make the take unpersistable on the drain tick.
+            let mut n = self.takes.len() + 1;
+            let name = loop {
+                let candidate = format!("Take {n}");
+                if !self.takes.iter().any(|t| t.name == candidate) {
+                    break candidate;
+                }
+                n += 1;
+            };
             let take = Take {
-                name: format!("Take {}", self.takes.len() + 1),
+                name,
                 events: evs,
                 muted: false,
             };
@@ -2188,6 +2199,40 @@ mod harness_tests {
     }
 
     // ---- take rename -----------------------------------------------------------
+
+    #[test]
+    fn finalize_skips_occupied_take_names() {
+        // Review P2-7 follow-up: the model now rejects duplicate take
+        // names, so a finalized take colliding with a user-named one would
+        // silently never persist. Finalize must find the next free slot.
+        let mut h = Harness::new();
+        h.core.takes.push(Take {
+            name: "Take 2".into(), // occupies the naive len+1 slot
+            events: vec![],
+            muted: false,
+        });
+        h.send(Event::Play);
+        h.tick(2);
+        h.send(Event::StartRecording);
+        h.send(Event::NoteOn {
+            chan: 0,
+            key: 60,
+            vel: 100,
+        });
+        h.tick(1);
+        h.send(Event::Stop);
+        h.tick(1);
+        let names: Vec<&str> = h.core.takes.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"Take 3"),
+            "took the next free slot: {names:?}"
+        );
+        assert_eq!(
+            h.takes_rx.try_recv().unwrap().name,
+            "Take 3",
+            "the persisted copy carries the unique name too"
+        );
+    }
 
     #[test]
     fn rename_moves_live_copy_and_mine_together() {
