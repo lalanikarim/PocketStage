@@ -437,6 +437,12 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     Drums, black-key commands (G#3/A#3 enter/exit overlays in both modes,
     C#4/D#4 SEQ bar/window while live), hardware scene launch REMOVED (web
     UI / HTTP only), voice persistence across reboot.
+17. **Configurable DAW-mode key/button mappings — PLANNED, not started**
+    (session 12 request): JSON-managed DawKeymap (voice browser + overlay
+    commands + optional fader buttons) with web UI management and hot
+    reload; PRESET routing deliberately NOT expressible in the schema so
+    it can't be remapped. Full multiphase plan + open questions Q1–Q7 in
+    `specs/daw-keymap.md`; answer phase-0 questions before writing code.
 
 ---
 
