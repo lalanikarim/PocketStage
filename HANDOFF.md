@@ -496,10 +496,12 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 ## 9. How to resume (suggested prompt for next session)
 
 > Read HANDOFF.md (§3 state, §6 backlog items 14–16, §7 decisions D21–D25)
-> and AGENTS.md. Session 11b implemented D25 (one voice at a time: DAW
+> and AGENTS.md. Sessions 11b+11c implemented D25 (one voice at a time: DAW
 > white-key browser with Drums on the lowest C, melodic pads play the voice,
-> kit spans both pad banks in Drums mode, overlay entry moved to DAW pads
-> 9/10, active_voice persisted) — 152 tests, all gates green. Next software
+> kit spans notes 36–51 in Drums mode, active_voice persisted) under the
+> unified note rule (pads are plain notes — one feeder stream; hardware
+> scene launching removed → web/HTTP; overlay commands on black keys G#3/
+> A#3, +C#4/D#4 while SEQ lives) — 154 tests, all gates green. Next software
 > candidate: §6 item 15 (web mixer edits should apply live without Save).
 > Everything else is hardware-gated: ear-check lists in §6 items 14 + 16
 > (sessions 8–11 features), pedal probe, Pi validation. Software niceties:
