@@ -815,3 +815,293 @@ fn list_names(dir: &std::path::Path) -> Vec<String> {
     v.sort();
     v
 }
+
+// ------------------------------------------------------------- daw keymap
+
+use crate::KeymapSlot;
+use pocketstage_oxygen::DawKeymap;
+
+fn km_temp(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("ps-keymap-test-{name}.json"))
+}
+
+fn km_cleanup(path: &PathBuf) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(path.with_extension("json.tmp"));
+}
+
+const KM_CUSTOM: &str = r#"{
+    "voices": [ { "source": {"note": 60}, "voice": {"program": 5}, "label": "Test EP" } ],
+    "commands": [ { "source": {"note": 70}, "command": "seq_toggle" } ],
+    "fader_buttons": [],
+    "knobs": []
+}"#;
+
+#[test]
+fn keymap_slot_missing_file_is_defaults() {
+    let path = km_temp("missing");
+    km_cleanup(&path);
+    let slot = KeymapSlot::open(&path);
+    assert_eq!(*slot.get(), DawKeymap::default());
+    assert!(!path.exists(), "open must not write");
+    km_cleanup(&path);
+}
+
+#[test]
+fn keymap_slot_corrupt_file_falls_back_to_defaults() {
+    let path = km_temp("corrupt");
+    std::fs::write(&path, "{{ definitely not json").unwrap();
+    let slot = KeymapSlot::open(&path);
+    assert_eq!(*slot.get(), DawKeymap::default());
+    // Validation failures count as corrupt too.
+    std::fs::write(
+        &path,
+        r#"{"voices":[{"source":{"note":60},"voice":"drums","label":""}],"commands":[],"fader_buttons":[],"knobs":[]}"#,
+    )
+    .unwrap();
+    let slot = KeymapSlot::open(&path);
+    assert_eq!(*slot.get(), DawKeymap::default());
+    km_cleanup(&path);
+}
+
+#[test]
+fn keymap_slot_replace_persists_and_reloads() {
+    let path = km_temp("roundtrip");
+    km_cleanup(&path);
+    let slot = KeymapSlot::open(&path);
+    assert_eq!(slot.version(), 0);
+
+    let custom = DawKeymap::from_json_str(KM_CUSTOM).unwrap();
+    slot.replace(custom.clone()).unwrap();
+    assert_eq!(*slot.get(), custom);
+    assert_eq!(slot.version(), 1, "publish bumps the counter");
+    assert!(path.exists());
+
+    let reloaded = KeymapSlot::open(&path);
+    assert_eq!(*reloaded.get(), custom);
+    km_cleanup(&path);
+}
+
+#[test]
+fn keymap_slot_invalid_replace_changes_nothing() {
+    let path = km_temp("reject");
+    km_cleanup(&path);
+    let slot = KeymapSlot::open(&path);
+    let before = slot.get();
+
+    // Duplicate sources across sections → validation error, memory + disk
+    // untouched (same durability discipline as ProjectStore).
+    let dup = r#"{
+        "voices": [ { "source": {"note": 60}, "voice": "drums", "label": "A" } ],
+        "commands": [ { "source": {"note": 60}, "command": "mix_toggle" } ],
+        "fader_buttons": [],
+        "knobs": []
+    }"#;
+    let bad = DawKeymap::from_json_str(dup).unwrap();
+    assert!(slot.replace(bad).is_err());
+    assert_eq!(slot.get(), before);
+    assert!(!path.exists());
+    km_cleanup(&path);
+}
+
+#[test]
+fn keymap_slot_reset_restores_defaults() {
+    let path = km_temp("reset");
+    km_cleanup(&path);
+    let slot = KeymapSlot::open(&path);
+    slot.replace(DawKeymap::from_json_str(KM_CUSTOM).unwrap())
+        .unwrap();
+    slot.reset().unwrap();
+    assert_eq!(*slot.get(), DawKeymap::default());
+    let reloaded = KeymapSlot::open(&path);
+    assert_eq!(*reloaded.get(), DawKeymap::default());
+    km_cleanup(&path);
+}
+
+/// One shared router (AppState is Clone; the keymap slot lives behind an
+/// Arc, so version + map persist across requests within a test).
+fn km_app() -> axum::Router {
+    let proj = temp_path("keymap-http-app");
+    let state = AppState::embedded(
+        std::sync::Arc::new(ProjectStore::open_or_default(&proj).unwrap()),
+        std::sync::mpsc::channel::<EngineCommand>().0,
+        std::sync::Arc::new(crate::LiveStatus::default()),
+        std::sync::mpsc::channel().1,
+        std::sync::mpsc::channel().1,
+    )
+    .with_keymap(std::sync::Arc::new(KeymapSlot::open(km_temp("http"))));
+    router(state)
+}
+
+#[tokio::test]
+async fn keymap_http_round_trip_and_rejection() {
+    let km = km_temp("http");
+    km_cleanup(&km);
+    let app = km_app();
+
+    // GET on a fresh slot → built-in defaults + schema stamp.
+    let (status, body) = call(
+        app.clone(),
+        Request::builder()
+            .uri("/api/keymap")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        v["schema"],
+        serde_json::json!(pocketstage_oxygen::KEYMAP_SCHEMA)
+    );
+    assert_eq!(
+        serde_json::from_value::<DawKeymap>(v["keymap"].clone()).unwrap(),
+        DawKeymap::default()
+    );
+    assert!(v["defaults"].is_object());
+
+    // PUT valid → 204, file written, version counter advanced.
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("PUT")
+            .uri("/api/keymap")
+            .body(Body::from(KM_CUSTOM))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = call(
+        app.clone(),
+        Request::builder()
+            .uri("/api/keymap")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["keymap"]["voices"].as_array().unwrap().len(), 1);
+    assert!(v["version"].as_u64().unwrap() >= 1);
+    assert!(km.exists());
+
+    // PUT garbage → 400; the previous map survives.
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("PUT")
+            .uri("/api/keymap")
+            .body(Body::from("not json"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) = call(
+        app.clone(),
+        Request::builder()
+            .uri("/api/keymap")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["keymap"]["voices"].as_array().unwrap().len(), 1);
+
+    // PUT validation failure (dup source) → 400 with the human message.
+    let dup = r#"{
+        "voices": [ { "source": {"note": 60}, "voice": "drums", "label": "A" } ],
+        "commands": [ { "source": {"note": 60}, "command": "mix_toggle" } ]
+    }"#;
+    let (status, body) = call(
+        app.clone(),
+        Request::builder()
+            .method("PUT")
+            .uri("/api/keymap")
+            .body(Body::from(dup))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("both claim note 60"), "{body}");
+
+    // Reset → defaults again.
+    let (status, _) = call(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/keymap/reset")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    km_cleanup(&km);
+}
+
+#[tokio::test]
+async fn keymap_http_unavailable_without_slot() {
+    let path = temp_path("keymap-none");
+    cleanup(&path);
+    let app = router(test_state(&path)); // standalone: no keymap attached
+    let (status, _) = call(
+        app,
+        Request::builder()
+            .uri("/api/keymap")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    cleanup(&path);
+}
+
+#[tokio::test]
+async fn overlay_routes_forward_exact_targets() {
+    let path = temp_path("overlay-route");
+    cleanup(&path);
+    let (tx, rx) = std::sync::mpsc::channel::<EngineCommand>();
+    let (_ptx, prx) = std::sync::mpsc::channel::<pocketstage_model::Take>();
+    let (_etx, erx) = std::sync::mpsc::channel::<ProjectFile>();
+    let app = router(AppState::embedded(
+        std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap()),
+        tx,
+        std::sync::Arc::new(crate::LiveStatus::default()),
+        prx,
+        erx,
+    ));
+
+    for (target, expect) in [
+        ("mix", "SetOverlay(Mix)"),
+        ("seq", "SetOverlay(Seq)"),
+        ("none", "SetOverlay(None)"),
+    ] {
+        let (status, _) = call(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/overlay/{target}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{target}");
+        let cmd = rx.try_recv().expect("command reaches engine lane");
+        assert_eq!(format!("{cmd:?}"), expect);
+    }
+
+    // Unknown target → 400, nothing forwarded.
+    let (status, _) = call(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/overlay/bogus")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(rx.try_recv().is_err());
+    cleanup(&path);
+}

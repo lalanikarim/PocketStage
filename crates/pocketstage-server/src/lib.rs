@@ -23,12 +23,15 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pocketstage_model::{ActiveVoice, Project, ProjectFile, SCHEMA_VERSION, Take};
+// Re-exported so embedders (engine) and handlers share one DawKeymap type;
+// the schema stamp is logged at boot next to the keymap path.
+pub use pocketstage_oxygen::{DawKeymap, KEYMAP_SCHEMA};
 
 // ----------------------------------------------------------------- commands
 
@@ -56,6 +59,18 @@ pub enum EngineCommand {
     /// (take adoption after later swaps keys on names — renaming only the
     /// store side would duplicate the take on the next swap).
     RenameTake { from: String, to: String },
+    /// Addition B (D26, keymap phase 2): force the overlay to an exact
+    /// state. Anti-brick control — a bad keymap must never trap the user,
+    /// so a web-side exit/entry that bypasses keymap bindings exists.
+    SetOverlay(OverlayTarget),
+}
+
+/// Exact overlay target for [`EngineCommand::SetOverlay`] (`None` = exit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayTarget {
+    Mix,
+    Seq,
+    None,
 }
 
 // ------------------------------------------------------------------ store
@@ -402,6 +417,10 @@ pub struct AppState {
     /// [`AppState::drain_edits`]; races with a web PUT resolve
     /// last-writer-wins on the store (accepted in R12 for mixer values).
     edit_feed: Option<Arc<Mutex<Receiver<ProjectFile>>>>,
+    /// DAW keymap holder (D26 phase 2): `Some` when embedded — the HTTP
+    /// layer validates + persists into it, the engine's MIDI feeder reads
+    /// it. Never touched by the audio thread.
+    keymap: Option<Arc<KeymapSlot>>,
 }
 
 impl AppState {
@@ -414,7 +433,15 @@ impl AppState {
             presets: Default::default(),
             take_feed: None,
             edit_feed: None,
+            keymap: None,
         }
+    }
+
+    /// Attach the shared DAW keymap holder (engine calls this once at boot,
+    /// before the server thread starts).
+    pub fn with_keymap(mut self, slot: Arc<KeymapSlot>) -> Self {
+        self.keymap = Some(slot);
+        self
     }
 
     /// Attach the boot-time preset catalog (engine calls this once, before
@@ -442,6 +469,7 @@ impl AppState {
             presets: Default::default(),
             take_feed: Some(Arc::new(Mutex::new(take_feed))),
             edit_feed: Some(Arc::new(Mutex::new(edit_feed))),
+            keymap: None,
         }
     }
 
@@ -562,6 +590,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/delete", post(delete_project))
         .route("/api/projects/raw", get(raw_project))
         .route("/api/takes/rename", post(rename_take))
+        .route("/api/keymap", get(get_keymap).put(put_keymap))
+        .route("/api/keymap/reset", post(reset_keymap))
+        .route("/api/overlay/{target}", post(set_overlay))
         .with_state(state)
 }
 
@@ -898,6 +929,196 @@ async fn put_project(
             .map_err(|_| StoreError::Io("engine channel closed".into()))?;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ------------------------------------------------------------- daw keymap
+
+/// Thread-safe holder for the live [`DawKeymap`] plus its file location and
+/// a change counter (D26 phase 2). Writers: HTTP handlers only (validate →
+/// persist atomically → publish). Reader: the engine's main-thread MIDI
+/// feeder, which takes an `Arc` clone per event — the audio thread never
+/// touches this type (R5; same lane discipline as [`LiveStatus`]).
+pub struct KeymapSlot {
+    path: PathBuf,
+    map: Mutex<Arc<DawKeymap>>,
+    version: AtomicU64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum KeymapError {
+    #[error("{0}")]
+    Validation(String),
+    #[error("io: {0}")]
+    Io(String),
+}
+
+impl IntoResponse for KeymapError {
+    fn into_response(self) -> Response {
+        let status = match self {
+            KeymapError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            KeymapError::Validation(_) => StatusCode::BAD_REQUEST,
+        };
+        (status, self.to_string()).into_response()
+    }
+}
+
+/// Keymap file precedence: `POCKETSTAGE_KEYMAP` (tests/CI) >
+/// `$HOME/.pocketstage/keymap.json` — global device config, not per-project
+/// (Q1: bindings belong to the keyboard, not the song).
+pub fn keymap_path() -> PathBuf {
+    match std::env::var("POCKETSTAGE_KEYMAP") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            PathBuf::from(home).join(".pocketstage").join("keymap.json")
+        }
+    }
+}
+
+impl KeymapSlot {
+    /// Load `path`; NEVER fails: a missing file is the normal defaults case,
+    /// a corrupt/invalid one falls back to defaults with a loud log line
+    /// ("bad keymap must never fail boot", specs/daw-keymap.md).
+    pub fn open(path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref().to_path_buf();
+        let (map, warn) = match std::fs::read_to_string(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (DawKeymap::default(), None),
+            Err(e) => (
+                DawKeymap::default(),
+                Some(format!("cannot read {}: {e}", path.display())),
+            ),
+            Ok(text) => match DawKeymap::from_json_str(&text) {
+                Err(e) => (
+                    DawKeymap::default(),
+                    Some(format!(
+                        "corrupt keymap {}: invalid JSON: {e} — using defaults",
+                        path.display()
+                    )),
+                ),
+                Ok(m) => match m.validate() {
+                    Ok(()) => (m, None),
+                    Err(e) => (
+                        DawKeymap::default(),
+                        Some(format!(
+                            "corrupt keymap {}: {e} — using defaults",
+                            path.display()
+                        )),
+                    ),
+                },
+            },
+        };
+        if let Some(w) = warn {
+            eprintln!("[keymap] WARNING: {w}");
+        }
+        Self {
+            path,
+            map: Mutex::new(Arc::new(map)),
+            version: AtomicU64::new(0),
+        }
+    }
+
+    pub fn path(&self) -> PathBuf {
+        self.path.clone()
+    }
+
+    /// Current live map (feeder calls this per MIDI event — Arc clone).
+    pub fn get(&self) -> Arc<DawKeymap> {
+        self.map.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
+    }
+
+    /// Validate → persist (tmp+rename, same durability pattern as
+    /// [`ProjectStore::replace`]) → publish. Any failure leaves memory and
+    /// disk untouched.
+    pub fn replace(&self, incoming: DawKeymap) -> Result<(), KeymapError> {
+        incoming
+            .validate()
+            .map_err(|e| KeymapError::Validation(e.clone()))?;
+        let json = incoming.to_json_string();
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| KeymapError::Io(e.to_string()))?;
+        }
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, &json).map_err(|e| KeymapError::Io(e.to_string()))?;
+        std::fs::rename(&tmp, &self.path).map_err(|e| KeymapError::Io(e.to_string()))?;
+        *self.map.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(incoming);
+        self.version.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Restore the built-in defaults (writes them to disk like any PUT).
+    pub fn reset(&self) -> Result<(), KeymapError> {
+        self.replace(DawKeymap::default())
+    }
+}
+
+fn keymap_slot(state: &AppState) -> Result<&Arc<KeymapSlot>, (StatusCode, String)> {
+    state.keymap.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no keymap configured".into(),
+    ))
+}
+
+/// Current map + built-in defaults for diffing, plus the change counter.
+async fn get_keymap(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let slot = keymap_slot(&state)?;
+    Ok(Json(serde_json::json!({
+        "schema": KEYMAP_SCHEMA,
+        "version": slot.version(),
+        "path": slot.path().display().to_string(),
+        "keymap": &*slot.get(),
+        "defaults": DawKeymap::default(),
+    })))
+}
+
+async fn put_keymap(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<StatusCode, KeymapError> {
+    let slot = keymap_slot(&state).map_err(|(s, m)| match s {
+        StatusCode::SERVICE_UNAVAILABLE => KeymapError::Io(m),
+        _ => KeymapError::Validation(m),
+    })?;
+    let text = String::from_utf8_lossy(&body).into_owned();
+    let incoming = DawKeymap::from_json_str(&text)
+        .map_err(|e| KeymapError::Validation(format!("invalid keymap JSON: {e}")))?;
+    slot.replace(incoming)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn reset_keymap(State(state): State<AppState>) -> Result<StatusCode, KeymapError> {
+    let slot = keymap_slot(&state).map_err(|(s, m)| match s {
+        StatusCode::SERVICE_UNAVAILABLE => KeymapError::Io(m),
+        _ => KeymapError::Validation(m),
+    })?;
+    slot.reset()?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Addition B: `POST /api/overlay/{mix|seq|none}` — exact overlay control
+/// over the same EngineCommand lane as `/api/voice`, so a keymap that binds
+/// nothing to mix_toggle can never trap the user in an overlay.
+async fn set_overlay(
+    State(state): State<AppState>,
+    PathParam(target): PathParam<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let t = match target.as_str() {
+        "mix" => OverlayTarget::Mix,
+        "seq" => OverlayTarget::Seq,
+        "none" => OverlayTarget::None,
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("unknown overlay target '{other}' (mix|seq|none)"),
+            ));
+        }
+    };
+    send_ctrl(&state, EngineCommand::SetOverlay(t))
 }
 
 impl IntoResponse for StoreError {

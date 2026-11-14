@@ -21,7 +21,7 @@ use pocketstage_model::{
     ActiveVoice, Clip, Pattern, Project, ProjectFile, Quantize, RecordedEvent, SCHEMA_VERSION,
     STEPS_PER_BAR, StepNote, Take, Track,
 };
-use pocketstage_server::{EngineCommand, LiveStatus, VOICE_DRUMS};
+use pocketstage_server::{EngineCommand, LiveStatus, OverlayTarget, VOICE_DRUMS};
 
 use crate::clock;
 use crate::transport::Transport;
@@ -247,6 +247,11 @@ pub enum Event {
     ToggleSeqOverlay,
     /// Any DAW/PRESET mode switch exits both overlays (D21).
     ExitOverlays,
+    /// Addition B (D26): HTTP-side exact overlay control — `Mix`/`Seq`
+    /// enter (idempotent), `None` exits like [`Event::ExitOverlays`].
+    /// Never toggles, so a stale view on the web can't flip state by
+    /// pressing twice.
+    SetOverlay(OverlayTarget),
     /// D22: physical fader move (1-based index, 0..=127). The feeder forwards
     /// these unconditionally; they are only interpreted while MIX is on.
     MixFader {
@@ -641,6 +646,9 @@ impl EngineCore {
                     remote_ev.push_back(TimedEvent::now(Event::SelectVoice { voice: v }));
                 }
                 EngineCommand::RenameTake { from, to } => self.rename_take(&from, &to),
+                EngineCommand::SetOverlay(t) => {
+                    remote_ev.push_back(TimedEvent::now(Event::SetOverlay(t)));
+                }
                 _ => {} // non_exhaustive: future commands ignored
             }
         }
@@ -932,6 +940,30 @@ impl EngineCore {
                 self.set_overlay(Overlay::None);
                 self.detail = None;
             }
+            Event::SetOverlay(target) => match target {
+                // Anti-brick exact-state entry (D26 Addition B): idempotent,
+                // and SEQ keeps the same DAW-mode refusal as the hardware
+                // toggle (review P2-5) — an unusable overlay is not an exit.
+                OverlayTarget::None => {
+                    self.set_overlay(Overlay::None);
+                    self.detail = None;
+                }
+                OverlayTarget::Mix if self.overlay != Overlay::Mix => {
+                    self.set_overlay(Overlay::Mix);
+                    self.confirm(synth, CONFIRM_KICK);
+                }
+                OverlayTarget::Seq if self.overlay != Overlay::Seq => {
+                    if self.live.daw_mode.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    // Same known-cursor entry as the hardware toggle.
+                    self.seq_bar = 0;
+                    self.seq_half = false;
+                    self.set_overlay(Overlay::Seq);
+                    self.confirm(synth, CONFIRM_TOM);
+                }
+                _ => {} // already in the requested state
+            },
             Event::MixFader { index, value } => {
                 // D22 page: F1–F4 → track 1–4 gain. F5–F9 unused until the
                 // model grows past 4 channels (R2). Inert outside MIX.
@@ -1972,6 +2004,57 @@ mod harness_tests {
             h.calls().contains(&Call::NotesOff(0)),
             "voice change kills held lead notes"
         );
+    }
+
+    #[test]
+    fn http_set_overlay_drives_exact_state() {
+        // D26 Addition B (POST /api/overlay/{mix|seq|none}): exact state,
+        // never a toggle — a stale web view pressing twice can't flip it.
+        let mut h = Harness::new();
+        h.tx_cmd
+            .send(EngineCommand::SetOverlay(OverlayTarget::Mix))
+            .unwrap();
+        h.tick(1);
+        assert_eq!(h.core.live.overlay.load(Ordering::Relaxed), 1);
+        h.tx_cmd
+            .send(EngineCommand::SetOverlay(OverlayTarget::Mix))
+            .unwrap();
+        h.tick(1);
+        assert_eq!(
+            h.core.live.overlay.load(Ordering::Relaxed),
+            1,
+            "re-entering MIX is idempotent"
+        );
+        h.tx_cmd
+            .send(EngineCommand::SetOverlay(OverlayTarget::Seq))
+            .unwrap();
+        h.tick(1);
+        assert_eq!(h.core.live.overlay.load(Ordering::Relaxed), 2);
+        // Exit — the anti-brick guarantee — works from any state.
+        h.tx_cmd
+            .send(EngineCommand::SetOverlay(OverlayTarget::None))
+            .unwrap();
+        h.tick(1);
+        assert_eq!(h.core.live.overlay.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn http_set_overlay_seq_refused_in_daw_mode() {
+        // Parity with review P2-5: SEQ entry refuses DAW mode over HTTP
+        // exactly like the hardware toggle. MIX + exit stay available —
+        // that's the part that must never be blocked.
+        let mut h = Harness::new();
+        h.core.live.daw_mode.store(true, Ordering::Relaxed);
+        h.tx_cmd
+            .send(EngineCommand::SetOverlay(OverlayTarget::Seq))
+            .unwrap();
+        h.tick(1);
+        assert_eq!(h.core.live.overlay.load(Ordering::Relaxed), 0);
+        h.tx_cmd
+            .send(EngineCommand::SetOverlay(OverlayTarget::Mix))
+            .unwrap();
+        h.tick(1);
+        assert_eq!(h.core.live.overlay.load(Ordering::Relaxed), 1);
     }
 
     #[test]

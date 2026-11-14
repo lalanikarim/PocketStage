@@ -253,9 +253,24 @@ fn main() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(7777);
+    // ---- DAW keymap (D26 phase 2): load once, share with the HTTP plane ---
+    // NEVER fatal: missing file = defaults; corrupt file = defaults + loud
+    // warning (the slot logs it). The MIDI feeder reads this slot; the
+    // audio thread never does. Phase 3 wires routing to it.
+    let keymap = Arc::new(pocketstage_server::KeymapSlot::open(
+        pocketstage_server::keymap_path(),
+    ));
+    println!(
+        "[init] daw keymap: {} (schema {}, {} voice slots, {} command bindings)",
+        keymap.path().display(),
+        pocketstage_server::KEYMAP_SCHEMA,
+        keymap.get().voices.len(),
+        keymap.get().commands.len(),
+    );
     let http_state =
         AppState::embedded(Arc::clone(&store), ctx, Arc::clone(&live), take_rx, edit_rx)
-            .with_presets(presets);
+            .with_presets(presets)
+            .with_keymap(Arc::clone(&keymap));
     match pocketstage_server::spawn_engine_server(http_state, ([0, 0, 0, 0], port).into()) {
         Ok(()) => println!("[server] control plane on http://0.0.0.0:{port} (LAN-trusted)"),
         Err(e) => eprintln!("[server] NOT started ({e}) — audio unaffected"),
