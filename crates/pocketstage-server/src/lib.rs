@@ -554,8 +554,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/scene/{n}", post(launch_scene))
         .route("/api/voice", post(set_voice))
         .route("/api/presets", get(list_presets))
-        .route("/favicon.svg", get(favicon))
-        // Browsers that skip the <link> tag and probe /favicon.ico.
+        // Browsers that skip the <link> tag still probe /favicon.ico.
         .route("/favicon.ico", get(favicon))
         .route("/api/projects", get(list_projects))
         .route("/api/projects/save_as", post(save_as_project))
@@ -627,16 +626,18 @@ async fn index() -> axum::response::Html<&'static str> {
     axum::response::Html(INDEX_HTML)
 }
 
-const FAVICON_SVG: &str = include_str!("../web/favicon.svg");
+/// The official brand icon from `assets/brand/icons/` — single source of
+/// truth, embedded at compile time (same zero-asset-pipeline policy as
+/// index.html). Do not hand-draw UI icons; the brand kit owns them.
+const FAVICON_ICO: &[u8] = include_bytes!("../../../assets/brand/icons/favicon.ico");
 
-/// Same SVG bytes on both paths; `.ico` browsers sniff the content type.
 async fn favicon() -> Response {
     (
         [
-            (axum::http::header::CONTENT_TYPE, "image/svg+xml"),
+            (axum::http::header::CONTENT_TYPE, "image/x-icon"),
             (axum::http::header::CACHE_CONTROL, "no-cache"),
         ],
-        FAVICON_SVG,
+        FAVICON_ICO,
     )
         .into_response()
 }

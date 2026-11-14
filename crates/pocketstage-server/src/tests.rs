@@ -245,25 +245,32 @@ async fn put_forwards_valid_project_to_engine_channel() {
 }
 
 #[tokio::test]
-async fn favicon_served_on_both_paths() {
+async fn favicon_serves_the_brand_ico() {
     let path = temp_path("favicon");
     cleanup(&path);
     let app = router(test_state(&path));
-    for uri in ["/favicon.svg", "/favicon.ico"] {
-        let res = app
-            .clone()
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK, "{uri}");
-        assert_eq!(
-            res.headers()
-                .get(axum::http::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok()),
-            Some("image/svg+xml"),
-            "{uri} content type"
-        );
-    }
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/favicon.ico")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("image/x-icon"),
+        "content type"
+    );
+    // Payload is the brand kit file itself (ICONDIR header, type 1).
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    assert_eq!(&bytes[..4], &[0, 0, 1, 0], "ICO header");
 }
 
 #[tokio::test]
