@@ -166,6 +166,12 @@ hardware smoke passed. Voice picker on the web shipped (§6 item 18: `POST
 /api/voice`; labels read from the loaded soundfont via boot-time FFI preset
 catalog → `GET /api/presets` — a hand-typed GM table mislabelled every pick
 and was deleted; voice stays a bare GM program, no `{sfont,bank,program}`
-refs yet).
-Next software candidate: §6 item 15 (live-apply web mixer edits). The rest (§6 items 14 + 16 ear-checks) is hardware-gated:
-pedal CC probe, Pi validation + deployment kit.
+refs yet; labels NEVER hand-typed again — UI icons come from the brand
+kit at `assets/brand/icons/`). Session 13 also froze the DAW-keymap plan
+(D26/D26.1): schema v0.1 in `specs/daw-keymap.md` — unified source object
+(`{"note":N}`/`{"cc":N}`+port), unit personality pinned to N1/N2
+plain-MIDI, knobs section empty-allowed, PRESET routing unrepresentable;
+phases 1–4 ready, T7 probe gates knob/bank work. Next software candidate:
+§6 item 15 (live-apply web mixer edits); keymap phase 1 is also ready if
+touched at all. Hardware-gated: §6 items 14 + 16 ear-checks, pedal CC
+probe, T7 probe, Pi validation + deployment kit.

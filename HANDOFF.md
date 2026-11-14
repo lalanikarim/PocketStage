@@ -2,6 +2,11 @@
 
 > Created: 2026 – session handoff for continuing work after folder rename.
 > Read this first, then read `specs/brainstorming/scratchpad.md` (the full design brainstorm).
+> **Latest: session 13** — voice picker + font preset catalog (`GET
+> /api/presets`), brand-kit favicon, library housekeeping, DAW-keymap
+> schema v0.1 frozen (D26/D26.1). The paragraph below is historical
+> session-8 status; §6 (backlog), §7 (decisions), §9 (resume) and §10
+> (session log) are current.
 
 **Status (session 8):** spike validated (0 xruns, ~1 % CPU) · model crate + CI ·
 MIDI core (parser/hotplug/pump) · **oxygen input mapper DONE incl. hardware probes
@@ -574,22 +579,29 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 
 ## 9. How to resume (suggested prompt for next session)
 
-> Read HANDOFF.md (§3 state, §6 backlog items 14–16, §7 decisions D21–D25)
-> and AGENTS.md. Sessions 11b+11c implemented D25 (one voice at a time: DAW
-> white-key browser with Drums on the lowest C, melodic pads play the voice,
-> kit spans notes 36–51 in Drums mode, active_voice persisted) under the
-> unified note rule (pads are plain notes — one feeder stream; hardware
-> scene launching removed → web/HTTP; overlay commands on black keys G#3/
-> A#3, +C#4/D#4 while SEQ lives) — 154 tests, all gates green. Next software
-> candidate: §6 item 15 (web mixer edits should apply live without Save).
-> Everything else is hardware-gated: ear-check lists in §6 items 14 + 16
-> (sessions 8–11 features), pedal probe, Pi validation. Software niceties:
-> live CC values in the /ws frame, fader ramp smoothing, pitch-per-step SEQ
-> editing (deferred). Live env: engine runs detached on :7777, project
-> library in ~/.pocketstage/projects (session-13 housekeeping done: "Gig"
-> test snapshot deleted, "UI Test Clip" removed, track-1 FX rides reset to
-> font defaults; Take 1–2 kept as real recordings; favicon now served from
-> the brand kit).
+> Read HANDOFF.md (§6 backlog, §7 decisions through D26.1) and AGENTS.md.
+> Session 13 wrap: voice picker shipped (POST /api/voice + dropdown), then
+> hotfixed — labels now read from the LOADED SOUNDFONT via boot-time FFI
+> preset catalog (`Synth::preset_list` → `GET /api/presets`); a hand-typed
+> GM table had mislabelled most picks (engine was always innocent —
+> `examples/voice_ref.rs` renders ground truth). Rule: UI labels/icons come
+> from the font and the brand kit, never hardcoded. DAW-keymap plan fully
+> decided: schema **v0.1 FROZEN** (specs/daw-keymap.md; rulings scratchpad
+> R14 + addendum; D26/D26.1) — unified note/cc+port source object, typed
+> sections, knobs empty-allowed (param targets additive later), unit
+> personality pinned N1/N2 plain-MIDI, PRESET routing unrepresentable by
+> construction; phases 1–4 implementation-ready, T7 probe (six MKV
+> personalities × both ports) gates knob/bank consumption. Favicon from
+> brand kit (single 48px — multi-size is an open nicety). Housekeeping
+> done: library clean (Gig + UI Test Clip removed, Takes 1–2 kept).
+> **Next software candidate: §6 item 15 (live-apply web mixer edits)**;
+> keymap phase 1 (pure `DawKeymap`+`Source` in oxygen) also ready. 166
+> tests, all gates green. Hardware-gated backlog: ear-checks (§6 items
+> 14+16), pedal probe, T7, Pi validation. Software niceties: live CC
+> values in /ws, fader ramp smoothing, pitch-per-step SEQ editing,
+> VOICES labels from catalog, multi-size favicon. Live env: engine runs
+> detached on :7777 (`pkill -x pocketstage-eng` — see AGENTS gotchas);
+> project library in ~/.pocketstage/projects (Default only).
 
 ---
 
