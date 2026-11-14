@@ -883,4 +883,6 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   dropdown generated from the loaded font (fallback `gm N`). Single-writer
   intact: catalog built on the main thread pre-audio, immutable after.
   Engine-restart discipline documented (pkill self-match + 15-char comm
-  truncation gotchas in AGENTS.md). 165 tests, gates green.
+  truncation gotchas in AGENTS.md). Favicon added: web/favicon.svg embedded
+  via include_str!, served at /favicon.svg + /favicon.ico (svg content
+  type), linked from the UI head. 166 tests, gates green.

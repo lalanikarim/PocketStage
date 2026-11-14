@@ -554,6 +554,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/scene/{n}", post(launch_scene))
         .route("/api/voice", post(set_voice))
         .route("/api/presets", get(list_presets))
+        .route("/favicon.svg", get(favicon))
+        // Browsers that skip the <link> tag and probe /favicon.ico.
+        .route("/favicon.ico", get(favicon))
         .route("/api/projects", get(list_projects))
         .route("/api/projects/save_as", post(save_as_project))
         .route("/api/projects/load", post(load_project))
@@ -622,6 +625,20 @@ const INDEX_HTML: &str = include_str!("../web/index.html");
 
 async fn index() -> axum::response::Html<&'static str> {
     axum::response::Html(INDEX_HTML)
+}
+
+const FAVICON_SVG: &str = include_str!("../web/favicon.svg");
+
+/// Same SVG bytes on both paths; `.ico` browsers sniff the content type.
+async fn favicon() -> Response {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/svg+xml"),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+        ],
+        FAVICON_SVG,
+    )
+        .into_response()
 }
 
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {

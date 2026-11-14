@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- PocketStage: stage-light bars on the app's dark card, accent = --acc.
+       Intentionally coarse: stays legible at 16x16 favicon size. -->
+  <rect width="32" height="32" rx="7" fill="#111417"/>
+  <rect x="6"  y="16" width="5" height="10" rx="2" fill="#8a939d"/>
+  <rect x="13" y="10" width="5" height="16" rx="2" fill="#e6e9ec"/>
+  <rect x="20" y="5"  width="5" height="21" rx="2" fill="#3ddc84"/>
+</svg>

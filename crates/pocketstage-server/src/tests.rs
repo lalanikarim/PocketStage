@@ -245,6 +245,28 @@ async fn put_forwards_valid_project_to_engine_channel() {
 }
 
 #[tokio::test]
+async fn favicon_served_on_both_paths() {
+    let path = temp_path("favicon");
+    cleanup(&path);
+    let app = router(test_state(&path));
+    for uri in ["/favicon.svg", "/favicon.ico"] {
+        let res = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{uri}");
+        assert_eq!(
+            res.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("image/svg+xml"),
+            "{uri} content type"
+        );
+    }
+}
+
+#[tokio::test]
 async fn presets_route_serves_catalog() {
     let path = temp_path("presets");
     cleanup(&path);
