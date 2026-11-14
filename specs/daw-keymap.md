@@ -229,8 +229,12 @@ scratchpad R14 + HANDOFF §7.
 1. **Global vs per-project keymap.** ✅ RULING: **global**
    (`~/.pocketstage/keymap.json`) — bindings belong to the keyboard, not
    the song.
-2. **Binding targets.** ✅ RULING: **keys + fader buttons only**; no
-   knobs/raw-CC (tap-vs-ride semantics, nobody asked).
+2. **Binding targets.** ✅ RULING: **keys + fader buttons only** (v0);
+   no knobs/raw-CC (tap-vs-ride semantics, nobody asked).
+   *Rectified by v0.1 the same session:* CC is now a first-class source
+   and the `knobs` section ships shaped-but-empty — knob **target**
+   semantics remain out of scope (deferred to T7 + D22 MIX-as-data), so
+   the spirit of the ruling holds. Addendum in scratchpad R14 governs.
 3. **Audition pitch for arbitrary voice bindings.** ✅ RULING: **WYSIWYG**
    — the pressed pitch sounds on the bound voice.
 4. **Preset-mode overlay commands follow the remap?** ✅ RULING: **yes** —

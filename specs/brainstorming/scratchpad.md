@@ -736,7 +736,9 @@ questions; schema v0 is frozen exactly as drafted there, plus two additions:
 - **Q1 global**, not per-project — bindings belong to the keyboard, not the
   song. File `~/.pocketstage/keymap.json` (`POCKETSTAGE_KEYMAP` override).
 - **Q2 keys + fader buttons only.** No knobs/raw-CC targets (would drag in
-  tap-vs-ride semantics; nobody asked).
+  tap-vs-ride semantics; nobody asked). *[Rectified by the v0.1 addendum
+  below: CC sources + empty `knobs` section are in; knob target semantics
+  stay out until T7 — the ruling's intent survives.]*
 - **Q3 audition = WYSIWYG** — the pressed pitch sounds on the bound voice,
   matching how keys behave everywhere else.
 - **Q4 one map drives both modes' commands** — G#3/A#3-style overlay entry

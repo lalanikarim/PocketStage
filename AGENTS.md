@@ -92,6 +92,12 @@ Rules that keep this architecture intact:
   project sets them (`None` = touch nothing). `Settings` must outlive `Synth`.
 - Uninhabited enums are the opaque-type idiom for C handles; `#[repr(C)]` on
   them is compile error E0084.
+- **File-edit indent traps**: exact-match edits fail (or land mis-indented)
+  when continuation-line whitespace is guessed. The markdown docs wrap at
+  ~76–80 cols with **2-space** continuation indents under bullets — but not
+  uniformly, so don't assume. Read the exact lines before editing, and check
+  `git diff` after every edit call; fix mis-indents immediately rather than
+  stacking more edits on top.
 - **`pkill -f <pattern>` self-matches**: the pattern also appears in the
   command line of the very shell running it (and of prior wrapper shells), so
   pkill kills its own process (exit 143) and may take unrelated wrappers down

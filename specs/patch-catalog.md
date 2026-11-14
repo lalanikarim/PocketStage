@@ -110,7 +110,7 @@ back to) with a message that names the exact expected path.
 | **B** | Catalog core: FFI additions, scan dir + eager load, preset iteration, `GET /api/patches`, `has_percussion` flags | fake-backend harness can't cover FFI — pure catalog-shape logic (dedup, naming, fallback resolution fn) unit-tested; thin FFI walk verified by device smoke |
 | **C** | Patch references: `PatchRef` in model (+variants above), boot/swap/select via `program_select_by_sfont_name`, full fallback chain + `/ws` warning badge | resolution logic as a pure function over `Catalog` — table-driven CI tests incl. every fallback rung |
 | **D** | Patch browser UI: grouped/searchable list, **audition on ch 7** (`POST /api/preview`), voice picker fed from catalog; track instrument pickers | item 19 closes |
-| **E** | `POST /api/soundfonts/rescan` (diff by name; removed fonts STAY loaded until reboot — safe rule) + keymap `voices[]` → patch refs (feeds D26 phase E) | rescan during playback = add-only semantics |
+| **E** | `POST /api/soundfonts/rescan` (diff by name; removed fonts STAY loaded until reboot — safe rule) + keymap `voices[]` → patch refs (this patch-catalog phase feeds the D26 keymap's `voice` field via Addition A's externally-tagged enum) | rescan during playback = add-only semantics |
 | **F** | Soundfont upload endpoint (multipart → scan dir → rescan) | size cap ~512 MB, `.sf2/.sf3` only; LAN-trust unchanged |
 
 ## Residual open questions (non-blocking)
