@@ -149,6 +149,12 @@ pad-note range. **Pads are NOT special** (user rule): the feeder merges Key
 and Pad actions into one raw-note stream — no pad lane, hardware scene
 launching removed (web/HTTP only); overlay enter/exit on black-key command
 notes G#3/A#3 (+ C#4/D#4 SEQ management while live), ordinary voice notes
-elsewhere; `active_voice` persists. 154 tests, CI gates green. Next software candidate: §6 item 15 (live-apply
+elsewhere; `active_voice` persists. Session 12: full-code review sweep —
+voice re-applied after project swap, `Track.channel` overrides honored
+everywhere (Stop also kills LEAD_CH), `SelectVoice` silences held notes,
+project persist atomic under concurrent writers (+ `.ps-tmp-*` sweep),
+take event/name validation, SEQ overlay refused in DAW mode; findings +
+residual edges documented in `CODE_REVIEW.md`. 162 tests, CI gates green,
+hardware smoke passed. Next software candidate: §6 item 15 (live-apply
 web mixer edits). The rest (§6 items 14 + 16 ear-checks) is hardware-gated:
 pedal CC probe, Pi validation + deployment kit.
