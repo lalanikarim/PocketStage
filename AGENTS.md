@@ -92,6 +92,11 @@ Rules that keep this architecture intact:
   project sets them (`None` = touch nothing). `Settings` must outlive `Synth`.
 - Uninhabited enums are the opaque-type idiom for C handles; `#[repr(C)]` on
   them is compile error E0084.
+- **`pkill -f <pattern>` self-matches**: the pattern also appears in the
+  command line of the very shell running it (and of prior wrapper shells), so
+  pkill kills its own process (exit 143) and may take unrelated wrappers down
+  with it. Kill by PID instead: `pkill -x pocketstage-engine` (exact process
+  name, no `-f`) or `kill $(pgrep -x pocketstage-engine)`.
 
 ## Device facts (dev box)
 
