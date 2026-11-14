@@ -1,7 +1,9 @@
 # DAW keymap — configurable DAW-mode bindings (multiphase plan)
 
-**Status: PHASE 0 DONE — schema v0 FROZEN (session 13). Phases 1–4 ready to
-implement. Decision D26 recorded in scratchpad R14 + HANDOFF §7.**
+**Status: PHASE 0 DONE — schema v0.1 FROZEN (session 13; v0 rectified after
+MKV docs review — see schema section). Phases 1–4 ready to implement,
+T7 probe gates knob/bank consumption. Decision D26 in scratchpad R14 +
+HANDOFF §7.**
 Requested session 12: "configure DAW mode key and button mappings so we can
 manage it in a json file … what we don't want to allow remapping is Preset
 mode." All seven open questions answered (rulings at each Q below); no code
@@ -29,36 +31,93 @@ edit, hot-reloaded without engine restart.
   stays a separate concept/file from this *semantic* layer. Optional
   exposure in phase 5 (Q7).
 
-## Proposed storage & schema (draft v0)
+## Storage & schema — **v0.1 FROZEN (rectification of v0, session 13)**
+
+v0 was re-frozen as v0.1 BEFORE any code or keymap file existed — the one
+free moment to change shape. Reason: docs review (Oxygen MKV User Guide
+v1.2) showed DAW mode's primary controls include knobs (CC sources, HUI
+port), which v0's note-only binding shape could not express without two
+permanent binding paradigms. v0.1 freezes the SOURCE vocabulary once.
 
 File: `~/.pocketstage/keymap.json` — global device config, NOT per-project
 (bindings belong to the keyboard, not the song; Q1 if that changes).
 
+**Source object (frozen vocabulary — all bindings everywhere use it):**
+
+```json
+{ "note": 36 }                 // keybed/pad note (music or HUI port)
+{ "cc": 44 }                   // knob/fader CC
+{ "note": 56, "port": "hui" }  // optional qualifier: "music" | "hui" | absent = any
+```
+
+Notes and CCs are disjoint number spaces — dup-detection is per space;
+note 44 and cc 44 may coexist. `port` defaults to any; it exists because
+measured ground truth routes DAW-mode controls on the HUI port and keys/
+pads on the music port.
+
 ```json
 {
   "voices": [
-    { "note": 36, "voice": "drums",          "label": "Drums" },
-    { "note": 38, "voice": { "program": 0 }, "label": "Grand Piano" }
+    { "source": { "note": 36 }, "voice": "drums",          "label": "Drums" },
+    { "source": { "note": 38 }, "voice": { "program": 0 }, "label": "Grand Piano" }
   ],
-  "commands": {
-    "mix_toggle":   56,
-    "seq_toggle":   58,
-    "seq_next_bar": 61,
-    "seq_flip":     63
-  },
-  "fader_buttons": [null, null, null, null]
+  "commands": [
+    { "source": { "note": 56 }, "command": "mix_toggle" },
+    { "source": { "note": 58 }, "command": "seq_toggle" },
+    { "source": { "note": 61 }, "command": "seq_next_bar" },
+    { "source": { "note": 63 }, "command": "seq_flip" }
+  ],
+  "fader_buttons": [
+    { "source": { "cc": 49, "port": "hui" }, "command": "bank_prev" },
+    { "source": { "cc": 50, "port": "hui" }, "command": "bank_next" }
+  ],
+  "knobs": []
 }
 ```
 
-- `voices`: explicit note→`ActiveVoice` bindings; any notes legal (the
-  browser is no longer tied to white-key geometry). Defaults reproduce
-  today's C2..G3 / 12-slot table exactly.
-- `commands`: the four overlay commands, semantics unchanged, rebindingable.
-- `fader_buttons`: optional command-per-fader-button bindings (Q2).
-- Validation rules (same discipline as `Mapping`): `deny_unknown_fields`;
-  notes 0..=127; programs 0..=127; **no note claimed twice** across
-  voices+commands+button targets; label length cap. Invalid file → reject
-  PUT with the message, keep running config.
+- `voices`: source→`ActiveVoice` bindings; any notes legal (browser no
+  longer tied to white-key geometry). Defaults reproduce today's C2..G3 /
+  12-slot table exactly. `voice` stays an externally-tagged enum
+  (`"drums"` | `{"program": N}`) — Addition A: item 19 may add
+  `{"patch": …}` without breaking files.
+- `commands`: command vocabulary FROZEN at:
+  `mix_toggle`, `seq_toggle`, `seq_next_bar`, `seq_flip`,
+  `bank_prev`, `bank_next` (last two = MIX-overlay paging, mirroring the
+  documented `<`/`>` track-bank scroll; no default binding in built-in
+  defaults until T7 measures the real notes). Momentary semantics.
+- `fader_buttons`: per-button command bindings (Q2), source is a CC on
+  the HUI port per measured map.
+- `knobs`: **section-shaped, ships empty.** Target semantics are
+  continuous parameters, NOT momentary commands — deliberately NOT frozen
+  in v0.1 (Q-V2a): parameter naming (`{"param": {"track": N, "target":
+  "gain"}}`-style) is an intended-shape follow-up amendment informed by
+  T7 + the D22 MIX-overlay endgame (MIX mapping becomes data). Adding the
+  `param` target later is additive; the SOURCE side needed no change —
+  that's what freezing the source vocabulary buys.
+- Validation (same discipline as `Mapping`): `deny_unknown_fields`; notes
+  0..=127, CCs 0..=127, programs 0..=127; no source claimed twice within
+  each space (note/cc, port-aware); label length cap. Invalid file →
+  reject PUT with the message, keep running config.
+- **No version field** (Q-V3): phase 1 code stamps `SCHEMA = 1` internally
+  when it ships; a version gate on an unimplemented schema is ceremony.
+  First real incompatible change adds the explicit gate, ProjectFile-style.
+
+## Device personality pinning & T7 (new in v0.1)
+
+The MKV guide documents DAW mode as six factory personalities (NC1/NC2/
+M|h Mackie variants, N1/N2 plain-MIDI, N3 Ableton clip-launch), selected
+SHIFT+DAW/PRESET + `<`/`>`, **not user-editable, no readback**. Our
+keymap is only valid for one selection → **pin N1 or N2** (plain CC;
+no Mackie/HUI protocol emulation — hard non-goal). Setup docs must state
+the required unit configuration.
+
+**T7 probe (hardware, before phases 3–4 consume knob/bank bindings):**
+capture what each of the six personalities emits on both ports; whether
+the documented SHIFT+pad knob submodes (Volume/Pan/Device/Sends) change
+CC numbers or only meaning (device-local state is invisible to us — no
+readback); confirm `<`/`>` bank-scroll messages for default bindings.
+Non-goals reaffirmed: HUI protocol emulation; mirroring device-local knob
+submode state; N3 pad semantics (conflict with D25 unified note rule).
 
 ## Reload architecture (keeps R5)
 
@@ -80,19 +139,26 @@ keymap. Stats/`/ws` may mirror a `keymap_version` counter for UI feedback.
 ### Phase 0 — decisions ✅ DONE (session 13)
 
 Q1–Q7 answered (rulings at each Q below, rationale in scratchpad R14).
-Schema v0 frozen as drafted, plus: `voice` stays an externally-tagged enum
-for item-19 forward compat (Addition A), and phase 2 must ship
-`POST /api/overlay/{mix|seq|none}` (Addition B). D26 written to scratchpad
-R14 + HANDOFF §7.
+Q1–Q7 answered; schema then RECTIFIED to v0.1 the same session after the
+MKV User Guide review (knobs are CC sources on the HUI port — v0's
+note-only shape couldn't express them). v0.1 = frozen source object
+(`{"note":N}` / `{"cc":N}` + optional `port`), typed sections sharing it,
+command vocabulary incl. bank_prev/next, knobs section shaped-but-empty,
+no version field. `voice` stays externally-tagged (Addition A); phase 2
+must ship `POST /api/overlay/{mix|seq|none}` (Addition B). D26 in
+scratchpad R14 + HANDOFF §7.
 
 ### Phase 1 — `DawKeymap` struct (oxygen crate, pure + serde)
 
-- Structs: `DawKeymap`, `VoiceBinding`, `CommandBindings`; `default()` =
+- Structs: `DawKeymap`, `Source` (frozen v0.1 enum: note/cc + optional
+  port), `VoiceBinding`, `CommandBinding`, `FaderButtonBinding`,
+  `KnobBinding` (empty-allowed, no target semantics yet); `default()` =
   today's table; `validate()` with human errors; `from_json_str` /
-  `to_json_string`; duplicate-note detection as a method (needed by UI too).
+  `to_json_string`; per-space duplicate detection as a method (needed by
+  UI too).
 - Tests (device-free, CI): defaults serialize→parse round-trip; unknown
-  field rejected; dup notes rejected across all three sections; old/empty
-  file → defaults; program/note range checks.
+  field rejected; dup sources rejected within each space (note/cc,
+  port-aware); empty file → defaults; program/note/cc range checks.
 - Acceptance: `cargo test -p pocketstage-oxygen` green; no engine changes.
 
 ### Phase 2 — persistence + HTTP control plane (server crate)

@@ -759,3 +759,32 @@ questions; schema v0 is frozen exactly as drafted there, plus two additions:
 Hard invariants re-stated: PRESET routing unrepresentable by construction;
 keymap consumed by the main-thread feeder only (R5); corrupt/missing file
 falls back to built-in defaults with a loud log line, never fails boot.
+
+### R14 addendum — schema v0 → v0.1 rectification (same session, FROZEN)
+
+MKV User Guide v1.2 review: DAW mode is six factory personalities
+(NC1/NC2/M|h Mackie/HUI, N1/N2 plain-MIDI, N3 Ableton clip-launch),
+selected SHIFT+DAW/PRESET + <>, NOT user-editable, no readback. Its
+documented control set centers on KNOBS (CC sources, HUI port; Volume/
+Pan/Device/Sends submodes via SHIFT+pads) and bank-scroll <> buttons —
+v0's note-only binding shape would have needed a second permanent binding
+paradigm. No keymap file or parser existed yet → re-freeze was free.
+
+**D26.1 (locked, Option B):** unified frozen SOURCE object —
+`{"note":N}` | `{"cc":N}` + optional `"port":"music"|"hui"` (default any;
+measured map routes DAW controls on HUI, keys/pads on music). Typed
+sections (`voices`, `commands`, `fader_buttons`, `knobs`) all consume the
+same source type. Command vocabulary frozen incl. `bank_prev`/`bank_next`
+(MIX-overlay paging, no default binding pre-T7). `knobs` section-shaped,
+ships EMPTY: continuous param-target naming deliberately unfrozen (Q-V2a)
+— informed by T7 + the D22 endgame of MIX mapping-as-data; adding a
+`param` target later is additive with zero source-side change. No version
+field until phase 1 stamps SCHEMA=1 (Q-V3). Dup-detection per number
+space, port-aware.
+
+**Personality pinning:** PocketStage requires the unit set to N1 or N2
+(plain CC); Mackie/HUI protocol emulation and N3 pad semantics (breaks
+D25) are hard non-goals; device-local knob submode state can't be
+mirrored (no readback). **T7 probe** (all six personalities × both ports,
+knob-submode wire behavior, <> message capture) gates phases 3–4 for
+knob/bank bindings.

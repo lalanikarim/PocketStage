@@ -447,7 +447,14 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     field stays externally-tagged for item-19 patch refs) + Addition B
     (`POST /api/overlay/{mix|seq|none}` required in phase 2, anti-brick).
     PRESET routing unrepresentable by construction. Rulings: scratchpad
-    R14; plan `specs/daw-keymap.md`. **Phases 1–4 ready to implement.**
+    R14 (+ addendum); plan `specs/daw-keymap.md`. **Schema re-frozen as
+    v0.1 same session** (docs review: MKV DAW mode = six factory
+    personalities, knobs are CC-on-HUI sources) — unified source object
+    note/cc+port, typed sections, knobs section empty-allowed (param
+    targets additive later), bank_prev/next commands named, unit pinned
+    N1/N2 plain-MIDI, T7 probe (six personalities × both ports) gates
+    knob/bank consumption in phases 3–4. **Phases 1–4 ready to
+    implement.**
 18. **Voice picker on the web — DONE** (`POST /api/voice` accepting the
     model's `ActiveVoice` serde form (`"drums"` | `{"program": N}`, >127 →
     400); `EngineCommand::SelectVoice` runs as the ordinary
@@ -507,7 +514,8 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D23 | **SEQ overlay** (R12): live step programmer — bank-1 pads 1–8 toggle steps of an 8-step window on the selected track; bank 2 keeps commands (pad 10 exit, pad 11 next bar, pad 12 flip half-window); edits quantize to the engine's 16th grid | ✅ Implemented (s11) |
 | D24 | **Write-through lane** (R12): engine-originated project edits flow out on a dedicated mpsc to the store (debounced), never back in — single writer intact; engine applies edits locally first. Debounce is sample-counted in the engine; the server drain coalesces bursts to one persist. First rider: CycleLoopBars — B-key survives reboot now (event itself removed by D25) | ✅ Implemented (s11) |
 | D25 | **One voice at a time** (session 11 feedback; supersedes D12's always-on kit layer + D13's pitch%12 browser): PRESET has exactly ONE active performance voice. Selection = DAW-mode white-key browser anchored at C2 — slot 0 is Drums, next 11 white keys are the curated GM patches; black keys carry only overlay commands. Melodic voice: all 49 keys play it and pad presses are melody notes too (pads transmit plain notes 36–51, nothing to disambiguate). Drums voice: notes 36–51 = kit across both banks (`drum_kit_2` additive field; bank-2 channels mirror bank 1 — same kill group, documented trade-off), other notes silent. Overlay enter/exit = black-key command notes (G#3 MIX, A#3 SEQ; +C#4 next bar, D#4 flip while SEQ lives), armed in either mode — a follow-up to the user's unified-note rule replaced the earlier "DAW pads 9/10" scheme and REMOVED hardware scene launching (web UI / HTTP only): with one note stream, notes 36–51 cannot be both instrument and buttons. Voice persists via `Project.active_voice` + write-through; mirrored on `LiveStatus.active_voice` (VOICE_DRUMS sentinel) → /ws + stats + UI | ✅ Implemented (s11b), ear-checks owed |
-| D26 | **Configurable DAW keymap** (R14): global `~/.pocketstage/keymap.json` maps note→voice / note→command for DAW mode (+ fader buttons optional); same map drives overlay commands inside PRESET; PRESET instrument routing NOT expressible in schema (can't-be-remapped by construction); feeder-only consumption (R5), corrupt file → defaults never-fail boot; manual note entry v1; voice field externally-tagged for future patch refs | ✅ Phase 0 frozen (s13), phases 1–4 ready |
+| D26 | **Configurable DAW keymap** (R14 + addendum): global `~/.pocketstage/keymap.json`, schema **v0.1** — unified frozen SOURCE object (`{"note":N}`/`{"cc":N}` + optional port) consumed by typed sections (voices/commands/fader_buttons/knobs-empty); same map drives overlay commands inside PRESET; PRESET instrument routing NOT expressible (can't-be-remapped by construction); feeder-only consumption (R5), corrupt file → defaults never-fail boot; manual note entry v1; voice field externally-tagged for future patch refs; unit personality PINNED to N1/N2 plain-MIDI (no Mackie/HUI emulation, no N3) | ✅ v0.1 frozen (s13); phases 1–4 ready, T7 probe gates knob/bank |
+| D26.1 | **Schema rectification v0→v0.1** (R14 addendum, locked Option B): re-frozen pre-code after MKV docs review showed knobs (CC/HUI) are DAW mode's primary controls; command vocab incl. bank_prev/next; knob param-target semantics intentionally unfrozen (additive later); no version field until phase 1 ships SCHEMA=1 | ✅ (s13) |
 
 ---
 
