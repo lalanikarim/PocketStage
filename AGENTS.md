@@ -41,7 +41,7 @@ in CI or automated loops; there are no device-free integration tests for it yet.
 | `crates/pocketstage-engine` | audio callback thread, clock, FFI, metrics | `alsa`, `libc`, hand-written FluidSynth FFI |
 | `crates/pocketstage-model` | project data model + versioned file format | serde/serde_json/thiserror **only** — no audio, no MIDI, no I/O side effects |
 | `crates/pocketstage-midi` | port discovery, streaming parser, hotplug, event pump (`spawn_pump` → mpsc) | `alsa`, `libc`; parser is pure |
-| `crates/pocketstage-oxygen` | Oxygen 49 MKV input mapper (measured map → semantic `Action`s) | pure logic + serde; demo bin uses the midi pump. LED feedback pending T2 |
+| `crates/pocketstage-oxygen` | Oxygen 49 MKV input mapper (measured map → semantic `Action`s) | pure logic + serde; demo bin uses the midi pump (LED output dropped — T2 found no host-controllable LED protocol) |
 | `pocketstage-server` | axum HTTP control plane: REST project CRUD, `/ws` status push, take persistence | `axum`, `tokio`, model — never audio |
 
 Rules that keep this architecture intact:
@@ -130,48 +130,29 @@ Rules that keep this architecture intact:
   (quoting, `$`, backticks, trailing-whitespace edits). A written file can be
   inspected, edited, and reused.
 
-## Current status snapshot
+## Standing design laws (permanent; details in the cited decisions)
 
-See `HANDOFF.md` §6 for the authoritative ordered backlog. As of this writing
-(session 10 wrap): full performance loop ✅ — record/overdub (D16/D18),
-looping takes, PRESET/DAW modes (D11–D15), hardware-style retrigger (D17),
-pure tested `transport.rs` state machine, render-loop no-panic law (D20)
-with ps-audio watchdog. Web control plane complete for v0.1: REST + `/ws`,
-remote transport/scene triggers, mixer + FX sends, clip matrix + step
-editor, structure CRUD, take mute/solo/rename/delete/clear-all, project
-library with switch/save-as/export (D19). Session 10: device-free engine
-harness (`core.rs` — `SynthBackend` trait + fake synth driving
-`EngineCore::period()` in CI), global FX knobs, JSON drum kits. Session 10c
-hotfix: fixed the float→i16 render conversion (was saturating 95–99% of
-samples into a square wave; see `HANDOFF.md` §8/§10); synth gain rebased to
-0.3. Session 11 implemented R12 (D21–D24): write-through lane (engine →
-debounced outbound snapshots → store), MIX overlay (faders/knobs → mixer,
-fader-button detail pages) and SEQ overlay (bank-1 step programmer over the
-active scene) — voice-confirmed overlay toggles; overlay state surfaces in
-`/ws` + stats. Session 11b implemented D25 (one voice at a time): PRESET
-sounds exactly one instrument; DAW mode is a white-key voice browser (C2 =
-Drums, next 11 white keys = GM patches); melodic voices play all 49 keys
-including pad-transmitted notes 36–51; Drums arms a 16-hit kit across the
-pad-note range. **Pads are NOT special** (user rule): the feeder merges Key
-and Pad actions into one raw-note stream — no pad lane, hardware scene
-launching removed (web/HTTP only); overlay enter/exit on black-key command
-notes G#3/A#3 (+ C#4/D#4 SEQ management while live), ordinary voice notes
-elsewhere; `active_voice` persists. Session 12: full-code review sweep —
-voice re-applied after project swap, `Track.channel` overrides honored
-everywhere (Stop also kills LEAD_CH), `SelectVoice` silences held notes,
-project persist atomic under concurrent writers (+ `.ps-tmp-*` sweep),
-take event/name validation, SEQ overlay refused in DAW mode; findings +
-residual edges documented in `CODE_REVIEW.md`. 162 tests, CI gates green,
-hardware smoke passed. Voice picker on the web shipped (§6 item 18: `POST
-/api/voice`; labels read from the loaded soundfont via boot-time FFI preset
-catalog → `GET /api/presets` — a hand-typed GM table mislabelled every pick
-and was deleted; voice stays a bare GM program, no `{sfont,bank,program}`
-refs yet; labels NEVER hand-typed again — UI icons come from the brand
-kit at `assets/brand/icons/`). Session 13 also froze the DAW-keymap plan
-(D26/D26.1): schema v0.1 in `specs/daw-keymap.md` — unified source object
-(`{"note":N}`/`{"cc":N}`+port), unit personality pinned to N1/N2
-plain-MIDI, knobs section empty-allowed, PRESET routing unrepresentable;
-phases 1–4 ready, T7 probe gates knob/bank work. Next software candidate:
-§6 item 15 (live-apply web mixer edits); keymap phase 1 is also ready if
-touched at all. Hardware-gated: §6 items 14 + 16 ear-checks, pedal CC
-probe, T7 probe, Pi validation + deployment kit.
+- **Pads are NOT special** (D25): one unified raw-note stream — Key and Pad
+  actions merge in the feeder; no pad-lane branching. Notes cannot be
+  instrument *and* buttons at once.
+- **The render loop may never panic and never trusts cross-lane data**
+  (D20): `get()`/`is_some_and()` over indexing; state machines in pure
+  tested modules (`transport.rs` pattern); ps-stats watchdogs ps-audio.
+- **UI labels come from the loaded soundfont** (`GET /api/presets`, built
+  by boot-time FFI preset iteration) — never hand-typed tables (a GM list
+  once mislabelled most picks). **UI icons/artwork come from the brand kit**
+  at `assets/brand/icons/` — never hand-drawn.
+- **PRESET-mode routing is not configurable** (D26): by construction, no
+  keymap schema shape expresses it; only DAW-mode semantics are data
+  (`specs/daw-keymap.md`).
+
+## Current status & next work
+
+**This file stays static.** Do not append session updates here. Live state
+lives in:
+
+- `HANDOFF.md` §6 — authoritative ordered backlog (what's next)
+- `HANDOFF.md` §7 — decision log (D# table; ✅ = settled, don't re-litigate)
+- `HANDOFF.md` §9 + §10 — latest session wrap + full session history
+- `specs/*.md` — subsystem plans; scratchpad R-sections — design rationale
+- `CODE_REVIEW.md` — review findings ledger
