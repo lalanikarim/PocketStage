@@ -443,6 +443,19 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     reload; PRESET routing deliberately NOT expressible in the schema so
     it can't be remapped. Full multiphase plan + open questions Q1–Q7 in
     `specs/daw-keymap.md`; answer phase-0 questions before writing code.
+18. **Voice picker on the web — IMPLEMENTS NEXT (patch-catalog phase A)**:
+    dropdown (full GM name table) + `POST /api/voice`; engine SelectVoice +
+    write-through already correct. No catalog dependency — ship first.
+19. **Patch catalog / soundfont sets — PLANNED, implements next after 18**
+    (D27 reserved): runtime catalog built via FluidSynth FFI (preset
+    iteration, no sf2 parser), patches referenced by `{sfont, bank,
+    program}` names, drums from a separate font supported, always-available
+    default font + GM kit with full fallback chain (missing → default →
+    any-with-bank → silence + badge, never a failed boot), preview channel
+    7 for auditioning, phases A–F incl. rescan + upload. Capacity model:
+    12 browser slots are curation only — fonts limited by RAM, budget env
+    guard, lazy activation deferred to Pi numbers.
+    Plan: `specs/patch-catalog.md`.
 
 ---
 
