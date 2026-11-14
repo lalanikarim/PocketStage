@@ -399,6 +399,7 @@ name = "pocketstage-oxygen"
 version = "0.1.0"
 dependencies = [
  "pocketstage-midi",
+ "pocketstage-model",
  "serde",
  "serde_json",
 ]

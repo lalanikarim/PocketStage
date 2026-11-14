@@ -22,11 +22,18 @@
 
 #![forbid(unsafe_code)]
 
+mod keymap;
 mod mapper;
 mod mapping;
 
+pub use keymap::{
+    Command, DawKeymap, FaderButtonBinding, KEYMAP_SCHEMA, KnobBinding, LABEL_MAX, Port, Source,
+    Space, VoiceBinding,
+};
 pub use mapper::{Action, Mapper, Mode};
 pub use mapping::{Mapping, TransportNotes, default_mapping, hui_mapping};
 
+#[cfg(test)]
+mod keymap_tests;
 #[cfg(test)]
 mod tests;

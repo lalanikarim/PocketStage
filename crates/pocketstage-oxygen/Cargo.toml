@@ -7,6 +7,7 @@ description = "M-Audio Oxygen 49 MKV control mapping: measured preset-mode map, 
 
 [dependencies]
 pocketstage-midi = { path = "../pocketstage-midi" }
+pocketstage-model = { path = "../pocketstage-model" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
