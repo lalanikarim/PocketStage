@@ -727,3 +727,35 @@ Layering still works, just sequentially: drums take → switch voice → overdub
 (capture is lane-based). Voice persistence (`Project.active_voice`, additive)
 rides the D24 write-through lane; `LiveStatus.active_voice` (u32 atomic,
 VOICE_DRUMS sentinel) feeds feeder + /ws + stats + UI.
+
+## R14. Configurable DAW keymap — phase 0 decisions (session 13 — D26, FROZEN)
+
+Full plan in `specs/daw-keymap.md`. Phase 0 answered the seven open
+questions; schema v0 is frozen exactly as drafted there, plus two additions:
+
+- **Q1 global**, not per-project — bindings belong to the keyboard, not the
+  song. File `~/.pocketstage/keymap.json` (`POCKETSTAGE_KEYMAP` override).
+- **Q2 keys + fader buttons only.** No knobs/raw-CC targets (would drag in
+  tap-vs-ride semantics; nobody asked).
+- **Q3 audition = WYSIWYG** — the pressed pitch sounds on the bound voice,
+  matching how keys behave everywhere else.
+- **Q4 one map drives both modes' commands** — G#3/A#3-style overlay entry
+  inside PRESET follows the remap (single source of truth). PRESET
+  *instrument* routing stays hardcoded/unexpressible — invariant intact.
+- **Q5 manual note-number entry in v1** — no probe/capture plumbing; raw
+  JSON textarea is the escape hatch; capture is a possible fast-follow.
+- **Q6 any GM program per slot** — labels come from `GET /api/presets`
+  (the session-13 font catalog), so arbitrary programs are free to name.
+- **Q7 device-layer `Mapping` NOT exposed this round** — measured ground
+  truth stays out of reach of UI edits until there's a real need.
+- **Addition A (forward-compat):** the `voice` binding field keeps the
+  tagged serde form (`"drums"` | `{"program": N}`) and must stay an
+  *externally-tagged enum* so item 19's future patch-reference variant
+  (`{"patch": {...}}`) can be added without breaking written keymap files.
+- **Addition B (anti-brick):** `POST /api/overlay/{mix|seq|none}` is
+  REQUIRED in phase 2 — a bad keymap must never trap the user in an
+  overlay; web-side exit must exist before bindings can change.
+
+Hard invariants re-stated: PRESET routing unrepresentable by construction;
+keymap consumed by the main-thread feeder only (R5); corrupt/missing file
+falls back to built-in defaults with a loud log line, never fails boot.

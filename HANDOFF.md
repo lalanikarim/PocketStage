@@ -437,12 +437,17 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     Drums, black-key commands (G#3/A#3 enter/exit overlays in both modes,
     C#4/D#4 SEQ bar/window while live), hardware scene launch REMOVED (web
     UI / HTTP only), voice persistence across reboot.
-17. **Configurable DAW-mode key/button mappings — PLANNED, not started**
-    (session 12 request): JSON-managed DawKeymap (voice browser + overlay
-    commands + optional fader buttons) with web UI management and hot
-    reload; PRESET routing deliberately NOT expressible in the schema so
-    it can't be remapped. Full multiphase plan + open questions Q1–Q7 in
-    `specs/daw-keymap.md`; answer phase-0 questions before writing code.
+17. **Configurable DAW-mode key/button mappings — PHASE 0 DONE, schema v0
+    FROZEN (session 13, D26)**: JSON-managed DawKeymap (voice browser +
+    overlay commands + fader buttons), global `~/.pocketstage/keymap.json`,
+    web-managed, hot-reloaded via KeymapSlot read by the main-thread feeder
+    only. All Q1–Q7 ruled (global / keys+buttons / WYSIWYG audition /
+    one map both modes / manual entry v1 / any GM program — labels from
+    `GET /api/presets` / device Mapping stays closed) + Addition A (voice
+    field stays externally-tagged for item-19 patch refs) + Addition B
+    (`POST /api/overlay/{mix|seq|none}` required in phase 2, anti-brick).
+    PRESET routing unrepresentable by construction. Rulings: scratchpad
+    R14; plan `specs/daw-keymap.md`. **Phases 1–4 ready to implement.**
 18. **Voice picker on the web — DONE** (`POST /api/voice` accepting the
     model's `ActiveVoice` serde form (`"drums"` | `{"program": N}`, >127 →
     400); `EngineCommand::SelectVoice` runs as the ordinary
@@ -502,6 +507,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D23 | **SEQ overlay** (R12): live step programmer — bank-1 pads 1–8 toggle steps of an 8-step window on the selected track; bank 2 keeps commands (pad 10 exit, pad 11 next bar, pad 12 flip half-window); edits quantize to the engine's 16th grid | ✅ Implemented (s11) |
 | D24 | **Write-through lane** (R12): engine-originated project edits flow out on a dedicated mpsc to the store (debounced), never back in — single writer intact; engine applies edits locally first. Debounce is sample-counted in the engine; the server drain coalesces bursts to one persist. First rider: CycleLoopBars — B-key survives reboot now (event itself removed by D25) | ✅ Implemented (s11) |
 | D25 | **One voice at a time** (session 11 feedback; supersedes D12's always-on kit layer + D13's pitch%12 browser): PRESET has exactly ONE active performance voice. Selection = DAW-mode white-key browser anchored at C2 — slot 0 is Drums, next 11 white keys are the curated GM patches; black keys carry only overlay commands. Melodic voice: all 49 keys play it and pad presses are melody notes too (pads transmit plain notes 36–51, nothing to disambiguate). Drums voice: notes 36–51 = kit across both banks (`drum_kit_2` additive field; bank-2 channels mirror bank 1 — same kill group, documented trade-off), other notes silent. Overlay enter/exit = black-key command notes (G#3 MIX, A#3 SEQ; +C#4 next bar, D#4 flip while SEQ lives), armed in either mode — a follow-up to the user's unified-note rule replaced the earlier "DAW pads 9/10" scheme and REMOVED hardware scene launching (web UI / HTTP only): with one note stream, notes 36–51 cannot be both instrument and buttons. Voice persists via `Project.active_voice` + write-through; mirrored on `LiveStatus.active_voice` (VOICE_DRUMS sentinel) → /ws + stats + UI | ✅ Implemented (s11b), ear-checks owed |
+| D26 | **Configurable DAW keymap** (R14): global `~/.pocketstage/keymap.json` maps note→voice / note→command for DAW mode (+ fader buttons optional); same map drives overlay commands inside PRESET; PRESET instrument routing NOT expressible in schema (can't-be-remapped by construction); feeder-only consumption (R5), corrupt file → defaults never-fail boot; manual note entry v1; voice field externally-tagged for future patch refs | ✅ Phase 0 frozen (s13), phases 1–4 ready |
 
 ---
 
@@ -885,7 +891,13 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   dropdown generated from the loaded font (fallback `gm N`). Single-writer
   intact: catalog built on the main thread pre-audio, immutable after.
   Engine-restart discipline documented (pkill self-match + 15-char comm
-  truncation gotchas in AGENTS.md). Favicon: the repo has a BRAND KIT at
+  truncation gotchas in AGENTS.md). Item 17 phase 0: D26 frozen — global
+  keymap.json, keys+fader-buttons, WYSIWYG audition, one map for both
+  modes' commands, manual note entry v1, any GM program per slot (labels
+  from /api/presets), device Mapping stays closed; +Addition A externally-
+  tagged voice field (item-19 patch refs), +Addition B overlay exit endpoint
+  required in phase 2. Rulings in scratchpad R14; phases 1–4 ready.
+  Favicon: the repo has a BRAND KIT at
   `assets/brand/icons/` (logo = pocket piano/tape; favicon.ico 48px + PNGs
   16–512) — first cut missed it and hand-drew an SVG, which also failed to
   render in the user's browser. Final: brand favicon.ico embedded via

@@ -1,10 +1,11 @@
 # DAW keymap — configurable DAW-mode bindings (multiphase plan)
 
-**Status: PLANNED — not started. Decision slot D26 reserved.**
+**Status: PHASE 0 DONE — schema v0 FROZEN (session 13). Phases 1–4 ready to
+implement. Decision D26 recorded in scratchpad R14 + HANDOFF §7.**
 Requested session 12: "configure DAW mode key and button mappings so we can
 manage it in a json file … what we don't want to allow remapping is Preset
-mode." Revisit before implementing; open questions below must be answered
-first (they change schemas, not just code).
+mode." All seven open questions answered (rulings at each Q below); no code
+written yet.
 
 ## Goal
 
@@ -76,10 +77,13 @@ keymap. Stats/`/ws` may mirror a `keymap_version` counter for UI feedback.
 
 ## Phases
 
-### Phase 0 — decisions (blocking)
+### Phase 0 — decisions ✅ DONE (session 13)
 
-Answer Q1–Q7 below; freeze schema v0; write D26 into scratchpad R13/R14 +
-HANDOFF §7 table. No code.
+Q1–Q7 answered (rulings at each Q below, rationale in scratchpad R14).
+Schema v0 frozen as drafted, plus: `voice` stays an externally-tagged enum
+for item-19 forward compat (Addition A), and phase 2 must ship
+`POST /api/overlay/{mix|seq|none}` (Addition B). D26 written to scratchpad
+R14 + HANDOFF §7.
 
 ### Phase 1 — `DawKeymap` struct (oxygen crate, pure + serde)
 
@@ -99,6 +103,9 @@ HANDOFF §7 table. No code.
   `POCKETSTAGE_PROJECT`).
 - `GET /api/keymap` (current JSON + defaults for diffing), `PUT`
   (validate→persist→publish; 204/400), `POST /api/keymap/reset`.
+  **REQUIRED (Addition B):** `POST /api/overlay/{mix|seq|none}` — same
+  EngineCommand pattern as `/api/voice` — so a bad keymap can never trap
+  the user in an overlay.
 - Tests: round-trip via in-process router; corrupt PUT keeps previous map;
   reset restores defaults; file written atomically (reuse the session-12
   durable-write pattern from `ProjectStore::replace`).
@@ -153,26 +160,24 @@ HANDOFF §7 table. No code.
 
 ## Open questions (answer in phase 0)
 
-1. **Global vs per-project keymap.** Lean: global device config
-   (`~/.pocketstage/keymap.json`). Counter: scene-style setups wanting
-   per-song bindings.
-2. **Binding targets**: keys only, or also fader buttons / knobs / CCs?
-   Lean: keys + fader buttons; no raw-CC targets until someone asks.
-3. **Audition pitch for arbitrary voice bindings** — press C6 binding, hear
-   pitch 84? Lean: yes, WYSIWYG. Alternative: fixed audition note per slot.
-4. **Preset-mode overlay commands follow the remap?** Today G#3/A#3 also
-   work inside PRESET while an overlay is live. Lean: same keymap drives
-   them (one source of truth; instrument routing untouched). Alternative:
-   hardcode 56/58 for in-PRESET use — two sources of truth, meh.
-5. **Capture mechanism** for the UI: `/ws` raw-press frames while armed vs.
-   separate probe endpoint vs. no capture (manual note number entry only —
-   simplest honest v1). Lean: manual entry v1, capture as fast-follow.
-6. **Voice list editing**: is the 12-slot curated `VOICES` table itself
-   editable (any GM program 0–127 per binding), or only its note
-   assignments? Schema above says any program — confirm; UI needs a GM
-   name picker either way.
-7. **Scope**: expose device-layer `Mapping` via the same interface while
-   we're at it (phase 5), or strictly DAW keymap this round?
+1. **Global vs per-project keymap.** ✅ RULING: **global**
+   (`~/.pocketstage/keymap.json`) — bindings belong to the keyboard, not
+   the song.
+2. **Binding targets.** ✅ RULING: **keys + fader buttons only**; no
+   knobs/raw-CC (tap-vs-ride semantics, nobody asked).
+3. **Audition pitch for arbitrary voice bindings.** ✅ RULING: **WYSIWYG**
+   — the pressed pitch sounds on the bound voice.
+4. **Preset-mode overlay commands follow the remap?** ✅ RULING: **yes** —
+   one map, one source of truth; PRESET instrument routing untouched.
+5. **Capture mechanism** for the UI. ✅ RULING: **manual note-number entry
+   in v1** (+ raw JSON escape hatch); capture is a fast-follow at most.
+6. **Voice list editing**: ✅ RULING: **any GM program per slot** — and
+   labels are free now: build the picker from `GET /api/presets` (the
+   session-13 font catalog; Addition A keeps the serde form forward-compat).
+7. **Scope**: ✅ RULING: **strictly DAW keymap this round** — device-layer
+   `Mapping` is measured ground truth; UI-editing it without hardware
+   probes invites silent misroute incidents. Phase 5 stays a separate
+   ship decision.
 
 ## Test-first notes (repo law)
 
