@@ -48,6 +48,27 @@ fn replace_persists_and_survives_reload() {
 }
 
 #[test]
+fn legacy_project_file_boots_with_gain_clamped() {
+    // D33: `Track::gain` used to validate up to 2.0, which the engine could not
+    // deliver (CC7 tops out at unity). Such a file must still open — the store
+    // migrates on LOAD; the HTTP write path stays strict (see
+    // put_rejects_gain_above_unity).
+    let path = temp_path("legacy-gain");
+    cleanup(&path);
+    std::fs::write(
+        &path,
+        r#"{ "version": 1, "project": { "name": "OldBoost",
+             "tracks": [{ "name": "T1", "instrument": {}, "clips": [null], "gain": 1.7 }],
+             "scenes": [{ "name": "A" }] } }"#,
+    )
+    .unwrap();
+
+    let store = ProjectStore::open_or_default(&path).unwrap();
+    assert_eq!(store.get().project.tracks[0].gain, Some(1.0));
+    cleanup(&path);
+}
+
+#[test]
 fn rejects_bad_payloads_and_changes_nothing() {
     let path = temp_path("reject");
     cleanup(&path);
@@ -311,6 +332,46 @@ fn concurrent_replaces_keep_disk_and_memory_in_step() {
 /// accepted document must reach the engine as its own `SetProject` — they are
 /// applied in arrival order at safe points, last writer wins — and a rejected
 /// payload must never forward a swap.
+#[tokio::test]
+async fn put_rejects_gain_above_unity() {
+    // Loads migrate, writes do NOT: a client sending a "boost" gets the
+    // validation message rather than a document quietly rewritten behind its
+    // back (D33 — and the exact silent-normalization trap this review caught).
+    let path = temp_path("gain-strict");
+    cleanup(&path);
+    let (tx, rx) = std::sync::mpsc::channel::<EngineCommand>();
+    let (_ptx, prx) = std::sync::mpsc::channel::<pocketstage_model::Take>();
+    let (_etx, erx) = std::sync::mpsc::channel::<ProjectFile>();
+    let app = router(AppState::embedded(
+        std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap()),
+        tx,
+        std::sync::Arc::new(crate::LiveStatus::default()),
+        prx,
+        erx,
+    ));
+
+    let body = serde_json::to_vec(&ride_doc("Boost", 1.4)).unwrap();
+    let (status, body) = call(
+        app.clone(),
+        Request::builder()
+            .method("PUT")
+            .uri("/api/project")
+            .body(Body::from(body))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body.contains("0..=1"),
+        "error should name the legal range: {body}"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "a rejected write never reaches the engine"
+    );
+    cleanup(&path);
+}
+
 #[tokio::test]
 async fn put_burst_forwards_every_accepted_swap_to_engine() {
     let path = temp_path("burst");

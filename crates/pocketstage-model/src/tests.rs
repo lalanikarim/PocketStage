@@ -506,11 +506,13 @@ fn gain_above_unity_is_rejected() {
 }
 
 #[test]
-fn legacy_boost_values_clamp_on_load() {
-    // Projects saved while gain validated up to 2.0 must keep booting: the
-    // stored number was inaudible either way, so parsing clamps it to unity and
-    // the next PUT persists the honest value. No SCHEMA_VERSION bump — the
-    // format is unchanged, only the legal value range tightened.
+fn legacy_boost_values_clamp_only_when_a_loader_migrates_them() {
+    // Parsing is PURE on purpose: the stored value survives `from_json_str` so
+    // `validate` can see it. A PUT of gain 1.7 must be reported, not quietly
+    // rewritten into a number the client never sent.
+    //
+    // Projects saved while gain validated up to 2.0 still boot — but via the
+    // store's explicit migration step, not by parsing being forgiving.
     let json = r#"{
         "version": 1,
         "project": {
@@ -520,17 +522,25 @@ fn legacy_boost_values_clamp_on_load() {
         }
     }"#;
     let file = ProjectFile::from_json_str(json).unwrap();
-    assert_eq!(file.project.tracks[0].gain, Some(1.0));
-    file.validate().unwrap();
+    assert_eq!(file.project.tracks[0].gain, Some(1.7));
+    assert!(matches!(
+        file.validate().unwrap_err(),
+        ValidationError::GainOutOfRange { .. }
+    ));
+
+    // The migration a loader performs makes the same document valid: no
+    // SCHEMA_VERSION bump needed, the format never changed — only which values
+    // are legal.
+    let mut migrated = file.project;
+    migrated.normalize_legacy_values();
+    migrated.validate().unwrap();
+    assert_eq!(migrated.tracks[0].gain, Some(1.0));
 
     // Values that were always illegal stay illegal — no silent fixes.
-    let negative = json.replace("\"gain\": 1.7", "\"gain\": -0.5");
-    assert!(
-        ProjectFile::from_json_str(&negative)
-            .unwrap()
-            .validate()
-            .is_err()
-    );
+    let mut p = sample_project();
+    p.tracks[0].gain = Some(-0.5);
+    p.normalize_legacy_values();
+    assert!(p.validate().is_err());
 }
 
 #[test]

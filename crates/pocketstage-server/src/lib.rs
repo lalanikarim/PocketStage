@@ -111,14 +111,26 @@ pub struct ProjectStore {
 impl ProjectStore {
     /// Load `path`; when it doesn't exist yet, start from
     /// [`Project::default_project()`] (not written to disk until first PUT).
+    /// A project read FROM DISK is migrated (legacy values clamped to what the
+    /// engine can actually apply) and then validated, so an old file keeps
+    /// booting — see [`pocketstage_model::Project::normalize_legacy_values`].
+    ///
+    /// The HTTP write path deliberately does NOT do this: a PUT carrying an
+    /// out-of-range value must be refused with a message (D33), not quietly
+    /// rewritten into something the client never sent.
+    fn migrate_and_validate(pf: ProjectFile) -> Result<ProjectFile, StoreError> {
+        let mut pf = pf;
+        pf.project.normalize_legacy_values();
+        pf.validate().map_err(StoreError::Validation)?;
+        Ok(pf)
+    }
+
     pub fn open_or_default(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
         let project = match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                let pf = ProjectFile::from_json_str(&text).map_err(StoreError::Model)?;
-                pf.validate().map_err(StoreError::Validation)?;
-                pf
-            }
+            Ok(text) => Self::migrate_and_validate(
+                ProjectFile::from_json_str(&text).map_err(StoreError::Model)?,
+            )?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => ProjectFile {
                 version: SCHEMA_VERSION,
                 project: Project::default_project(),
@@ -282,8 +294,9 @@ impl ProjectStore {
             .ok_or(StoreError::Io("not a library".into()))?;
         let path = dir.join(format!("{name}.json"));
         let text = std::fs::read_to_string(&path).map_err(|e| StoreError::Io(e.to_string()))?;
-        let pf = ProjectFile::from_json_str(&text).map_err(StoreError::Model)?;
-        pf.validate().map_err(StoreError::Validation)?;
+        let pf = Self::migrate_and_validate(
+            ProjectFile::from_json_str(&text).map_err(StoreError::Model)?,
+        )?;
         *self.path.lock().unwrap_or_else(|p| p.into_inner()) = path;
         *self.project.lock().unwrap_or_else(|p| p.into_inner()) = pf.clone();
         Ok(pf)

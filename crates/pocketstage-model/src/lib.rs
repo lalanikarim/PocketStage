@@ -131,10 +131,11 @@ impl ProjectFile {
         if version > SCHEMA_VERSION as u64 {
             return Err(ModelError::UnsupportedVersion(version as u32));
         }
-        let mut file: ProjectFile =
-            serde_json::from_value(value).map_err(|e| ModelError::Invalid(e.to_string()))?;
-        file.project.normalize_legacy_values();
-        Ok(file)
+        // Parsing stays PURE — migration is a loader concern, see
+        // [`Project::normalize_legacy_values`]. A PUT that round-trips through
+        // here must still be rejected by `validate`, otherwise out-of-range
+        // writes would be silently normalized instead of reported.
+        serde_json::from_value(value).map_err(|e| ModelError::Invalid(e.to_string()))
     }
 
     fn json_type_name(v: &serde_json::Value) -> &'static str {
@@ -164,8 +165,8 @@ impl ProjectFile {
 /// optional with defaults — old files parse unchanged and new files stay
 /// readable by older builds (unknown fields ignored), so `SCHEMA_VERSION`
 /// stays at 1. Tightened value ranges travel the same way: a legacy value is
-/// clamped by [`Project::normalize_legacy_values`] while parsing rather than
-/// breaking the file (`Track::gain` → 0..=1, D33).
+/// clamped by [`Project::normalize_legacy_values`] at file-load time rather
+/// than breaking the file (`Track::gain` → 0..=1, D33); writes are strict.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
@@ -284,7 +285,10 @@ impl Project {
     }
 
     /// Validate all invariants the engine relies on (see HANDOFF/scratchpad R2).
-    /// Value migration applied when a file is PARSED (not on write).
+    /// Value migration for FILE LOADS only — `from_json_str` deliberately does
+    /// not call it, so a PUT of an illegal document still fails validation
+    /// instead of being quietly rewritten. Loaders (`ProjectStore::open_or_default`,
+    /// library switches) call this right after parsing.
     ///
     /// `Track::gain` used to validate up to 2.0. That ceiling was a lie — CC7
     /// tops out at unity and FluidSynth rejects the out-of-range CC a "boost"
