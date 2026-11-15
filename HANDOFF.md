@@ -477,10 +477,12 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     — the unit exposes only NC1, and its messages are plain MIDI with
     Mackie numbering (consumption ≠ protocol emulation; emulation stays
     a non-goal), so take-2 numbers ARE the default source. Take 3
-    cancelled; no hardware gate remains. Next code work: (a) MIX bank
+    cancelled; no hardware gate remains. ~~Next code work: (a) MIX bank
     paging + feeder wiring for BankPrev/BankNext with shipped defaults
-    ‹/› = HUI notes 46/47; (b) knob param-leaf ruling, then knob
-    consumption (amendment drafted). **Phase 5 ruled to SHIP (D29,
+    ‹/› = HUI notes 46/47~~ — **task (a) CANCELLED by D30 (s15): ‹/› emit
+    nothing in PRESET mode, so they can never page the MIX overlay; commands
+    stay in the vocabulary, unbound.** Remaining: (b) knob param-leaf ruling,
+    then knob consumption (amendment drafted). **Phase 5 ruled to SHIP (D29,
     s14c)** — device Mapping exposed via GET/PUT; honors the spec's
     phase-5 preconditions (mapper-state-on-swap ruling first; loader
     mirrors keymap never-fail-open).**
@@ -547,6 +549,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D26.1 | **Schema rectification v0→v0.1** (R14 addendum, locked Option B): re-frozen pre-code after MKV docs review showed knobs (CC/HUI) are DAW mode's primary controls; command vocab incl. bank_prev/next; knob param-target semantics intentionally unfrozen (additive later); no version field until phase 1 ships SCHEMA=1 | ✅ (s13) |
 | D28 | **Personality pin: NC1** (supersedes D26's "pin N1/N2"): measured unit exposes ONLY NC1 across every documented selection path (guide combo hold-SHIFT+DAW/PRESET, all preset slots); NC1's outputs are plain MIDI messages with Mackie-style numbering (notes 0–7/46/47, tick constants, PB faders) — consuming them is mapping, not the bidirectional Mackie-protocol emulation that stays a hard non-goal. Defaults ship from take-2 NC1 numbers; MIX keeps using PRESET-mode faders CC33–41 | ✅ ruled (s14c) |
 | D29 | **Phase 5 SHIPS — expose device `Mapping` via GET/PUT `/api/mapping`** (supersedes Q7's "stays closed"; ruled s14c): T7 gate satisfied by takes 1–2 + D28 (NC1 measured); implementation must still land the mapper-state-on-swap ruling (spec phase-5 §, likely apply-at-transport-stopped + `rebase(old,new)` carry-over) and mirror the keymap loader discipline (never-fail-open, loud warn). Read-only GET already shipped | ✅ ruled (s14c); implementation owed |
+| D30 | **Bank commands ship unbound + defaults music-port qualified** (session 15; kills backlog task "MIX bank paging + BankPrev/BankNext wiring + ‹/› defaults"). Two measured reasons: (1) `‹`/`›` are **mode-conditional** — guide v1.2 §10 + our preset-mode table agree they emit NOTHING in PRESET mode (device-local preset scroll), while the T7 numbers (HUI notes 46/47) are DAW-mode Mackie controls; MIX lives inside PRESET (D21) and its faders/knobs are the PRESET CC map, so a ‹/›→MIX-page binding would be silent exactly when it is needed and live only where MIX has no consumable inputs. Mackie-style track-bank scroll is also meaningless at 4 tracks on one page. `bank_prev`/`bank_next` stay in the frozen vocabulary (manually bindable), **no defaults**. (2) Built-in voice/command defaults were claiming their notes on *every* port, which made any HUI-qualified default fail `DawKeymap::validate()` (`voices[6] (Nylon Guitar) … claim note 47`); defaults now say `"port":"music"` — byte-identical routing (keys/pads are port :0 in both modes), whole HUI note space freed for future DAW-mode bindings | ✅ ruled (s15); implemented |
 
 ---
 
@@ -617,16 +620,20 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 > notes; take 2 decoded + Q4 PASSED s14c — see §10). **No hardware gate
 > remains: the unit exposes NC1 only, and D28 (ruled s14c) pins NC1 —
 > its outputs are plain MIDI with Mackie-style numbering, so consuming
-> them is mapping, not emulation. Take 3 cancelled.** Next work is pure
-> software: (a) MIX bank paging + feeder wiring for BankPrev/BankNext +
-> default bindings ‹/› = HUI notes 46/47; (b) knob param-leaf ruling,
-> then knob consumption (amendment drafted, direction CW=1/CCW=65);
-> (c) implement Phase 5 Mapping PUT per **D29 (ruled s14c: ships)** —
-> rule mapper-state-on-swap first, mirror keymap loader. Next software
-> candidates: §6 item 15 (live-apply web mixer
-> edits), item 19 phase B (patch catalog — its phase E feeds the keymap
-> voice field via Addition A). Hardware-gated backlog still standing:
-> pedal probe, Pi validation, items 14/16 ear-checks. Live env: engine
+> them is mapping, not emulation. Take 3 cancelled.**
+> **Session 15 update (D30): the "MIX bank paging + ‹/› defaults" task is
+> CANCELLED, not deferred** — `‹`/`›` are DAW-mode-only (guide §10 + our own
+> preset-mode "no MIDI output" row), and MIX lives in PRESET: the binding
+> would be silent exactly when needed. Commands stay in the frozen vocabulary,
+> shipped unbound; built-in defaults are now music-port qualified (frees the
+> HUI note space; routing byte-identical). Next work is pure software:
+> (a) knob param-leaf ruling, then knob consumption (amendment drafted,
+> direction CW=1/CCW=65); (b) Phase 5 Mapping PUT per **D29 (ruled s14c:
+> ships)** — rule mapper-state-on-swap first, mirror the keymap loader; then
+> §6 item 15 (live-apply web mixer edits), item 19 phase B (patch catalog —
+> its phase E feeds the keymap voice field via Addition A). Hardware-gated
+> backlog still standing: pedal probe, Pi validation, items 14/16 ear-checks.
+> Live env: engine
 > detached on :7777
 > (`pkill -x pocketstage-eng` — see AGENTS gotchas); project library in
 > ~/.pocketstage/projects; keymap file currently at defaults; note

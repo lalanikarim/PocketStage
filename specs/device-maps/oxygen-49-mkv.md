@@ -229,7 +229,13 @@ select):**
   **CW = 1, CCW = 65** — one message per tick, no position. Take-1's
   "1..65 range" was never a range.
 - **Bank scroll <>**: ‹ = HUI-port **note 46**, › = HUI-port **note 47**
-  (clean press+release pairs; bank defaults can now be wired).
+  (clean press+release pairs). **Correction (s15, D30):** these numbers are
+  only live in **DAW mode**. Guide v1.2 §10 is explicit — "In DAW mode, < and >
+  will scroll through track banks… In Preset Mode, the < and > buttons will
+  scroll through presets" — and our own preset-mode inventory lists these very
+  buttons as **no MIDI output**. So take 2 measured them where they are Mackie
+  controls; in PRESET mode they put zero bytes on the wire and can never drive
+  a host-side MIX page. Do NOT ship them as keymap defaults (see D30).
 - **Fader buttons 1–8** = HUI-port **notes 0–7** (button N → note N−1),
   one press each, cleanly separated.
 - **"Button 9" = DAW BUTTON MODE**, not a control: SHIFT + it cycles

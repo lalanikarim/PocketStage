@@ -9,8 +9,10 @@ notes 46/47; buttons 1–8 = HUI notes 0–7). **D28 ruled (s14c): NC1 is
 the pinned personality** — the only one this unit exposes; its messages
 are plain MIDI with Mackie-style numbering, so take-2 numbers ship as
 defaults. **Phase 5 ruled to SHIP (D29, s14c)** — Mapping GET/PUT
-implementation owed, honoring the phase-5 preconditions. Decisions
-D26 + D28 + D29 in scratchpad R14 + HANDOFF §7.**
+implementation owed, honoring the phase-5 preconditions.
+**D30 (s15): bank commands ship UNBOUND (‹/› are DAW-mode-only — silent in
+PRESET, where MIX lives) and built-in defaults are music-port qualified.**
+Decisions D26 + D28 + D29 + D30 in scratchpad R14 + HANDOFF §7.**
 Requested session 12: "configure DAW mode key and button mappings so we can
 manage it in a json file … what we don't want to allow remapping is Preset
 mode." All seven open questions answered (rulings at each Q below).
@@ -89,8 +91,14 @@ pads on the music port.
 - `commands`: command vocabulary FROZEN at:
   `mix_toggle`, `seq_toggle`, `seq_next_bar`, `seq_flip`,
   `bank_prev`, `bank_next` (last two = MIX-overlay paging, mirroring the
-  documented `<`/`>` track-bank scroll; no default binding in built-in
-  defaults until T7 measures the real notes). Momentary semantics.
+  documented `<`/`>` track-bank scroll). Momentary semantics.
+  **D30 (s15): bank commands SHIP UNBOUND — permanently, on this unit.** The
+  T7 numbers exist (HUI notes 46/47) but are DAW-mode-only: guide v1.2 §10 and
+  our own preset-mode inventory (`no MIDI output`) both say `‹`/`›` are
+  device-local preset scrollers while PRESET is active — which is exactly the
+  mode MIX lives in (D21). A default binding would be silent when needed and
+  live only where MIX has no consumable controls. Users may still bind them
+  manually; nothing in the schema changes.
 - `fader_buttons`: per-button command bindings (Q2). T7 take 2 decoded:
   **buttons 1–8 = HUI-port notes 0–7** (button N → note N−1); the 9th
   button is **DAW BUTTON MODE** (a device-local mode cycler — never a
@@ -173,9 +181,25 @@ untouched, which is exactly what freezing it bought us):
    data, any default is a guess — and guessed defaults are how silent
    misroutes happen (Q7).
 
-Bank commands (`bank_prev`/`bank_next`) and fader_button defaults remain
-equally gated on take 2 (`<>` emissions not yet isolated from the
-sweeps; buttons confirmed as notes, see correction above).
+Fader_button defaults stay gated on take 2 (buttons confirmed as notes there).
+Bank commands were ungated by take 2 and then re-gated by **D30**: their wire
+numbers are mode-conditional (DAW-mode-only), so they ship unbound — see the
+`commands` bullet above.
+
+## Default source port qualification — D30 (session 15)
+
+Built-in defaults now qualify every note source with `"port":"music"`:
+
+- **Why.** Unqualified rows claim their number on *every* port, so the browser
+  row on note 47 collided with any HUI-qualified binding on 47 — the built-in
+  map failed its own `validate()` the moment a HUI default was added (measured:
+  `voices[6] (Nylon Guitar) and commands[5] both claim note 47`). Qualifying
+  the defaults frees the entire HUI note space for DAW-mode bindings.
+- **Why it is safe.** Keys/pads transmit on port :0 in *both* unit modes
+  (device map: "Keys + pads still appear on port 0"), so browser/overlay
+  routing is byte-for-byte unchanged; only phantom HUI matches disappear.
+- **Files are unaffected.** `port` is optional in the frozen v0.1 source
+  object — hand-written maps keep their any-port semantics.
 
 ## Reload architecture (keeps R5)
 

@@ -54,6 +54,60 @@ fn defaults_match_engine_hardcoded_table() {
 }
 
 #[test]
+fn default_note_bindings_are_music_port_only() {
+    // D30: the voice browser and the four overlay commands are keybed
+    // inventory, which the measured map routes exclusively to the music port
+    // (port :0). Qualifying the defaults keeps the whole HUI note space free
+    // for DAW-mode bindings — unqualified rows used to claim e.g. note 47 on
+    // *every* port, so any HUI-qualified binding there failed validation as a
+    // duplicate.
+    let d = DawKeymap::default();
+    for b in &d.voices {
+        assert_eq!(
+            b.source.port(),
+            Some(Port::Music),
+            "voice {} must be music-port qualified",
+            b.label
+        );
+    }
+    for b in &d.commands {
+        assert_eq!(
+            b.source.port(),
+            Some(Port::Music),
+            "command {:?} must be music-port qualified",
+            b.command
+        );
+    }
+    assert!(d.validate().is_ok());
+}
+
+#[test]
+fn hui_note_defaults_coexist_with_default_voices() {
+    // The regression this locks: before voices were port-qualified, binding a
+    // HUI note that shares a number with a browser slot (46/47 …) was
+    // impossible — the unqualified voice row claimed it on every port.
+    let mut km = DawKeymap::default();
+    for (note, command) in [(46u8, Command::BankPrev), (47u8, Command::BankNext)] {
+        km.commands.push(CommandBinding {
+            source: Source::note_on(note, Port::Hui),
+            command,
+        });
+    }
+    assert_eq!(km.duplicates(), Vec::<String>::new());
+    assert!(km.validate().is_ok(), "{:?}", km.validate());
+    // Both maps stay unambiguous: same number, different port.
+    assert_eq!(
+        km.command_for(Source::note(47), Port::Hui),
+        Some(Command::BankNext)
+    );
+    assert_eq!(km.voice_for(47, Port::Hui).map(|b| b.label.as_str()), None);
+    assert_eq!(
+        km.voice_for(47, Port::Music).map(|b| b.label.as_str()),
+        Some("Nylon Guitar")
+    );
+}
+
+#[test]
 fn empty_file_yields_defaults() {
     assert_eq!(DawKeymap::from_json_str("").unwrap(), DawKeymap::default());
     assert_eq!(

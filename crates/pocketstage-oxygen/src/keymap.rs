@@ -242,6 +242,14 @@ fn default_voices() -> Vec<VoiceBinding> {
     // Mirrors engine main.rs: VOICE_BROWSER_ANCHOR=36, 12 white-key slots
     // C2..G3 with the curated GM patches (D25). Keep in lockstep — the
     // regression test below asserts this exact table.
+    //
+    // D30: every row is **music-port qualified**, not any-port. The browser is
+    // keybed/pad inventory and the measured map puts that on port :0 (the HUI
+    // port carries transport + Mackie-style strip controls, never our keys) —
+    // see specs/device-maps/oxygen-49-mkv.md. Qualifying it frees the entire
+    // HUI note space for DAW-mode command defaults; unqualified rows claimed
+    // numbers like 46/47 on every port and made such bindings unverifiable as
+    // duplicates.
     let white_keys = [36u8, 38, 40, 41, 43, 45, 47, 48, 50, 52, 53, 55];
     let voices: [(ActiveVoice, &str); 12] = [
         (ActiveVoice::Drums, "Drums"),
@@ -261,7 +269,7 @@ fn default_voices() -> Vec<VoiceBinding> {
         .iter()
         .zip(voices)
         .map(|(n, (voice, label))| VoiceBinding {
-            source: Source::note(*n),
+            source: Source::note_on(*n, Port::Music),
             voice,
             label: label.into(),
         })
@@ -270,22 +278,24 @@ fn default_voices() -> Vec<VoiceBinding> {
 
 fn default_commands() -> Vec<CommandBinding> {
     // Engine main.rs: CMD_MIX=56 G#3, CMD_SEQ=58 A#3, CMD_NEXT=61 C#4,
-    // CMD_FLIP=63 D#4.
+    // CMD_FLIP=63 D#4. Music-port qualified like the voices (D30): these are
+    // keybed black keys, and leaving them unqualified would silently claim the
+    // same numbers on the HUI port, where they are Mackie strip buttons.
     vec![
         CommandBinding {
-            source: Source::note(56),
+            source: Source::note_on(56, Port::Music),
             command: Command::MixToggle,
         },
         CommandBinding {
-            source: Source::note(58),
+            source: Source::note_on(58, Port::Music),
             command: Command::SeqToggle,
         },
         CommandBinding {
-            source: Source::note(61),
+            source: Source::note_on(61, Port::Music),
             command: Command::SeqNextBar,
         },
         CommandBinding {
-            source: Source::note(63),
+            source: Source::note_on(63, Port::Music),
             command: Command::SeqFlip,
         },
     ]
