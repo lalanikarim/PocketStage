@@ -139,6 +139,12 @@ async fn http_round_trip() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("\"ok\":true"));
+    // The UI reads its track cap from here (D31) instead of mirroring the
+    // constant — if this disappears, "+ add track" silently never disables.
+    assert!(
+        body.contains(&format!("\"max_tracks\":{}", pocketstage_model::MAX_TRACKS)),
+        "health must publish the track cap: {body}"
+    );
 
     // GET project — full versioned envelope
     let (status, body) = call(

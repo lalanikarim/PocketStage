@@ -965,9 +965,12 @@ impl EngineCore {
                 _ => {} // already in the requested state
             },
             Event::MixFader { index, value } => {
-                // D22 page: F1–F4 → track 1–4 gain. F5–F9 unused until the
-                // model grows past 4 channels (R2). Inert outside MIX.
-                if self.overlay == Overlay::Mix && (1..=4).contains(&index) {
+                // D22 page: F(n) → gain of track n. The row used to stop at 4
+                // (R2's fake fader-count rationale); per D31 it now follows the
+                // project — F5–F8 light up on 5–8-track projects, and a fader
+                // addressing an absent track resolves to nothing (mix_set's
+                // get_mut guard). Inert outside MIX.
+                if self.overlay == Overlay::Mix && self.has_track(index) {
                     self.mix_set(synth, (index - 1) as usize, MixField::Gain, value);
                 }
             }
@@ -989,11 +992,15 @@ impl EngineCore {
                             self.mix_set(synth, t, field, value);
                         }
                         // Default page: K1–K4 → pan of tracks 1–4, K5–K8 →
-                        // reverb send of tracks 1–4 (D22).
+                        // reverb send of tracks 1–4 (D22). Deliberately still
+                        // a four-channel row (D31): the knob inventory is 8,
+                        // so it cannot cover 8 channels × 2 fields. Channels
+                        // 5–8 are reached through their detail page — press
+                        // Fader Button n, then K1–K4 = gain/pan/reverb/chorus.
                         None => {
-                            if (1..=4).contains(&index) {
+                            if (1..=4).contains(&index) && self.has_track(index) {
                                 self.mix_set(synth, (index - 1) as usize, MixField::Pan, value);
-                            } else if (5..=8).contains(&index) {
+                            } else if (5..=8).contains(&index) && self.has_track(index - 4) {
                                 self.mix_set(synth, (index - 5) as usize, MixField::Reverb, value);
                             }
                         }
@@ -1003,8 +1010,9 @@ impl EngineCore {
             Event::SelectTrack { index } => {
                 // Fader buttons are channel selectors, never scene triggers
                 // (D14). Press again clears the detail page. Only live inside
-                // an overlay (MIX/SEQ) — plain PRESET ignores them.
-                if self.overlay != Overlay::None && (1..=4).contains(&index) {
+                // an overlay (MIX/SEQ) — plain PRESET ignores them. Selectable
+                // range follows the project (D31): 8 tracks ⇒ buttons 1–8.
+                if self.overlay != Overlay::None && self.has_track(index) {
                     let n = (index - 1) as usize;
                     self.detail = if self.detail == Some(n) {
                         None
@@ -1061,6 +1069,15 @@ impl EngineCore {
         synth.all_sounds_off(chan);
         synth.note_on(chan, note, 100);
         synth.note_off(chan, note);
+    }
+
+    /// Does a **1-based** control index address a track this project has?
+    /// Total + allocation-free; the MIX/overlay gates use it so a fader or
+    /// fader-button on an absent channel resolves to nothing (D20) instead of
+    /// relying on `mix_set`'s internal guard. D31: this replaced three
+    /// hardcoded `(1..=4)` checks.
+    fn has_track(&self, index: u8) -> bool {
+        index >= 1 && (index as usize) <= self.project.tracks.len()
     }
 
     /// D23: toggle one step of the 8-step window on the target track of the
@@ -1466,6 +1483,16 @@ mod harness_tests {
 
         fn send(&self, event: Event) {
             self.tx_ev.send(TimedEvent::now(event)).unwrap();
+        }
+
+        /// Grow the stock project to `n` tracks (clips/scenes follow). Used by
+        /// the >4-channel MIX tests (D31).
+        fn grow_to(&mut self, n: usize) {
+            while self.core.project.tracks.len() < n {
+                let mut t = self.core.project.tracks[0].clone();
+                t.name = format!("Track {}", self.core.project.tracks.len() + 1);
+                self.core.project.tracks.push(t);
+            }
         }
 
         /// Run `n` audio periods (each period processes queued events first).
@@ -2636,6 +2663,77 @@ mod harness_tests {
         }); // page: tr1 pan again
         h.tick(1);
         assert!(h.has(Call::Cc(0, 10, 40)));
+    }
+
+    #[test]
+    fn mix_faders_cover_every_channel_of_an_eight_track_project() {
+        // D31: the fader row is bound by the track count, not a hardcoded 4.
+        // R12 anticipated exactly this ("F5–F9 unused until more channels
+        // exist"). F5 → track 5 gain on channel 4 (D3).
+        let mut h = Harness::new();
+        h.grow_to(8);
+        h.send(Event::ToggleMixOverlay);
+        h.tick(1);
+        h.calls();
+        h.send(Event::MixFader {
+            index: 5,
+            value: 96,
+        });
+        h.tick(1);
+        assert_eq!(h.core.project.tracks[4].gain, Some(96.0 / 127.0));
+        assert!(h.has(Call::Cc(4, 7, 96)));
+    }
+
+    #[test]
+    fn mix_faders_on_absent_tracks_are_inert() {
+        // The stock project has 4 tracks: F5 exists physically but addresses
+        // nothing — no synth call, no phantom project edit.
+        let mut h = Harness::new();
+        h.send(Event::ToggleMixOverlay);
+        h.tick(1);
+        h.calls();
+        h.send(Event::MixFader {
+            index: 5,
+            value: 96,
+        });
+        h.tick(1);
+        assert!(h.calls().is_empty());
+        assert!(
+            h.edit_rx.try_recv().is_err(),
+            "no write-through for nothing"
+        );
+    }
+
+    #[test]
+    fn detail_page_selects_tracks_beyond_four() {
+        // Sends/pan for channels 5–8 live on the detail page (D22): F5–F8 are
+        // gain, so K1–K4 of the selected track is the way to reach them.
+        let mut h = Harness::new();
+        h.grow_to(8);
+        h.send(Event::ToggleMixOverlay);
+        h.send(Event::SelectTrack { index: 7 });
+        h.tick(1);
+        assert_eq!(h.core.detail, Some(6));
+        h.calls();
+        h.send(Event::MixKnob {
+            index: 4,
+            value: 20,
+        }); // detail: K4 = chorus
+        h.tick(1);
+        assert_eq!(h.core.project.tracks[6].chorus, Some(20.0 / 127.0));
+        assert!(h.has(Call::Cc(6, 93, 20)));
+    }
+
+    #[test]
+    fn detail_select_ignores_absent_tracks() {
+        let mut h = Harness::new();
+        h.send(Event::ToggleMixOverlay);
+        h.send(Event::SelectTrack { index: 5 }); // project has 4 tracks
+        h.tick(1);
+        assert_eq!(
+            h.core.detail, None,
+            "cannot select a track that isn't there"
+        );
     }
 
     #[test]

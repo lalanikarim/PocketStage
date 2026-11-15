@@ -543,6 +543,10 @@ async function postRemote(cmd) {
 connect();
 refresh();
 renderProjects();
+// Limits (track cap) come from the server; re-render structure once known.
+fetch("/api/health").then((r) => (r.ok ? r.json() : null))
+  .then((h) => { if (h && h.max_tracks) { maxTracks = h.max_tracks; renderStructure(); } })
+  .catch(() => {});
 // ------------------------------------------------------------- projects
 async function renderProjects() {
   let info;
@@ -601,8 +605,13 @@ async function renderProjects() {
 }
 
 // ------------------------------------------------------------- structure
-// Track CRUD (max 4) + scene renaming (8 fixed columns). Edits mutate the
-// fetched ProjectFile and ride the dirty-flag Save path like everything else.
+// Track CRUD + scene renaming. Edits mutate the fetched ProjectFile and ride
+// the dirty-flag Save path like everything else. The track cap comes from the
+// server (D31: MAX_TRACKS is a FluidSynth channel budget that lives in the
+// model) — no second copy of the number here; if /api/health is unreachable
+// the button stays enabled and the PUT is still validated server-side.
+let maxTracks = Infinity;
+
 function rerenderAll() {
   renderMixer(project);
   renderMatrix();
@@ -702,7 +711,9 @@ function renderStructure() {
 
   const add = document.createElement("button");
   add.textContent = "+ add track";
-  add.disabled = p.tracks.length >= 4;
+  add.disabled = p.tracks.length >= maxTracks;
+  add.title = p.tracks.length >= maxTracks
+    ? `channel budget exhausted (${maxTracks} tracks)` : "";
   add.addEventListener("click", () => {
     p.tracks.push({
       name: "Track " + (p.tracks.length + 1),

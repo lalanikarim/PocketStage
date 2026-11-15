@@ -549,6 +549,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D26.1 | **Schema rectification v0→v0.1** (R14 addendum, locked Option B): re-frozen pre-code after MKV docs review showed knobs (CC/HUI) are DAW mode's primary controls; command vocab incl. bank_prev/next; knob param-target semantics intentionally unfrozen (additive later); no version field until phase 1 ships SCHEMA=1 | ✅ (s13) |
 | D28 | **Personality pin: NC1** (supersedes D26's "pin N1/N2"): measured unit exposes ONLY NC1 across every documented selection path (guide combo hold-SHIFT+DAW/PRESET, all preset slots); NC1's outputs are plain MIDI messages with Mackie-style numbering (notes 0–7/46/47, tick constants, PB faders) — consuming them is mapping, not the bidirectional Mackie-protocol emulation that stays a hard non-goal. Defaults ship from take-2 NC1 numbers; MIX keeps using PRESET-mode faders CC33–41 | ✅ ruled (s14c) |
 | D29 | **Phase 5 SHIPS — expose device `Mapping` via GET/PUT `/api/mapping`** (supersedes Q7's "stays closed"; ruled s14c): T7 gate satisfied by takes 1–2 + D28 (NC1 measured); implementation must still land the mapper-state-on-swap ruling (spec phase-5 §, likely apply-at-transport-stopped + `rebase(old,new)` carry-over) and mirror the keymap loader discipline (never-fail-open, loud warn). Read-only GET already shipped | ✅ ruled (s14c); implementation owed |
+| D31 | **`MAX_TRACKS` 4 → 8: the cap is a channel budget, not a fader count** (session 15). R2's "max 4 tracks (matches Oxygen 49 MKV's 4 faders exactly)" was factually wrong — the measured device map has **9** faders (`oxygen-49-mkv.md`), and the real constraint was always FluidSynth's channel map: a track owns channel `index` unless overridden (D3) while the engine reserves 8..=15 for the pad kit + metronome (`PAD_CH_BASE`) ⇒ channels 0..=7 fit, 8 does not. Law test `track_cap_matches_the_channel_budget` locks the reasoning. Consequences: `default_project()` starters decoupled from the cap (still a 4-piece boot — capacity ≠ content); engine MIX gates stop hardcoding 4 — **F(n) → gain of track n for every track that exists** (R12's own "F5–F9 unused until more channels exist" clause finally exercised), fader-button detail select follows, knob rows stay a four-channel page (only 8 knobs; channels 5–8 reach pan/sends via their detail page); web reads the cap from `GET /api/health` (`max_tracks`) instead of mirroring it. **Known sharp edge (unchanged, now easier to hit):** `Track.channel` overrides are only range-checked 0..=15, and the documented reason for the override is a GM drum track on channel 9 — which sits inside the pad bank (8..=15), so such a track aliases pad 2 / CONFIRM_RIM. Needs its own ruling before anyone routes past channel 7 | ✅ ruled (s15); implemented |
 | D30 | **Bank commands ship unbound + defaults music-port qualified** (session 15; kills backlog task "MIX bank paging + BankPrev/BankNext wiring + ‹/› defaults"). Two measured reasons: (1) `‹`/`›` are **mode-conditional** — guide v1.2 §10 + our preset-mode table agree they emit NOTHING in PRESET mode (device-local preset scroll), while the T7 numbers (HUI notes 46/47) are DAW-mode Mackie controls; MIX lives inside PRESET (D21) and its faders/knobs are the PRESET CC map, so a ‹/›→MIX-page binding would be silent exactly when it is needed and live only where MIX has no consumable inputs. Mackie-style track-bank scroll is also meaningless at 4 tracks on one page. `bank_prev`/`bank_next` stay in the frozen vocabulary (manually bindable), **no defaults**. (2) Built-in voice/command defaults were claiming their notes on *every* port, which made any HUI-qualified default fail `DawKeymap::validate()` (`voices[6] (Nylon Guitar) … claim note 47`); defaults now say `"port":"music"` — byte-identical routing (keys/pads are port :0 in both modes), whole HUI note space freed for future DAW-mode bindings | ✅ ruled (s15); implemented |
 
 ---
@@ -626,12 +627,18 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 > preset-mode "no MIDI output" row), and MIX lives in PRESET: the binding
 > would be silent exactly when needed. Commands stay in the frozen vocabulary,
 > shipped unbound; built-in defaults are now music-port qualified (frees the
-> HUI note space; routing byte-identical). Next work is pure software:
+> HUI note space; routing byte-identical). **Same session, D31:
+> `MAX_TRACKS` 4 → 8** (channel budget, not fader count — R2's rationale was
+> factually wrong); MIX faders now address every channel of the project and
+> the web reads the cap from `/api/health`. Next work is pure software:
 > (a) knob param-leaf ruling, then knob consumption (amendment drafted,
 > direction CW=1/CCW=65); (b) Phase 5 Mapping PUT per **D29 (ruled s14c:
 > ships)** — rule mapper-state-on-swap first, mirror the keymap loader; then
 > §6 item 15 (live-apply web mixer edits), item 19 phase B (patch catalog —
-> its phase E feeds the keymap voice field via Addition A). Hardware-gated
+> its phase E feeds the keymap voice field via Addition A). New candidate
+> opened by D31: channels 5–8 have no knob-page row (8 knobs can't cover 8×2
+> fields) — a second send page or real paging needs its own ruling; ditto the
+> `Track.channel` → pad-channel aliasing sharp edge noted in D31. Hardware-gated
 > backlog still standing: pedal probe, Pi validation, items 14/16 ear-checks.
 > Live env: engine
 > detached on :7777
@@ -1026,3 +1033,31 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   closure; mapper-state-on-swap ruling + never-fail-open loader remain
   as implementation preconditions). Next session starts with task A:
   MIX bank paging + BankPrev/BankNext wiring + ‹/› defaults.
+- **Session 15 (D30 + D31 — two backlog tasks killed/corrected by facts)**:
+    - *Blocker found before writing code*: the assigned task (‹/› → MIX bank
+      paging) is unbuildable. `Source` carries a port, but default bindings
+      were port-agnostic, so any HUI-qualified command default collided with a
+      music-port voice default (`voices[6] Nylon Guitar … claim note 47` = the
+      BankNext default). Fixed by qualifying every built-in default source to
+      `"port":"music"` — routing byte-identical (keys/pads are port :0 in both
+      modes), whole HUI note space freed. Two regression tests: defaults are
+      music-port only; the HUI ‹/› numbers coexist with default voices.
+    - *Guide v1.2 §10 vs our own preset-mode table*: `‹`/`›` emit **nothing**
+      in PRESET mode (device-local preset scroll); the T7 46/47 numbers are
+      DAW-mode Mackie controls — and MIX lives inside PRESET (D21). A ‹/›→MIX
+      binding would be silent exactly when needed. **D30: task cancelled, not
+      deferred**; commands stay in the frozen vocabulary, shipped unbound.
+      Device map + spec amended with the mode-conditional fact.
+    - *Second stale fact*: `MAX_TRACKS = 4` was justified as "matches the
+      Oxygen's 4 faders" — the device has **9** (`oxygen-49-mkv.md`). The real
+      ceiling is FluidSynth's channel budget (tracks take channel = index, pads
+      own 8..=15) ⇒ **8**. **D31: cap raised to 8**, test-first (model law test
+      `track_cap_matches_the_channel_budget`; harness tests for F5 gain on an
+      8-track project, F5 inert on a 4-track one, detail select past track 4,
+      absent-channel no-select). Engine MIX gates replaced by one
+      allocation-free `has_track()`; starter project deliberately stays 4
+      tracks (capacity ≠ content); web reads `max_tracks` from `/api/health`
+      instead of mirroring the constant. Open sharp edge logged in D31:
+      `Track.channel` overrides into 8..=15 alias the pad bank — and channel 9
+      is the *documented* way to do GM drums. Needs its own ruling.
+    - 197 tests green; clippy + fmt clean.

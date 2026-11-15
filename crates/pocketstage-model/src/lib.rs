@@ -13,8 +13,13 @@ use serde::{Deserialize, Serialize};
 
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// R2: max 4 tracks (matches Oxygen 49 MKV's 4 faders exactly).
-pub const MAX_TRACKS: usize = 4;
+/// Channel budget, not a fader count (D31; supersedes R2's "max 4 tracks
+/// matches the Oxygen's 4 faders" — the measured device has **9** faders, and
+/// the real limit was always FluidSynth's channel map): a track owns channel
+/// `index` unless overridden (D3), while the engine reserves 8..=15 for the
+/// pad kit + metronome (`PAD_CH_BASE`). That leaves channels 0..=7 ⇒ **8**
+/// tracks. Raising it further requires re-homing the pads first.
+pub const MAX_TRACKS: usize = 8;
 /// R2 / MVP: max 8 scenes (triggered by pads 1-8 in PLAY mode).
 pub const MAX_SCENES: usize = 8;
 /// Pattern resolution is fixed at 16th notes (R2).
@@ -216,9 +221,11 @@ fn default_loop_bars() -> u8 {
 
 impl Project {
     /// The stock boot project for the v0.1 vertical slice (R6): 4 tracks with
-    /// curated R8 starter patches, 8 empty scenes, 120 BPM.
+    /// curated R8 starter patches, 8 empty scenes, 120 BPM. Deliberately NOT
+    /// `MAX_TRACKS`-sized (D31): capacity is a channel budget, content stays a
+    /// four-piece starter band.
     pub fn default_project() -> Self {
-        let starters: [(&str, u8, [u8; 3]); MAX_TRACKS] = [
+        let starters: [(&str, u8, [u8; 3]); 4] = [
             ("Piano", 0, [240, 220, 130]),   // Acoustic Grand
             ("E.Piano", 4, [130, 200, 240]), // EPiano 1
             ("Pad", 89, [190, 140, 240]),    // Pad 2 (warm)

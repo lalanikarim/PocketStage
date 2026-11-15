@@ -643,6 +643,11 @@ they shadow low keys exactly like pads 1–8 (accepted, D12 precedent), and noth
 **MIX overlay (D22).** Live mixer manipulation, faders/knobs → channels:
 - F1–F4 → track 1–4 gain (CC7), K1–K4 → pan (CC10), K5–K8 → reverb send (CC91) —
   one page, 4 tracks is the model (R2); F5–F9 unused until more channels exist.
+  → **D31 amended this**: R2's 4-track ceiling was bogus (it claimed a fader count
+  the device doesn't have — there are 9 faders). The cap is FluidSynth's channel
+  budget and is now 8, so **F(n) → gain of track n for every track the project
+  has**; the knob rows stay a four-channel page (only 8 knobs exist), and channels
+  5–8 reach pan/sends through their detail page (fader button n → K1–K4).
 - **Write-through with debounce**: control moves update the engine's live project AND
   schedule a store persist (~500 ms of quiet), so a board ride survives reboot without a
   PUT per CC. This is a new lane (see D24) — takes already proved the pattern.

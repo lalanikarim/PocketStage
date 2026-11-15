@@ -688,9 +688,18 @@ async fn favicon() -> Response {
         .into_response()
 }
 
+/// Liveness + the model's hard limits. The UI reads `max_tracks` instead of
+/// hardcoding a cap (D31 raised it 4 → 8; a second copy of that number in JS
+/// is exactly how stale-limit bugs happen). Server-side validation stays the
+/// authority — this is UX only.
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let name = state.store.get().project.name;
-    Json(serde_json::json!({ "ok": true, "project": name }))
+    Json(serde_json::json!({
+        "ok": true,
+        "project": name,
+        "max_tracks": pocketstage_model::MAX_TRACKS,
+        "max_scenes": pocketstage_model::MAX_SCENES,
+    }))
 }
 
 async fn get_project(State(state): State<AppState>) -> Json<ProjectFile> {

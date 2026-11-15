@@ -109,8 +109,29 @@ fn range_checks() {
     assert_eq!(p.validate(), Err(ValidationError::BpmOutOfRange(301.0)));
     p.bpm = 120.0;
 
-    p.tracks.push(p.tracks[0].clone()); // 5th track
-    assert_eq!(p.validate(), Err(ValidationError::TooManyTracks(5)));
+    while p.tracks.len() < MAX_TRACKS {
+        let t = p.tracks[0].clone();
+        p.tracks.push(t);
+    }
+    assert_eq!(p.validate(), Ok(()), "{MAX_TRACKS} tracks must validate");
+    let t = p.tracks[0].clone();
+    p.tracks.push(t);
+    assert_eq!(
+        p.validate(),
+        Err(ValidationError::TooManyTracks(MAX_TRACKS + 1))
+    );
+}
+
+#[test]
+fn track_cap_matches_the_channel_budget() {
+    // D31: the cap is a CHANNEL budget, not a fader count. Tracks default to
+    // channel = index (D3) and the engine reserves 8..=15 for the pad kit +
+    // tick (`PAD_CH_BASE`), so exactly 8 tracks fit without aliasing a pad.
+    // The old value (4) was justified by "the Oxygen has 4 faders" — a claim
+    // the measured device map disproved (it has 9).
+    assert_eq!(MAX_TRACKS, 8);
+    // The stock boot project stays small: adding capacity ≠ adding content.
+    assert_eq!(Project::default_project().tracks.len(), 4);
 }
 
 #[test]
