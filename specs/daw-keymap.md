@@ -206,6 +206,29 @@ scratchpad R14 + HANDOFF §7.
 
 - `GET/PUT /api/mapping` for oxygen `Mapping` (pad base, fader CCs…) with
   its existing `validate()`; UI advanced tab. Separate ship decision (Q7).
+- **PREP LANDED (session 14b):** read-only `GET /api/mapping` — serves the
+  two live boot mappings (music + HUI) with `"editable": false`; pure
+  observation for debugging/T7, Q7 untouched. PUT stays unbuilt.
+- **Open design rulings required before any PUT ships** (this is the part
+  that made Phase 5 different from phases 1–4 — say so in the spec):
+  1. **Loader**: mirror the keymap (`POCKETSTAGE_MAPPING` env override,
+     `~/.pocketstage/mapping.json`, never-fail-open → measured factory
+     defaults + loud warn). One file or two (music + HUI variants)?
+     Leaning: one file, two sections, since both mappers boot together.
+  2. **Mapper state on swap.** Unlike the DawKeymap (stateless per-message
+     lookup), `Mapper` carries cross-message state: fader positions, the
+     `127→0` shared-button tap detector, mode-pulse latching. Rebuilding a
+     Mapper mid-performance can strand note-ons on channels that no longer
+     exist — strictly worse than the semantic-layer remap risk. Options:
+     (a) apply at transport-stopped only; (b) restart-only (simplest,
+     honest); (c) pure `rebase(old, new)` carry-over fn for the stateful
+     bits + panic-free fallthrough for the rest. Ruling owed; (a)+(c)
+     hybrid is the likely shape.
+  3. **Gate**: T7 must run first — UI-editing measured ground truth without
+     knowing what each factory personality actually emits is exactly the
+     silent-misroute incident Q7 warned about. T7 capture tooling shipped
+     as `midi_probe t7` (labelled segments per personality + CC inventory
+     summary for diffs).
 
 ## Risks & edge cases (carry into implementation)
 
