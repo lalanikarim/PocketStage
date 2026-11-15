@@ -9,13 +9,34 @@ control, never an audio path. Single Rust binary, FluidSynth + soundfonts.
 
 ## Read these first (in order)
 
-1. `HANDOFF.md` — current state, backlog, environment facts, decision log snapshot
-2. `specs/brainstorming/scratchpad.md` — full design brainstorm (+ the D1–D16 decision table; R-sections supersede earlier prose). **The authoritative decision log is `HANDOFF.md` §7, current through D31** — later decisions live there, not here.
+1. `HANDOFF.md` — current state, the ordered backlog, environment facts, and
+   the **authoritative decision log**
+2. `specs/brainstorming/scratchpad.md` — full design brainstorm; its
+   rationale sections ("R…") supersede earlier prose in the same file
 3. `SPIKE_RESULTS.md` — validated audio architecture + platform quirks
 
-Do not start feature work without checking the backlog in `HANDOFF.md` §6 and
-the decision log (§7). Decisions marked ✅ are settled; re-litigating them in
-code is wasted work.
+Those docs are allowed to change shape — nothing here cites a section number in
+them. Do not start feature work without checking the **backlog** and the
+**decision log** in `HANDOFF.md`. Decisions marked ✅ are settled;
+re-litigating them in code is wasted work.
+
+### How to navigate those docs (and why this file has no pointers into them)
+
+`AGENTS.md` is meant to be stable. The other docs are append-heavy and get
+renumbered, split and re-headed as sessions pile up — so **this file refers to
+documents and the *roles* of their sections ("the backlog", "the decision
+log", "the device map"), never to section numbers, decision IDs, task IDs or
+"current through D…" counts.** Look those up live instead of trusting a
+reference found here:
+
+```bash
+grep -n '^#' HANDOFF.md                          # section inventory, by title
+grep -in 'backlog\|decision log' HANDOFF.md       # jump by role keyword
+grep -n '| D[0-9]' HANDOFF.md                     # the decision-ID table
+```
+
+If you ever find a section number, decision ID or "as of session N" claim in
+this file, that's drift — delete it and describe the rule again in full.
 
 ## Build & test
 
@@ -41,14 +62,14 @@ in CI or automated loops; there are no device-free integration tests for it yet.
 | `crates/pocketstage-engine` | audio callback thread, clock, FFI, metrics | `alsa`, `libc`, hand-written FluidSynth FFI |
 | `crates/pocketstage-model` | project data model + versioned file format | serde/serde_json/thiserror **only** — no audio, no MIDI, no I/O side effects |
 | `crates/pocketstage-midi` | port discovery, streaming parser, hotplug, event pump (`spawn_pump` → mpsc) | `alsa`, `libc`; parser is pure |
-| `crates/pocketstage-oxygen` | Oxygen 49 MKV input mapper (measured map → semantic `Action`s) | pure logic + serde; demo bin uses the midi pump (LED output dropped — T2 found no host-controllable LED protocol) |
+| `crates/pocketstage-oxygen` | Oxygen 49 MKV input mapper (measured map → semantic `Action`s) | pure logic + serde; demo bin uses the midi pump (LED output dropped — hardware probing found no host-controllable LED protocol; see the device map) |
 | `pocketstage-server` | axum HTTP control plane: REST project CRUD, `/ws` status push, take persistence | `axum`, `tokio`, model — never audio |
 
 Rules that keep this architecture intact:
 
 - **Single writer:** the engine owns all mutable state; everything else sends
   commands across a channel. Never introduce `Arc<Mutex<...>>` shared into the
-  audio thread. (See scratchpad R5.)
+  audio thread.
 - **Audio-thread discipline:** no allocation, no locks, no syscalls that can
   block in the render loop (`main.rs`, the `ps-audio` thread). Events arrive
   via `mpsc::try_recv`, bounded per cycle. Documented exception:
@@ -78,18 +99,21 @@ Rules that keep this architecture intact:
 - `snd_pcm_delay` over PipeWire's ALSA plugin over-reports (~26 ms vs reality).
 - FluidSynth default master gain is 0.2 — set `synth.gain` explicitly.
 - `fluid_synth_write_float` emits normalized −1..=1. Convert to S16LE with
-  `i16::MAX` (32767), **never** `i32::MAX` — session-10c bug: scaling by i32
+  `i16::MAX` (32767), **never** `i32::MAX` — a real bug here: scaling by i32
   before the i16 clamp saturates everything above ≈−96 dBFS, turning the
   output into a square wave (sounds "crisp" on soft taps, distorted on hard
-  hits). Keep `core::to_i16` + `float_to_i16_is_linear_until_true_full_scale`.
-- FluidSynth 2.3.4 FX gotchas (session-10b post-mortem, `examples/fx_bench.rs`):
+  hits). Keep `core::to_i16` + the `float_to_i16_is_linear_until_true_full_scale`
+  test guarding it.
+- FluidSynth 2.3.4 FX gotchas (post-mortem; reproducible with
+  `crates/pocketstage-engine/examples/fx_bench.rs`):
   `fluid_synth_set_chorus`'s real C signature is `(synth, nr, level, speed,
   depth_ms, type)`; bool-typed settings (`synth.chorus.active`) have NO public
   setter — toggle via `fluid_synth_chorus_on/reverb_on`; FluidR3 piano/organ/
   strings have zero chorus send (probe chorus with Lead Synth 81); stock
   reverb is room=0.2/damp=0/width=0.5 — never overwrite effect *space* params
-  at boot (caused "stacked" held keys). Policy: FX levels only, only when the
-  project sets them (`None` = touch nothing). `Settings` must outlive `Synth`.
+  at boot (this caused "stacked" held keys). Policy: FX levels only, only when
+  the project sets them (`None` = touch nothing). `Settings` must outlive
+  `Synth`.
 - Uninhabited enums are the opaque-type idiom for C handles; `#[repr(C)]` on
   them is compile error E0084.
 - **File-edit indent traps**: exact-match edits fail (or land mis-indented)
@@ -111,9 +135,13 @@ Rules that keep this architecture intact:
 - PipeWire audio; Oxygen 49 MKV is ALSA card 3 / sequencer client 28
   (`28:0` USB MIDI, `28:1` Mackie/HUI, `28:2` Editor SysEx).
 - Soundfont: `/usr/share/sounds/sf2/FluidR3_GM.sf2`.
-- DAW mode exposes **NC1 only** on this unit's firmware (D28): its
-  controls are plain MIDI with Mackie-style numbering on port ,1 — no
-  personality hunting needed, factory state is the setup requirement.
+- DAW mode exposes **NC1 only** on this unit's firmware: its controls are
+  plain MIDI with Mackie-style numbering on the HUI port — no personality
+  hunting needed, factory state is the setup requirement. This is a settled
+  decision; check the decision log before re-opening the emulation question.
+- Knob/fader/button numbers come from our measured device map, not from
+  M-Audio's guide — read `specs/device-maps/oxygen-49-mkv.md` before writing
+  anything that matches a raw CC or note number.
 - Useful checks: `aconnect -l`, `amidi -p hw:3,0 -d`, `aplay -l`.
 - Vendor manuals for the controller are **not in this repo** (copyright) — see
   the next section for where they live and how to fetch them.
@@ -127,7 +155,7 @@ the whole repository, not one file, so this is a hard rule.
 
 | Document | Version | Why it matters |
 |---|---|---|
-| Oxygen Series MKV — User Guide | v1.2 | Preset-vs-DAW mode behavior, `‹`/`›` semantics (§10 → **D30**), control inventory, personality-switch combo |
+| Oxygen Series MKV — User Guide | v1.2 | Preset-vs-DAW mode behavior, `‹`/`›` mode caveat, control inventory, personality-switch combo |
 | Oxygen 49 — Quickstart Guide | v1.1 | button layout / setup cross-checks |
 
 - **Get them from** `m-audio.com/support` (product page → *Manuals &
@@ -137,7 +165,8 @@ the whole repository, not one file, so this is a hard rule.
 - **Ground truth is ours, not theirs:** `specs/device-maps/oxygen-49-mkv.md` is
   the measured document the code follows. Update *that* when a probe teaches us
   something; quote the guide only in brief, always naming document + version
-  (that's how D30 records §10). Long pastes into repo files: never.
+  (and the guide's own section number if you must — external section numbers
+  are stable, ours are not). Long pastes into repo files: never.
 - `vendor-docs/README.md` is tracked and restates this policy where the files
   would land; the directory itself is gitignored so a stray PDF can't be added
   by accident (`git status` stays clean).
@@ -165,29 +194,40 @@ the whole repository, not one file, so this is a hard rule.
   (quoting, `$`, backticks, trailing-whitespace edits). A written file can be
   inspected, edited, and reused.
 
-## Standing design laws (permanent; details in the cited decisions)
+## Standing design laws (permanent)
 
-- **Pads are NOT special** (D25): one unified raw-note stream — Key and Pad
-  actions merge in the feeder; no pad-lane branching. Notes cannot be
-  instrument *and* buttons at once.
-- **The render loop may never panic and never trusts cross-lane data**
-  (D20): `get()`/`is_some_and()` over indexing; state machines in pure
-  tested modules (`transport.rs` pattern); ps-stats watchdogs ps-audio.
-- **UI labels come from the loaded soundfont** (`GET /api/presets`, built
-  by boot-time FFI preset iteration) — never hand-typed tables (a GM list
-  once mislabelled most picks). **UI icons/artwork come from the brand kit**
-  at `assets/brand/icons/` — never hand-drawn.
-- **PRESET-mode routing is not configurable** (D26): by construction, no
-  keymap schema shape expresses it; only DAW-mode semantics are data
-  (`specs/daw-keymap.md`).
+Each of these is backed by a settled decision plus a real bug or probe; the
+decision log in `HANDOFF.md` is the authority and this file restates them so
+they survive doc churn. If a law below contradicts the decision log, the log
+wins — fix this file in the same commit that changes behavior.
 
-## Current status & next work
+- **Pads are NOT special:** one unified raw-note stream — Key and Pad actions
+  merge in the feeder; no pad-lane branching. A note cannot be instrument
+  *and* button at once.
+- **The render loop may never panic and never trusts cross-lane data:**
+  `get()`/`is_some_and()` over indexing; state machines in pure tested modules
+  (`engine/src/transport.rs` is the pattern); the ps-stats thread watchdogs
+  ps-audio. A silent-but-alive engine is worse than a crash.
+- **UI labels come from the loaded soundfont** (`GET /api/presets`, built by
+  boot-time FFI preset iteration) — never hand-typed tables (a GM list once
+  mislabelled most picks). **UI icons/artwork come from the brand kit** at
+  `assets/brand/icons/` — never hand-drawn.
+- **PRESET-mode routing is not configurable:** by construction no keymap
+  schema shape expresses it; only DAW-mode semantics are data (see
+  `specs/daw-keymap.md`).
 
-**This file stays static.** Do not append session updates here. Live state
-lives in:
+## Where live state lives (never in this file)
 
-- `HANDOFF.md` §6 — authoritative ordered backlog (what's next)
-- `HANDOFF.md` §7 — decision log (D# table; ✅ = settled, don't re-litigate)
-- `HANDOFF.md` §9 + §10 — latest session wrap + full session history
-- `specs/*.md` — subsystem plans; scratchpad R-sections — design rationale
-- `CODE_REVIEW.md` — review findings ledger
+**This file stays static.** Do not append session updates, status snapshots or
+"what's next" here — they make every session touch a document that should only
+change when the architecture does.
+
+| Live question | Authoritative doc |
+|---|---|
+| What's next / what's done | `HANDOFF.md` backlog section (ordered) |
+| Why it works this way, and whether it's settled | `HANDOFF.md` decision log (✅ = don't re-litigate) |
+| Latest session wrap + full session history | `HANDOFF.md` resume / session-log sections |
+| Design rationale for a subsystem | `specs/brainstorming/scratchpad.md`, then `specs/*.md` plans |
+| Measured controller wire behavior | `specs/device-maps/oxygen-49-mkv.md` |
+| Audio architecture validation + quirks | `SPIKE_RESULTS.md` |
+| Open review findings | `CODE_REVIEW.md` |
