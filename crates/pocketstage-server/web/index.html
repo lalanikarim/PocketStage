@@ -107,6 +107,33 @@
     <div id="drumkit" style="display:flex;gap:8px;flex-wrap:wrap"></div>
   </section>
 
+  <section class="card">
+    <h2>DAW keys <span id="km-meta" style="font-weight:normal;color:var(--dim)"></span>
+      <button id="km-reset" class="alt" style="float:right;font-size:11px">reset to defaults</button></h2>
+    <div id="km-editor" style="display:flex;flex-direction:column;gap:4px"></div>
+    <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;align-items:center">
+      <button id="km-add-voice" class="alt" type="button">+ voice key</button>
+      <button id="km-add-cmd" class="alt" type="button">+ command</button>
+      <span style="flex:1"></span>
+      <button id="km-raw-toggle" class="alt" type="button">raw JSON ▸</button>
+      <button id="km-save" type="button">Save keymap</button>
+    </div>
+    <textarea id="km-raw" hidden spellcheck="false"></textarea>
+    <div style="display:flex;gap:6px;margin-top:8px">
+      <button class="alt km-overlay" data-target="mix" type="button">overlay: MIX</button>
+      <button class="alt km-overlay" data-target="seq" type="button">overlay: SEQ</button>
+      <button class="alt km-overlay" data-target="none" type="button">overlay: off</button>
+    </div>
+    <div id="km-msg" style="margin-top:6px;min-height:15px;font-size:12px"></div>
+    <p style="color:var(--dim);font-size:11px;margin-top:4px">
+      DAW-mode bindings live in one global file (the keyboard, not the song)
+      and apply instantly — no restart. A remap while a key is held can drop
+      that key's note-off. PRESET instrument routing is fixed by design;
+      knob targets ship with a later amendment. Overlay buttons above are the
+      escape hatch: they work even if every binding is gone.
+    </p>
+  </section>
+
   <section class="card" id="projcard" hidden>
     <h2>Projects</h2>
     <div id="projects" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"></div>
@@ -840,6 +867,206 @@ $("cleartakes").addEventListener("click", async () => {
   body.project.takes = [];
   await putProject(body, "all takes cleared");
 });
+
+// --------------------------------------------------------------- DAW keymap
+// Phase 4 (D26): binding-table editor over GET/PUT /api/keymap. Manual note
+// entry in v1 (Q5 ruling) — hardware capture is a fast-follow. The server
+// always re-validates; the client only pre-flags duplicate sources.
+let kmData = null;   // live DawKeymap object as served by GET /api/keymap
+let kmRaw = false;   // raw JSON textarea mode
+const KM_CMDS = ["mix_toggle", "seq_toggle", "seq_next_bar", "seq_flip",
+                 "bank_prev", "bank_next"];
+
+function kmMsg(text, isErr) {
+  const el = $("km-msg");
+  el.textContent = text || "";
+  el.className = isErr ? "err" : "";
+}
+
+function kmSel(opts, val) {
+  const s = document.createElement("select");
+  for (const [v, l] of opts) {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = l;
+    s.append(o);
+  }
+  s.value = val;
+  return s;
+}
+
+function srcAssign(kind, num, port) {
+  const n = Math.max(0, Math.min(127, Number(num.value) || 0));
+  num.value = n;
+  const s = kind.value === "note" ? { note: n } : { cc: n };
+  if (port.value) s.port = port.value;
+  return s;
+}
+
+function srcControls(src, onchange) {
+  const wrap = document.createElement("span");
+  wrap.style.cssText = "display:inline-flex;gap:4px;align-items:center";
+  const kind = kmSel([["note", "note"], ["cc", "cc"]],
+                   src.note !== undefined ? "note" : "cc");
+  const num = document.createElement("input");
+  num.type = "number"; num.min = 0; num.max = 127; num.style.width = "58px";
+  num.value = src.note !== undefined ? src.note : src.cc;
+  num.title = "MIDI number (note or CC) — manual entry: press a key, read it with amidi";
+  const port = kmSel([["", "any port"], ["music", "music"], ["hui", "hui"]],
+                   src.port || "");
+  kind.title = port.title = "source port qualifier (measured map: keys=pads on music, DAW faders/knobs on hui)";
+  const push = () => onchange(srcAssign(kind, num, port));
+  kind.onchange = num.onchange = port.onchange = push;
+  wrap.append(kind, num, port);
+  return wrap;
+}
+
+function voiceOptions(current) {
+  // Labels from the LOADED FONT (PRESETS, via /api/presets) — never a
+  // hand-typed table. Fallback before the catalog lands: bare gm N.
+  const opts = [["drums", "Drums"]];
+  const progs = [...PRESETS.keys()].sort((a, b) => a - b);
+  if (progs.length) {
+    for (const p of progs) opts.push([String(p), `${p}: ${PRESETS.get(p)}`]);
+  } else {
+    for (let p = 0; p < 128; p++) opts.push([String(p), "gm" + p]);
+  }
+  const cur = current === "drums" ? "drums" : String(current.program);
+  if (!opts.some(([v]) => v === cur)) opts.push([cur, cur]);
+  return opts;
+}
+
+function renderKm() {
+  const box = $("km-editor");
+  box.innerHTML = "";
+  if (!kmData) { box.innerHTML = "<em>keymap unavailable</em>"; return; }
+  const rows = [];   // [rowEl, () => source] pairs for the duplicate pre-flagger
+  const head = (t) => {
+    const h = document.createElement("div");
+    h.style.cssText = "color:var(--dim);font-size:11px;margin-top:6px";
+    h.textContent = t;
+    box.append(h);
+  };
+  const rowShell = (getSrc) => {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;gap:6px;align-items:center;flex-wrap:wrap";
+    rows.push([row, getSrc]);
+    box.append(row);
+    return row;
+  };
+  head(`voices — key press selects + auditions (${kmData.voices.length})`);
+  kmData.voices.forEach((b, i) => {
+    const row = rowShell(() => b.source);
+    const label = document.createElement("input");
+    label.value = b.label; label.style.width = "110px"; label.placeholder = "label";
+    label.title = "display label (max 32 chars)";
+    label.onchange = () => { b.label = label.value; };
+    const pick = kmSel(voiceOptions(b.voice),
+                     b.voice === "drums" ? "drums" : String(b.voice.program));
+    pick.onchange = () => {
+      b.voice = pick.value === "drums" ? "drums" : { program: Number(pick.value) };
+    };
+    const del = document.createElement("button");
+    del.className = "alt"; del.textContent = "×"; del.title = "remove binding";
+    del.onclick = () => { kmData.voices.splice(i, 1); renderKm(); };
+    row.append(label, pick,
+      srcControls(b.source, (s) => { b.source = s; flagDups(rows); }), del);
+  });
+  const cmdGroup = (list, title, key) => {
+    head(`${title} (${list.length})`);
+    list.forEach((b, i) => {
+      const row = rowShell(() => b.source);
+      const c = kmSel(KM_CMDS.map((x) => [x, x]), b.command);
+      c.onchange = () => { b.command = c.value; };
+      const del = document.createElement("button");
+      del.className = "alt"; del.textContent = "×"; del.title = "remove binding";
+      del.onclick = () => { kmData[key].splice(i, 1); renderKm(); };
+      row.append(c,
+        srcControls(b.source, (s) => { b.source = s; flagDups(rows); }), del);
+    });
+  };
+  cmdGroup(kmData.commands, "commands — momentary, both modes (Q4)", "commands");
+  cmdGroup(kmData.fader_buttons, "fader buttons", "fader_buttons");
+  if (kmData.knobs.length) {
+    head(`knobs (${kmData.knobs.length}) — not editable in this UI yet (target semantics pending T7)`);
+  }
+  flagDups(rows);
+}
+
+// Mirror of the server's rule: collision = same number space, same number,
+// port qualifiers overlap (unqualified overlaps everything). Server re-checks.
+function flagDups(rows) {
+  const info = rows.map(([el, get]) => ({ el, s: get() }));
+  info.forEach((a) => (a.el.style.outline = ""));
+  for (let i = 0; i < info.length; i++)
+    for (let j = i + 1; j < info.length; j++) {
+      const [x, y] = [info[i].s, info[j].s];
+      const sameSpace = (x.note === undefined) === (y.note === undefined);
+      const num = (v) => v.note !== undefined ? v.note : v.cc;
+      const overlap = !x.port || !y.port || x.port === y.port;
+      if (sameSpace && num(x) === num(y) && overlap) {
+        info[i].el.style.outline = "1px solid #e66";
+        info[j].el.style.outline = "1px solid #e66";
+      }
+    }
+}
+
+async function loadKm() {
+  try {
+    const r = await fetch("/api/keymap");
+    if (!r.ok) { $("km-meta").textContent = `unavailable (${r.status})`; return; }
+    const j = await r.json();
+    kmData = j.keymap;
+    $("km-meta").textContent = `schema ${j.schema} · v${j.version}`;
+    if (kmRaw) $("km-raw").value = JSON.stringify(kmData, null, 2);
+    renderKm();
+  } catch { $("km-meta").textContent = "offline"; }
+}
+
+$("km-add-voice").onclick = () => {
+  if (!kmData) return;
+  kmData.voices.push({ source: { note: 60 }, voice: "drums", label: "new" });
+  renderKm();
+};
+$("km-add-cmd").onclick = () => {
+  if (!kmData) return;
+  kmData.commands.push({ source: { note: 70 }, command: "mix_toggle" });
+  renderKm();
+};
+$("km-raw-toggle").onclick = () => {
+  kmRaw = !kmRaw;
+  $("km-raw").hidden = !kmRaw;
+  $("km-editor").style.visibility = kmRaw ? "collapse" : "visible";
+  $("km-raw-toggle").textContent = kmRaw ? "table ▸" : "raw JSON ▸";
+  if (kmRaw && kmData) $("km-raw").value = JSON.stringify(kmData, null, 2);
+};
+$("km-save").onclick = async () => {
+  const body = kmRaw ? $("km-raw").value : JSON.stringify(kmData);
+  try {
+    const r = await fetch("/api/keymap", {
+      method: "PUT", body, headers: { "Content-Type": "application/json" },
+    });
+    if (r.ok) { kmMsg("saved — live immediately ✓"); await loadKm(); }
+    else kmMsg(await r.text(), true);
+  } catch (e) { kmMsg("save failed: " + e, true); }
+};
+$("km-reset").onclick = async () => {
+  if (!confirm("Restore the built-in default keymap? Your bindings are overwritten.")) return;
+  try {
+    const r = await fetch("/api/keymap/reset", { method: "POST" });
+    if (r.ok) { kmMsg("defaults restored ✓"); await loadKm(); }
+    else kmMsg(await r.text(), true);
+  } catch (e) { kmMsg("reset failed: " + e, true); }
+};
+// Addition B escape hatch: exact overlay control, works with any keymap.
+document.querySelectorAll(".km-overlay").forEach((b) => {
+  b.onclick = async () => {
+    try {
+      const r = await fetch("/api/overlay/" + b.dataset.target, { method: "POST" });
+      kmMsg(r.ok ? `overlay → ${b.dataset.target} ✓` : await r.text(), !r.ok);
+    } catch (e) { kmMsg("overlay command failed: " + e, true); }
+  };
+});
+loadKm();
 
 // Remote control: transport + scene chips drive the engine over HTTP —
 // same event path the Oxygen keys take. State comes back via /ws.
