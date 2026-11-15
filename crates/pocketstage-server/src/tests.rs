@@ -250,6 +250,134 @@ async fn put_forwards_valid_project_to_engine_channel() {
     cleanup(&path);
 }
 
+// ------------------------------------------------- burst PUTs (autosave)
+
+/// Build a valid document carrying a distinguishable name + track-1 gain,
+/// so a burst's winner is identifiable from either view (memory or disk).
+fn ride_doc(name: &str, gain: f64) -> ProjectFile {
+    let mut pf = ProjectFile {
+        version: SCHEMA_VERSION,
+        project: Project::default_project(),
+    };
+    pf.project.name = name.into();
+    if let Some(t) = pf.project.tracks.first_mut() {
+        t.gain = Some(gain);
+    }
+    pf
+}
+
+/// The web mixer auto-saves on slider release ("mixer edits apply live"), so
+/// whole-project PUTs arrive in bursts with overlapping writers. Durability
+/// contract: an accepted replace must leave disk and memory AGREEING — a GET
+/// may never serve a document the next restart would not reproduce — and the
+/// tmp+rename dance must never strand debris.
+#[test]
+fn concurrent_replaces_keep_disk_and_memory_in_step() {
+    let path = temp_path("concurrent-replace");
+    cleanup(&path);
+    let store = std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap());
+
+    std::thread::scope(|s| {
+        for i in 0..8 {
+            let store = store.clone();
+            s.spawn(move || {
+                for n in 0..25 {
+                    store
+                        .replace(ride_doc(
+                            &format!("Ride {i}-{n}"),
+                            ((i + n) % 8) as f64 / 8.0,
+                        ))
+                        .unwrap();
+                }
+            });
+        }
+    });
+
+    let on_disk: ProjectFile =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        on_disk,
+        store.get(),
+        "store memory drifted from disk under concurrent PUTs"
+    );
+    // All writers are joined here, so a surviving .tmp means an unrenameable
+    // scratch file, not a race.
+    assert!(!path.with_extension("json.tmp").exists());
+    cleanup(&path);
+}
+
+/// Autosave shape on the wire: one drag = a few PUTs of the whole document,
+/// possibly with a stale/invalid one in between (editor state mid-edit). Each
+/// accepted document must reach the engine as its own `SetProject` — they are
+/// applied in arrival order at safe points, last writer wins — and a rejected
+/// payload must never forward a swap.
+#[tokio::test]
+async fn put_burst_forwards_every_accepted_swap_to_engine() {
+    let path = temp_path("burst");
+    cleanup(&path);
+    let (tx, rx) = std::sync::mpsc::channel::<EngineCommand>();
+    let (_ptx, prx) = std::sync::mpsc::channel::<pocketstage_model::Take>();
+    let (_etx, erx) = std::sync::mpsc::channel::<ProjectFile>();
+    let app = router(AppState::embedded(
+        std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap()),
+        tx,
+        std::sync::Arc::new(crate::LiveStatus::default()),
+        prx,
+        erx,
+    ));
+
+    let mut accepted = 0;
+    for i in 0..6u8 {
+        let mut doc = ride_doc(&format!("Ride {i}"), f64::from(i) / 8.0);
+        if i == 3 {
+            // Burst neighbor with a validation bug: 400, nothing forwarded.
+            doc.project.loop_bars = 0;
+        }
+        let body = serde_json::to_vec(&doc).unwrap();
+        if i == 3 {
+            let (status, _) = call(
+                app.clone(),
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/project")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "burst PUT {i}");
+            continue;
+        }
+        let (status, _) = call(
+            app.clone(),
+            Request::builder()
+                .method("PUT")
+                .uri("/api/project")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "burst PUT {i}");
+        accepted += 1;
+    }
+
+    let mut got = Vec::new();
+    while let Ok(EngineCommand::SetProject(pf)) = rx.try_recv() {
+        got.push(pf.project.name);
+    }
+    assert_eq!(got.len(), accepted, "every accepted swap forwards, no more");
+    assert_eq!(got.last().map(String::as_str), Some("Ride 5"));
+    // The rejected burst member left no trace in the store either.
+    assert_eq!(
+        ProjectStore::open_or_default(&path)
+            .unwrap()
+            .get()
+            .project
+            .name,
+        "Ride 5"
+    );
+    cleanup(&path);
+}
+
 #[tokio::test]
 async fn favicon_serves_the_brand_ico() {
     let path = temp_path("favicon");

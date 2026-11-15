@@ -340,6 +340,14 @@ impl ProjectStore {
         // and two writers sharing one X.json.tmp can rename a torn file
         // over the real project. Serializing replaces is cheap — they are
         // rare and this is the durability path.
+        //
+        // The memory swap stays INSIDE that lock too: releasing it first and
+        // assigning after lets an interleaving lose the winner (T1 renames A,
+        // T2 renames B and stores B, T1 then stores A -> GET serves a document
+        // disk does not have, and the next restart reverts it). Harmless while
+        // PUTs were one-per-Save-click; routine bursts from web mixer
+        // auto-save make the window reachable. `project` is a leaf lock, so
+        // taking it under `path` cannot deadlock.
         let path = self.path.lock().unwrap_or_else(|p| p.into_inner());
         let result = (|| {
             if let Some(dir) = path.parent() {
@@ -349,11 +357,11 @@ impl ProjectStore {
             std::fs::write(&tmp, &json).map_err(|e| StoreError::Io(e.to_string()))?;
             std::fs::rename(&tmp, &*path).map_err(|e| StoreError::Io(e.to_string()))
         })();
+        if result.is_ok() {
+            *self.project.lock().unwrap_or_else(|p| p.into_inner()) = incoming;
+        }
         drop(path);
-        result?;
-
-        *self.project.lock().unwrap_or_else(|p| p.into_inner()) = incoming;
-        Ok(())
+        result
     }
 
     pub fn path(&self) -> PathBuf {
