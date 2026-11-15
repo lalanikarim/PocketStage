@@ -793,8 +793,8 @@ knob/bank bindings.
 
 **Status (s14c):** T7 takes 1–2 done — knobs relative on HUI CC16–23
 (CW=1/CCW=65), faders pitch-bend there, buttons NOTES there; ‹/› = HUI
-notes 46/47; only NC1 selectable so far (guide combo: hold SHIFT +
-DAW/PRESET — take 3 targets the pinned N-personities). Knob target-
+notes 46/47; only NC1 selectable (the guide's hold-SHIFT+DAW/PRESET
+combo is inert on this firmware; take 3 cancelled per D28). Knob target-
 semantics amendment DRAFTED in specs/daw-keymap.md (relative|absolute
 kinds) pending ruling. **D28 (s14c): pin NC1** — only personality the
 unit exposes; plain MIDI with Mackie numbering, emulation still a
