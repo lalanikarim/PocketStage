@@ -458,9 +458,18 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     note/cc+port, typed sections, knobs section empty-allowed (param
     targets additive later), bank_prev/next commands named, unit pinned
     N1/N2 plain-MIDI, T7 probe (six personalities × both ports) gates
-    knob/bank consumption. **Implemented sessions 14: phases 1–4 (see §10).
-    Owed: live ear-check of the remap loop; T7 for knob targets +
-    bank_prev/next behavior + fader-button default bindings; phase 5
+    knob/bank consumption. **Implemented session 14; hardware ear-check
+    PASSED session 14b** — hot voice remap + command remap confirmed
+    by ears and log (`[daw] select`, `overlay=MIX`), reset → defaults,
+    corrupt keymap boots warn+defaults+live server. **Q4 PRESET-mode
+    overlay-follows-remap check left OPEN** (strong log evidence, no
+    explicit confirm). T7 take 1 captured + analyzed (findings + raw
+    log in specs/device-maps/): knobs are RELATIVE rotors on HUI CC16–23,
+    faders ride pitch-bend there, buttons are NOTES — knob target
+    semantics DRAFTED in specs/daw-keymap.md pending ruling. **Take 2
+    owed** (PRESET-SHIFT full sweep, isolated `<>` presses, N1/N2 ID,
+    per-button HUI note table, transport × personality) — it gates bank
+    + fader_button defaults and the knob direction encoding. Phase 5
     (device Mapping exposure) stays an open ship decision.**
 18. **Voice picker on the web — DONE** (`POST /api/voice` accepting the
     model's `ActiveVoice` serde form (`"drums"` | `{"program": N}`, >127 →
@@ -521,7 +530,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D23 | **SEQ overlay** (R12): live step programmer — bank-1 pads 1–8 toggle steps of an 8-step window on the selected track; bank 2 keeps commands (pad 10 exit, pad 11 next bar, pad 12 flip half-window); edits quantize to the engine's 16th grid | ✅ Implemented (s11) |
 | D24 | **Write-through lane** (R12): engine-originated project edits flow out on a dedicated mpsc to the store (debounced), never back in — single writer intact; engine applies edits locally first. Debounce is sample-counted in the engine; the server drain coalesces bursts to one persist. First rider: CycleLoopBars — B-key survives reboot now (event itself removed by D25) | ✅ Implemented (s11) |
 | D25 | **One voice at a time** (session 11 feedback; supersedes D12's always-on kit layer + D13's pitch%12 browser): PRESET has exactly ONE active performance voice. Selection = DAW-mode white-key browser anchored at C2 — slot 0 is Drums, next 11 white keys are the curated GM patches; black keys carry only overlay commands. Melodic voice: all 49 keys play it and pad presses are melody notes too (pads transmit plain notes 36–51, nothing to disambiguate). Drums voice: notes 36–51 = kit across both banks (`drum_kit_2` additive field; bank-2 channels mirror bank 1 — same kill group, documented trade-off), other notes silent. Overlay enter/exit = black-key command notes (G#3 MIX, A#3 SEQ; +C#4 next bar, D#4 flip while SEQ lives), armed in either mode — a follow-up to the user's unified-note rule replaced the earlier "DAW pads 9/10" scheme and REMOVED hardware scene launching (web UI / HTTP only): with one note stream, notes 36–51 cannot be both instrument and buttons. Voice persists via `Project.active_voice` + write-through; mirrored on `LiveStatus.active_voice` (VOICE_DRUMS sentinel) → /ws + stats + UI | ✅ Implemented (s11b), ear-checks owed |
-| D26 | **Configurable DAW keymap** (R14 + addendum): global `~/.pocketstage/keymap.json`, schema **v0.1** — unified frozen SOURCE object (`{"note":N}`/`{"cc":N}` + optional port) consumed by typed sections (voices/commands/fader_buttons/knobs-empty); same map drives overlay commands inside PRESET; PRESET instrument routing NOT expressible (can't-be-remapped by construction); feeder-only consumption (R5), corrupt file → defaults never-fail boot; manual note entry v1; voice field externally-tagged for future patch refs; unit personality PINNED to N1/N2 plain-MIDI (no Mackie/HUI emulation, no N3) | ✅ v0.1 frozen (s13); phases 1–4 implemented (s14) — ear-check owed; T7 probe gates knob targets + bank behavior |
+| D26 | **Configurable DAW keymap** (R14 + addendum): global `~/.pocketstage/keymap.json`, schema **v0.1** — unified frozen SOURCE object (`{"note":N}`/`{"cc":N}` + optional port) consumed by typed sections (voices/commands/fader_buttons/knobs-empty); same map drives overlay commands inside PRESET; PRESET instrument routing NOT expressible (can't-be-remapped by construction); feeder-only consumption (R5), corrupt file → defaults never-fail boot; manual note entry v1; voice field externally-tagged for future patch refs; unit personality PINNED to N1/N2 plain-MIDI (no Mackie/HUI emulation, no N3) | ✅ v0.1 frozen (s13); phases 1–4 implemented (s14), hardware ear-checked (s14b; Q4 PRESET check open); T7 take-1 done — knobs measured RELATIVE on HUI (amendment drafted in spec), take 2 gates bank/fader-button defaults + knob direction encoding |
 | D26.1 | **Schema rectification v0→v0.1** (R14 addendum, locked Option B): re-frozen pre-code after MKV docs review showed knobs (CC/HUI) are DAW mode's primary controls; command vocab incl. bank_prev/next; knob param-target semantics intentionally unfrozen (additive later); no version field until phase 1 ships SCHEMA=1 | ✅ (s13) |
 
 ---
@@ -582,26 +591,24 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 ## 9. How to resume (suggested prompt for next session)
 
 > Read HANDOFF.md (§6 backlog, §7 decisions through D26.1) and AGENTS.md.
-> Session 14 wrap: **DAW keymap phases 1–4 implemented** (D26) — pure
-> `DawKeymap` schema v0.1 in oxygen (defaults regression-lock the old
-> hardcoded table); `KeymapSlot` + GET/PUT /api/keymap + reset +
-> POST /api/overlay/{mix|seq|none} (Addition B anti-brick) in server;
-> engine feeder routes DAW notes + PRESET overlay commands through the
-> live map (`route_daw_note`, hot reload per-message, old VOICES/
-> white_slot/CMD_* constants deleted); "DAW keys" web card edits the
-> table (manual entry per Q5, raw-JSON escape hatch, dup pre-flagging).
-> PRESET instrument routing untouched — still literal code by D26
-> invariant. 191 tests, gates green. **Owed before closing item 17:
-> live ear-check of the remap loop (PUT a voice/command, feel it with no
-> restart); T7 probe gates knob targets, bank_prev/next behavior and
-> default fader-button bindings** (bank commands parse but currently do
-> nothing in the feeder). Next software candidates: §6 item 15 (live-
-> apply web mixer edits), item 19 phase B (patch catalog — its phase E
-> feeds the keymap voice field via Addition A). Hardware-gated backlog:
-> ear-checks (§6 items 14+16, now incl. keymap loop), pedal probe, T7,
-> Pi validation. Live env: engine runs detached on :7777
+> Session 14b wrap: **keymap phases 1–4 hardware-validated** — live
+> remap loop confirmed by ears + log (voice hot-reload, command remap →
+> `overlay=MIX`, reset → defaults, corrupt keymap file boots warn +
+> defaults + live server). See §10 session 14b for the T7 take-1
+> findings (knobs relative on HUI CC16–23; faders = pitch-bend there;
+> buttons = notes; one plain-MIDI personality found) and the device
+> gotchas that masqueraded as keymap bugs (octave-dual layer state +
+> power-cycle-surviving octave shift — see specs/device-maps/ field
+> notes). **Next at keyboard (one ~10 min sitting): T7 take 2 + the open
+> Q4 check** (enter MIX in DAW → flip to PRESET → remapped key toggles
+> off, old key dead). Then: rule the knob amendment
+> (specs/daw-keymap.md draft), bank/fader_button defaults, Phase 5 ship
+> decision. Next software candidates: §6 item 15 (live-apply web mixer
+> edits), item 19 phase B (patch catalog — its phase E feeds the keymap
+> voice field via Addition A). Live env: engine detached on :7777
 > (`pkill -x pocketstage-eng` — see AGENTS gotchas); project library in
-> ~/.pocketstage/projects; keymap file only created on first PUT.
+> ~/.pocketstage/projects; keymap file currently at defaults; note
+> labels use middle-C=C3 convention (bottom key C1) — numbers are truth.
 
 ---
 
@@ -946,3 +953,23 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   reset button, overlay MIX/SEQ/off escape buttons. node --check caught a
   JS `sel` redeclaration — syntax-check embedded scripts, CI doesn't.
   191 tests, four gates green.
+- **Session 14b (hardware validation + T7 take 1)**: phases 1–4 ear-check
+  PASSED on the unit — voice remap hot-reload (`[daw] select Alto Sax`,
+  no restart), command remap mix_toggle→note 72 toggling MIX both ways
+  (log `overlay=MIX`), reset → defaults, corrupt keymap file = loud boot
+  warning + defaults + live server. Q4 PRESET-mode overlay-follows-remap
+  check left OPEN deliberately. T7 take 1 captured via `midi_probe t7`
+  (20 899 events; raw log + findings committed to specs/device-maps/):
+  DAW-family knobs are RELATIVE rotors (HUI ch0 CC16–23), faders ride
+  PITCH BEND on the HUI port, buttons are NOTES there — the spec's
+  fader_buttons example corrected to note sources; one plain-MIDI
+  personality found (music-port GM-ish CCs) — likely N1/N2 pin
+  candidate. Knob semantics amendment DRAFTED in specs/daw-keymap.md
+  (relative vs absolute target kinds; direction encoding must be
+  measured, never guessed). Take-2 list incl. transport-button ×
+  personality check (user flagged the gap). Debugging war stories →
+  device-map field notes: unit was left octave-DUAL by SHIFT exploration
+  (undocumented state; power-cycle clears) and octave shift SURVIVES
+  power-cycle with no MIDI output — both masqueraded as keymap bugs.
+  Note-label convention switched project-wide to middle-C=C3 (bottom
+  key = C1; labels only, wire numbers untouched). 192 tests green.

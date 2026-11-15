@@ -199,3 +199,20 @@ which note); **transport buttons (play/stop/record/loop) one press per
 personality** — A2 measured notes 94/93/95/86 on the HUI port for one
 configuration only; confirm they are personality-invariant (or capture
 what N1/N2 send instead, e.g. system-RT start/stop).
+
+## Field notes (session 14b) — unit states that masquerade as software bugs
+
+- The unit can enter an **octave-DUAL layer state** via SHIFT combos:
+  one press → two note-ons an octave apart on the music port (pads
+  unaffected). Undocumented in guide v1.2. A power-cycle cleared it.
+  Symptom: "repeating dual notes" / "everything sounds doubled".
+- **Octave shift survives unit power-cycle** and its buttons emit no
+  MIDI (silent internal remap, as documented) — a shifted unit moves
+  every keymap binding off its physical key with zero log evidence.
+  Before debugging any "bindings stopped working" report: press the
+  bottom key at claimed octave 0 and confirm it sends note **36**
+  (`midi_probe watch`). Both states were caused by T7 button-mashing;
+  expect them after any exploratory session.
+- Project-wide label convention (s14b): middle C = **C3** (Yamaha/DAW
+  style), bottom key = **C1**. Wire numbers unchanged; when names and
+  numbers disagree, trust the number.

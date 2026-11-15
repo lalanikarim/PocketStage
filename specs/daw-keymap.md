@@ -85,8 +85,11 @@ pads on the music port.
   `bank_prev`, `bank_next` (last two = MIX-overlay paging, mirroring the
   documented `<`/`>` track-bank scroll; no default binding in built-in
   defaults until T7 measures the real notes). Momentary semantics.
-- `fader_buttons`: per-button command bindings (Q2), source is a CC on
-  the HUI port per measured map.
+- `fader_buttons`: per-button command bindings (Q2). T7 take 1
+  correction: the buttons above the faders emit **Note On/Off on the
+  HUI port** (notes ≈16–47, Mackie-style), NOT CCs — correct source
+  shape is `{"note":N,"port":"hui"}`; per-button note table awaits
+  take 2 before any defaults ship.
 - `knobs`: **section-shaped, ships empty.** Target semantics are
   continuous parameters, NOT momentary commands — deliberately NOT frozen
   in v0.1 (Q-V2a): parameter naming (`{"param": {"track": N, "target":
@@ -118,6 +121,46 @@ CC numbers or only meaning (device-local state is invisible to us — no
 readback); confirm `<`/`>` bank-scroll messages for default bindings.
 Non-goals reaffirmed: HUI protocol emulation; mirroring device-local knob
 submode state; N3 pad semantics (conflict with D25 unified note rule).
+
+## Knob semantics amendment — DRAFT (session 14b, pending ruling)
+
+T7 take 1 measured the wire truth (specs/device-maps/oxygen-49-mkv.md):
+in HUI-family personalities the knobs are **relative rotors** emitting
+ch0 CC16–23 on the HUI port (observed values 1..65, never absolute),
+while the one plain-MIDI personality emits ordinary **absolute CCs**
+(7, 14, 42, 70–73, 91) on the music port. A knob binding must therefore
+carry a value MODE, not assume positions:
+
+```json
+"knobs": [
+  { "source": {"cc": 16, "port": "hui"},
+    "target": { "kind": "relative", "step": 2, "param": {} } },
+  { "source": {"cc": 71},
+    "target": { "kind": "absolute", "param": {} } }
+]
+```
+
+Proposed rulings (additive to frozen v0.1 — the SOURCE object is
+untouched, which is exactly what freezing it bought us):
+
+1. `knobs[]` entry = `{source, target}`, `deny_unknown_fields`.
+2. `target.kind` ∈ `relative | absolute`. Relative: each CC message is a
+   tick; param moves `step` units per tick (default 1). Absolute: CC
+   value 0..=127 maps linearly onto the param range.
+3. **Relative DIRECTION encoding is NOT measured yet** — take 2 must
+   sweep one knob slowly clockwise-only, then counter-clockwise-only,
+   and diff raw values before this freezes. Sign conventions guessed
+   wrong are silent bugs (knob feels inverted).
+4. The `param` leaf stays OPEN (shared namespace with the D22 MIX-
+   becomes-data endgame and item-19 patch refs): first real consumer
+   rules it; knobs stay shaped-but-unconsumed until then.
+5. **Defaults stay EMPTY.** Without per-personality knob CCs + direction
+   data, any default is a guess — and guessed defaults are how silent
+   misroutes happen (Q7).
+
+Bank commands (`bank_prev`/`bank_next`) and fader_button defaults remain
+equally gated on take 2 (`<>` emissions not yet isolated from the
+sweeps; buttons confirmed as notes, see correction above).
 
 ## Reload architecture (keeps R5)
 
