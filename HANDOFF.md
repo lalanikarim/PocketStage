@@ -473,12 +473,15 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     excluded); PAN/DEVICE/SENDS knob-groups don't change wire numbers;
     transport personality-invariant; PRESET-SHIFT has no hidden wire
     behavior. **Q4 check CLOSED — passed** (remapped key toggled live
-    overlay in PRESET; old binding inert). Remaining gate: **take 3
-    (conditional)** — all take-2 numbers are NC1/Mackie, but D26 pins
-    N1/N2 plain-MIDI; reach N1/N2 deliberately (guide combo: hold SHIFT
-    + press DAW/PRESET) and re-sweep → THAT personality's numbers become
-    the shipped defaults. Phase 5 (device Mapping exposure) stays an
-    open ship decision.**
+    overlay in PRESET; old binding inert). **D28 ruled (s14c): pin NC1**
+    — the unit exposes only NC1, and its messages are plain MIDI with
+    Mackie numbering (consumption ≠ protocol emulation; emulation stays
+    a non-goal), so take-2 numbers ARE the default source. Take 3
+    cancelled; no hardware gate remains. Next code work: (a) MIX bank
+    paging + feeder wiring for BankPrev/BankNext with shipped defaults
+    ‹/› = HUI notes 46/47; (b) knob param-leaf ruling, then knob
+    consumption (amendment drafted). Phase 5 (device Mapping exposure)
+    stays an open ship decision.**
 18. **Voice picker on the web — DONE** (`POST /api/voice` accepting the
     model's `ActiveVoice` serde form (`"drums"` | `{"program": N}`, >127 →
     400); `EngineCommand::SelectVoice` runs as the ordinary
@@ -538,8 +541,9 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D23 | **SEQ overlay** (R12): live step programmer — bank-1 pads 1–8 toggle steps of an 8-step window on the selected track; bank 2 keeps commands (pad 10 exit, pad 11 next bar, pad 12 flip half-window); edits quantize to the engine's 16th grid | ✅ Implemented (s11) |
 | D24 | **Write-through lane** (R12): engine-originated project edits flow out on a dedicated mpsc to the store (debounced), never back in — single writer intact; engine applies edits locally first. Debounce is sample-counted in the engine; the server drain coalesces bursts to one persist. First rider: CycleLoopBars — B-key survives reboot now (event itself removed by D25) | ✅ Implemented (s11) |
 | D25 | **One voice at a time** (session 11 feedback; supersedes D12's always-on kit layer + D13's pitch%12 browser): PRESET has exactly ONE active performance voice. Selection = DAW-mode white-key browser anchored at C2 — slot 0 is Drums, next 11 white keys are the curated GM patches; black keys carry only overlay commands. Melodic voice: all 49 keys play it and pad presses are melody notes too (pads transmit plain notes 36–51, nothing to disambiguate). Drums voice: notes 36–51 = kit across both banks (`drum_kit_2` additive field; bank-2 channels mirror bank 1 — same kill group, documented trade-off), other notes silent. Overlay enter/exit = black-key command notes (G#3 MIX, A#3 SEQ; +C#4 next bar, D#4 flip while SEQ lives), armed in either mode — a follow-up to the user's unified-note rule replaced the earlier "DAW pads 9/10" scheme and REMOVED hardware scene launching (web UI / HTTP only): with one note stream, notes 36–51 cannot be both instrument and buttons. Voice persists via `Project.active_voice` + write-through; mirrored on `LiveStatus.active_voice` (VOICE_DRUMS sentinel) → /ws + stats + UI | ✅ Implemented (s11b), ear-checks owed |
-| D26 | **Configurable DAW keymap** (R14 + addendum): global `~/.pocketstage/keymap.json`, schema **v0.1** — unified frozen SOURCE object (`{"note":N}`/`{"cc":N}` + optional port) consumed by typed sections (voices/commands/fader_buttons/knobs-empty); same map drives overlay commands inside PRESET; PRESET instrument routing NOT expressible (can't-be-remapped by construction); feeder-only consumption (R5), corrupt file → defaults never-fail boot; manual note entry v1; voice field externally-tagged for future patch refs; unit personality PINNED to N1/N2 plain-MIDI (no Mackie/HUI emulation, no N3) | ✅ v0.1 frozen (s13); phases 1–4 implemented (s14), hardware ear-checked incl. Q4 (s14b/c); T7 takes 1–2 decoded (knobs relative CW=1/CCW=65, <> = HUI 46/47, buttons 1–8 = HUI 0–7, #9 is a mode button); take 3 conditional: reach N1/N2 deliberately — pinned personality's numbers ship as defaults |
+| D26 | **Configurable DAW keymap** (R14 + addendum): global `~/.pocketstage/keymap.json`, schema **v0.1** — unified frozen SOURCE object (`{"note":N}`/`{"cc":N}` + optional port) consumed by typed sections (voices/commands/fader_buttons/knobs-empty); same map drives overlay commands inside PRESET; PRESET instrument routing NOT expressible (can't-be-remapped by construction); feeder-only consumption (R5), corrupt file → defaults never-fail boot; manual note entry v1; voice field externally-tagged for future patch refs; unit personality PINNED to N1/N2 plain-MIDI (no Mackie/HUI emulation, no N3) | ✅ v0.1 frozen (s13); phases 1–4 implemented (s14), hardware ear-checked incl. Q4 (s14b/c); T7 takes 1–2 decoded (knobs relative CW=1/CCW=65, <> = HUI 46/47, buttons 1–8 = HUI 0–7, #9 is a mode button); pinning superseded by D28 (NC1) |
 | D26.1 | **Schema rectification v0→v0.1** (R14 addendum, locked Option B): re-frozen pre-code after MKV docs review showed knobs (CC/HUI) are DAW mode's primary controls; command vocab incl. bank_prev/next; knob param-target semantics intentionally unfrozen (additive later); no version field until phase 1 ships SCHEMA=1 | ✅ (s13) |
+| D28 | **Personality pin: NC1** (supersedes D26's "pin N1/N2"): measured unit exposes ONLY NC1 across every documented selection path (guide combo hold-SHIFT+DAW/PRESET, all preset slots); NC1's outputs are plain MIDI messages with Mackie-style numbering (notes 0–7/46/47, tick constants, PB faders) — consuming them is mapping, not the bidirectional Mackie-protocol emulation that stays a hard non-goal. Defaults ship from take-2 NC1 numbers; MIX keeps using PRESET-mode faders CC33–41 | ✅ ruled (s14c) |
 
 ---
 
@@ -607,14 +611,14 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 > buttons = notes; one plain-MIDI personality found) and the device
 > gotchas that masqueraded as keymap bugs (octave-dual layer state +
 > power-cycle-surviving octave shift — see specs/device-maps/ field
-> notes; take 2 decoded + Q4 PASSED s14c — see §10). **Next at keyboard:
-> T7 take 3 (conditional)** — reach N1/N2 via the guide combo (hold
-> SHIFT + press DAW/PRESET), verify on display, full control sweep; that
-> pinned personality's wire numbers become the shipped keymap defaults
-> (bank/buttons/knobs). Then: rule the knob amendment
-> (specs/daw-keymap.md draft — direction encoding already resolved
-> CW=1/CCW=65), implement defaults + bank command wiring, Phase 5 ship
-> decision. Next software candidates: §6 item 15 (live-apply web mixer
+> notes; take 2 decoded + Q4 PASSED s14c — see §10). **No hardware gate
+> remains: the unit exposes NC1 only, and D28 (ruled s14c) pins NC1 —
+> its outputs are plain MIDI with Mackie-style numbering, so consuming
+> them is mapping, not emulation. Take 3 cancelled.** Next work is pure
+> software: (a) MIX bank paging + feeder wiring for BankPrev/BankNext +
+> default bindings ‹/› = HUI notes 46/47; (b) knob param-leaf ruling,
+> then knob consumption (amendment drafted, direction CW=1/CCW=65);
+> (c) Phase 5 ship decision. Next software candidates: §6 item 15 (live-apply web mixer
 > edits), item 19 phase B (patch catalog — its phase E feeds the keymap
 > voice field via Addition A). Hardware-gated backlog still standing:
 > pedal probe, Pi validation, items 14/16 ear-checks. Live env: engine
@@ -1000,7 +1004,9 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   take-1 CC123 mystery = SHIFT+PANIC per guide. Guide PDF located
   (~/Documents, v1.2) and cross-referenced — personality switch combo is
   hold-SHIFT + DAW/PRESET, but unit stayed on NC1 across attempts;
-  take-1's plain-MIDI segment was likely an accidental N-personality →
-  **take 3 (conditional)**: reach N1/N2 deliberately and re-sweep, since
-  D26 pins plain-MIDI and shipped defaults must come from THAT
-  personality, not NC1.
+  take-1's plain-MIDI segment re-read as likely PRESET edit-mode
+  traffic, not an N-personality. Resolution: **D28 ruled — pin NC1**
+  (only personality available; outputs are plain MIDI with Mackie-style
+  numbering, consumption is mapping not emulation; bidirectional Mackie
+  protocol stays a non-goal). Take 3 cancelled — no hardware gate
+  remains; take-2 numbers ship as defaults.

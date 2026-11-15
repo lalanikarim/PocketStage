@@ -796,4 +796,7 @@ knob/bank bindings.
 notes 46/47; only NC1 selectable so far (guide combo: hold SHIFT +
 DAW/PRESET — take 3 targets the pinned N-personities). Knob target-
 semantics amendment DRAFTED in specs/daw-keymap.md (relative|absolute
-kinds) pending ruling. Historical prose above unchanged.
+kinds) pending ruling. **D28 (s14c): pin NC1** — only personality the
+unit exposes; plain MIDI with Mackie numbering, emulation still a
+non-goal; take-2 numbers ship as defaults. Historical prose above
+unchanged.

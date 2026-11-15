@@ -5,10 +5,11 @@ remap loop validated live on the unit (hot reload, command toggles,
 reset, corrupt-file boot — see HANDOFF §10 s14b). Q4 PRESET-mode check
 PASSED (s14c). Schema v0.1 FROZEN; T7 takes 1–2 decoded — knob semantics
 AMENDMENT DRAFTED below (direction RESOLVED CW=1/CCW=65; bank ‹/› = HUI
-notes 46/47; buttons 1–8 = HUI notes 0–7). Remaining data gate: **take 3
-(conditional)** — reach pinned N1/N2 personality deliberately and re-
-sweep; its numbers ship as defaults (all take-2 numbers are NC1/Mackie).
-Phase 5 = open ship decision. Decision D26 in scratchpad R14 + HANDOFF §7.**
+notes 46/47; buttons 1–8 = HUI notes 0–7). **D28 ruled (s14c): NC1 is
+the pinned personality** — the only one this unit exposes; its messages
+are plain MIDI with Mackie-style numbering, so take-2 numbers ship as
+defaults. Phase 5 = open ship decision. Decisions D26 + D28 in
+scratchpad R14 + HANDOFF §7.**
 Requested session 12: "configure DAW mode key and button mappings so we can
 manage it in a json file … what we don't want to allow remapping is Preset
 mode." All seven open questions answered (rulings at each Q below).
@@ -92,8 +93,8 @@ pads on the music port.
 - `fader_buttons`: per-button command bindings (Q2). T7 take 2 decoded:
   **buttons 1–8 = HUI-port notes 0–7** (button N → note N−1); the 9th
   button is **DAW BUTTON MODE** (a device-local mode cycler — never a
-  binding target). Source shape `{"note":N,"port":"hui"}`. Caveat: these
-  are NC1 numbers; if take 3 lands on N1/N2, defaults come from there.
+  binding target). Source shape `{"note":N,"port":"hui"}`. Per D28 these
+  NC1 numbers ARE the shipped default source.
 - `knobs`: **section-shaped, ships empty.** Target semantics are
   continuous parameters, NOT momentary commands — deliberately NOT frozen
   in v0.1 (Q-V2a): parameter naming (`{"param": {"track": N, "target":
@@ -114,13 +115,15 @@ pads on the music port.
 The MKV guide documents DAW mode as six factory personalities (NC1/NC2/
 M|h Mackie variants, N1/N2 plain-MIDI, N3 Ableton clip-launch), cycled
 by **holding SHIFT and pressing DAW/PRESET** (guide v1.2 exact combo —
-not `<`/`>`), **not user-editable, no readback**. Our keymap is only
-valid for one selection → **pin N1 or N2** (plain CC; no Mackie/HUI
-protocol emulation — hard non-goal). Setup docs must state the required
-unit configuration. STATUS s14c: attempts on our unit stayed on NC1
-(all ten preset slots enter DAW as NC1); take-1 captured a plain-MIDI
-control set by accident, proving an N-personality IS reachable —
-**take 3** must land on it deliberately (device map §T7 take 2).
+not `<`/`>`), **not user-editable, no readback**. Measured reality
+(s14c): this unit exposes **NC1 only** — every documented selection path
+stays NC1 across all ten preset slots; take-1's apparent plain-MIDI
+segment re-reads as PRESET edit-mode traffic. **D28 supersedes "pin
+N1/N2": pin NC1.** Its outputs are plain MIDI messages with Mackie-
+style numbering (notes 0–7/46/47, tick constants, PB faders); consuming
+them is mapping, while bidirectional Mackie-protocol emulation (LCD,
+motor-fader updates) remains a hard non-goal. Setup docs: factory state
+IS NC1 — no configuration required.
 
 **T7 probe (hardware, before phases 3–4 consume knob/bank bindings):**
 capture what each of the six personalities emits on both ports; whether

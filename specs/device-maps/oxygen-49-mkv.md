@@ -259,3 +259,13 @@ re-capture. **Take 3 (conditional):** reach N1/N2 intentionally via the
 guide combo, verify on the display, full sweep → that personality's
 numbers are what keymap DEFAULTS must use (D26 pins plain-MIDI; NC1 is
 Mackie and off-limits for defaults).
+
+**Resolution (s14c, D28):** N-personalities proved unreachable on this
+unit's firmware (guide combo hold-SHIFT+DAW/PRESET does nothing; take-1's
+"plain MIDI" segment re-read as likely PRESET *edit-mode* traffic).
+**NC1 is pinned.** Its messages are plain MIDI with Mackie-style
+numbering — reading notes 0–7/46/47 and tick constants is mapping, not
+the bidirectional Mackie protocol (LCD/motor faders) which remains a
+non-goal. Take-2 numbers are the shipped keymap default source; MIX
+keeps riding PRESET-mode faders CC33–41. Setup requirement: none —
+factory state IS NC1. Take 3 cancelled.
