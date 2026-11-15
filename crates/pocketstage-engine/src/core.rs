@@ -727,7 +727,14 @@ impl EngineCore {
         // the swap cannot silently drop it (review P1-1). Reads the NEW
         // project, hence after the assignment.
         self.apply_voice_override(synth);
-        self.reset_key_guards();
+        // The chatter table deliberately SURVIVES a swap: it describes notes
+        // that are physically sounding on the live lane, and a swap silences
+        // nothing. Clearing it (as this used to do) lost both a held key's
+        // DOWN flag — the later release then scheduled nothing — and any
+        // release already deferred in its grace window. Both stuck a voice
+        // until Stop. Rare while PUTs meant "someone clicked Save"; web mixer
+        // auto-save makes swaps routine, so the state machine keeps its state
+        // (Stop still resets, right before it silences everything).
         self.stats.drum_kit.store(
             pack_kit(&self.project.drum_kit.unwrap_or(DEFAULT_DRUM_KIT)),
             Ordering::Relaxed,
@@ -1959,6 +1966,61 @@ mod harness_tests {
         assert!(calls.contains(&Call::Prog(1, 4)), "track 2 program");
         assert!(calls.contains(&Call::Cc(1, 7, 0)), "mute → CC7=0");
         assert!(calls.contains(&Call::Cc(1, 91, 127)), "reverb send full");
+    }
+
+    #[test]
+    fn held_note_releases_across_a_project_swap() {
+        // Web mixer auto-save turns a fader drag into several swaps while the
+        // user is still playing. The swap used to clear the chatter table, so
+        // the engine forgot this key was DOWN — the later release found no
+        // guard state, scheduled nothing, and the voice stuck until Stop.
+        let mut h = Harness::new();
+        h.send(Event::NoteOn {
+            chan: 0,
+            key: 62,
+            vel: 90,
+        });
+        h.tick(1);
+        assert!(h.has(Call::On(0, 62, 90)));
+
+        h.tx_cmd
+            .send(EngineCommand::SetProject(h.project()))
+            .unwrap();
+        h.tick(1);
+
+        h.send(Event::NoteOff { chan: 0, key: 62 });
+        h.tick(1);
+        assert!(!h.has(Call::Off(0, 62)), "release still deferred in grace");
+        h.tick(8); // past the 40 ms window
+        assert!(h.has(Call::Off(0, 62)), "a swap must not swallow releases");
+    }
+
+    #[test]
+    fn pending_release_survives_a_project_swap() {
+        // Same hazard, other ordering: the release is already deferred inside
+        // its grace window when the swap lands. Dropping the table deletes a
+        // scheduled note-off — an instant stuck note.
+        let mut h = Harness::new();
+        h.send(Event::NoteOn {
+            chan: 0,
+            key: 63,
+            vel: 90,
+        });
+        h.tick(1);
+        h.calls(); // drop the D17 pre-attack release from the attack itself
+        h.send(Event::NoteOff { chan: 0, key: 63 });
+        h.tick(1);
+        assert!(!h.has(Call::Off(0, 63)), "deferred, not sounded yet");
+
+        h.tx_cmd
+            .send(EngineCommand::SetProject(h.project()))
+            .unwrap();
+        h.tick(1);
+        h.tick(8);
+        assert!(
+            h.has(Call::Off(0, 63)),
+            "the pending release must still land after a swap"
+        );
     }
 
     #[test]
