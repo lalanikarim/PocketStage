@@ -25,8 +25,9 @@ while playing, `transport=… pos=bar.beat` in stats. Live-verified.
 playback immediately; while playing the switch lands on the scene's quantized
 boundary (D5, per-scene override honored). Active scene's clip column plays as
 looping 16th-gated step patterns (track N → channel N, D3); `scene=S#` in stats.
-Boot project = `Project::default_project()` + demo patterns in scenes 1–2
-(placeholder until project loading). Live-verified: all 8 pads, keys layering,
+Boot project = `Project::default_project()`, which since session 16c ships a
+playable starter arrangement (Am–F–C–G across the eight scene slots) instead of
+empty columns. Live-verified: all 8 pads, keys layering,
 0 xruns. Pure clock math in `engine/src/clock.rs` (4 tests).
 **Design pass (session 8):** mode system v2 + recording workflow decided —
 D11–D16, full spec in scratchpad R11.
@@ -1181,3 +1182,38 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     - 205 tests green (32 model / 88 engine / 43 oxygen / 30 server /
       13 midi); clippy `-D warnings` + fmt clean; `node --check` on the UI
       script.
+- **Session 16c (starter arrangement + the render lab).** The user asked for
+    "useful tunes to work with for these tests": an empty project was a bad test
+    bed for scene launching, mixer rides, take punching and the SEQ overlay.
+    - New `pocketstage-model/src/demo.rs` (pure data) builds the starter clips +
+      scene names; `default_project()` now boots into a real Am–F–C–G four-bar
+      arrangement. Scenes are an *arrangement*, not eight clones: Intro (sparse)
+      → Groove → Full (`NextBeat`) → Break → Climax (octave up, `NextBar`) →
+      Outro → **Silence** (a real all-off cue) → Edit (1-bar figures for the SEQ
+      overlay). Four contract tests in the model keep it an arrangement:
+      Silence really is empty, Full/Climax use all four tracks, Intro stays
+      sparse, Climax out-plays Intro, Edit loops one bar.
+    - New lab `crates/pocketstage-engine/examples/scene_render_lab.rs`: renders
+      every scene offline with the engine's exact step gating, prints per-scene
+      RMS/peak + a solo pass per track, and writes a listenable WAV
+      (`/tmp/pocketstage-scenes.wav`) so the tunes can be judged as music and the
+      mix balanced by number instead of by ear-throwing-darts.
+    - **Platform findings from measuring (now in `SPIKE_RESULTS.md` quirks):**
+      pattern notes cannot sustain — the lane does `note_off(prev)` then
+      `note_on(cur)`, so a note lasts one 16th and *level is step density, not
+      velocity* (a quarter-note pad sits ~15 dB under an all-steps bed); and
+      slow-attack presets are simply inaudible on this grid — FluidR3 "Pad 2
+      (warm)" (GM 89) gates to −49 dBFS at vel 74, so the starter Pad is now
+      GM 91 (Choir Aahs, −35 dBFS). Sound choice = mixing decision here.
+    - Final measured ladder: Intro −35.8 / Outro −34.8 / Break −28.1 / Edit
+      −28.4 / Groove −27.7 / Full −26.7 / Climax −25.7 / Silence −65.6 dBFS;
+      solo parts within 3 dB of each other, mix peak 0.35 (headroom for
+      `master_gain`).
+    - Two engine tests were silently coupled to starter content and now read
+      what they mean: one asserted track-0 clips "all none" (snapshots before/
+      after instead), the other hardcoded GM 89 for a *routing* test (reads the
+      project's program now). Worth remembering: `default_project()` is used as
+      a blank slate in tests — shipping content means those assertions must not
+      assume emptiness.
+    - 211 tests green (36 model / 88 engine / 43 oxygen / 30 server / 13 midi);
+      clippy `-D warnings` + fmt clean.

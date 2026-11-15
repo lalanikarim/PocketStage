@@ -70,3 +70,12 @@ hand-written FluidSynth FFI works cleanly:
   adding `#[repr(C)]` to them is E0084.
 - alsa 0.9 crate: params guards borrow `PCM` — scope them so `PCM` can be moved
   out of `open_playback()`; IO handle via `pcm.io_checked::<i16>()`.
+- **Pattern notes cannot sustain** (authoring consequence, session 16c): the
+  pattern lane does `note_off(prev step's pitch)` then `note_on(cur)`, so every
+  note lasts exactly one 16th and a following rest cuts it. Measured offline
+  (`crates/pocketstage-engine/examples/scene_render_lab.rs`, which copies the
+  engine's gating): part loudness tracks **step density**, not velocity, and a
+  slow-attack preset is simply inaudible — FluidR3 "Pad 2 (warm)" (GM 89) gates
+  to ~−49 dBFS at velocity 74 where GM 91 (Choir Aahs) reaches ~−35 dBFS. So on
+  this grid the *sound choice* is a mixing decision, and "write a long note" is
+  not a thing: fill steps or accept a stab.
