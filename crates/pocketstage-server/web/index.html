@@ -887,8 +887,14 @@ $("cleartakes").addEventListener("click", async () => {
 // always re-validates; the client only pre-flags duplicate sources.
 let kmData = null;   // live DawKeymap object as served by GET /api/keymap
 let kmRaw = false;   // raw JSON textarea mode
-const KM_CMDS = ["mix_toggle", "seq_toggle", "seq_next_bar", "seq_flip",
-                 "bank_prev", "bank_next"];
+// Command vocabulary (frozen v0.1), as [value, label] pairs. The bank pair is
+// labelled INERT on purpose: parsing accepts it but the engine has no paging
+// consumer (D30), so a user who binds one gets nothing — say so in the picker
+// instead of letting them hunt a dead key.
+const KM_CMDS = [["mix_toggle", "mix_toggle"], ["seq_toggle", "seq_toggle"],
+                 ["seq_next_bar", "seq_next_bar"], ["seq_flip", "seq_flip"],
+                 ["bank_prev", "bank_prev — inert (D30: no engine consumer)"],
+                 ["bank_next", "bank_next — inert (D30: no engine consumer)"]];
 
 function kmMsg(text, isErr) {
   const el = $("km-msg");
@@ -988,7 +994,7 @@ function renderKm() {
     head(`${title} (${list.length})`);
     list.forEach((b, i) => {
       const row = rowShell(() => b.source);
-      const c = kmSel(KM_CMDS.map((x) => [x, x]), b.command);
+      const c = kmSel(KM_CMDS, b.command);
       c.onchange = () => { b.command = c.value; };
       const del = document.createElement("button");
       del.className = "alt"; del.textContent = "×"; del.title = "remove binding";
@@ -1000,7 +1006,7 @@ function renderKm() {
   cmdGroup(kmData.commands, "commands — momentary, both modes (Q4)", "commands");
   cmdGroup(kmData.fader_buttons, "fader buttons", "fader_buttons");
   if (kmData.knobs.length) {
-    head(`knobs (${kmData.knobs.length}) — not editable in this UI yet (target semantics pending T7)`);
+    head(`knobs (${kmData.knobs.length}) — not editable in this UI yet (the param target leaf awaits its ruling; wire facts are settled: relative rotors, CW=1/CCW=65)`);
   }
   flagDups(rows);
 }

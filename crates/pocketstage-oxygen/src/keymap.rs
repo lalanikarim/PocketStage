@@ -183,9 +183,14 @@ impl<'de> Deserialize<'de> for Source {
 
 // --- commands --------------------------------------------------------------
 
-/// Momentary semantic commands. Vocabulary FROZEN at v0.1 (bank_prev/next =
-/// MIX-overlay paging mirroring the documented `<>` track-bank scroll; no
-/// default binding until T7 measures the real messages).
+/// Momentary semantic commands. Vocabulary FROZEN at v0.1. `bank_prev`/
+/// `bank_next` = MIX-overlay paging mirroring the documented `<`/`>`
+/// track-bank scroll, and they **ship unbound permanently** (D30): T7
+/// measured their numbers (HUI notes 46/47) but they are DAW-mode-only —
+/// silent in PRESET, which is where MIX lives. No default, and note that a
+/// hand-written binding has **no engine consumer** today: the feeder matches
+/// these two to an empty arm (no paging `Event` exists), so they are vocabulary
+/// kept for wire-format stability only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Command {
@@ -218,8 +223,11 @@ pub struct CommandBinding {
     pub command: Command,
 }
 
-/// Per-fader-button command row (Q2): sources are CCs on the HUI port per
-/// the measured map.
+/// Per-fader-button command row (Q2). Sources are **notes** on the HUI port:
+/// T7 take 2 measured buttons 1–8 as HUI notes 0–7 (button N → note N−1);
+/// the 9th button is DAW BUTTON MODE (device-local, never a target). Ships
+/// empty — buttons already work as channel selectors via the built-in mapper
+/// path; a row here reassigns one to a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FaderButtonBinding {

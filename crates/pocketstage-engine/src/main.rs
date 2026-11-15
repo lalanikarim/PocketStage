@@ -612,8 +612,12 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>, keymap: Arc<Ke
                                         KeymapCommand::SeqFlip => {
                                             send_event(&tx, m.received, Event::SeqFlipWindow)
                                         }
-                                        // Bank paging awaits T7 wire
-                                        // measurements — no core behavior.
+                                        // No-op BY RULING (D30): ‹/› are
+                                        // DAW-mode-only on this unit, so MIX
+                                        // can never be paged from them, and 8
+                                        // channels fit one page. The commands
+                                        // stay in the frozen vocabulary for
+                                        // wire-format stability only.
                                         KeymapCommand::BankPrev | KeymapCommand::BankNext => {}
                                     },
                                     _ => {}

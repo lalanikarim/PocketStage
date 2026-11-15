@@ -6,13 +6,25 @@
 //! mpsc channel — the single-writer rule holds: the audio thread still owns
 //! all mutable state; the server only ever *requests* changes.
 //!
-//! Routes:
-//! - `GET  /api/health`  — liveness probe
+//! Route surface (authoritative list = `router()` below; the running set is
+//! also visible in the web UI):
+//! - `GET  /api/health`  — liveness + the model's hard limits (`max_tracks`,
+//!   `max_scenes`) so the UI never mirrors a constant (D31)
 //! - `GET  /api/project` — current project as a versioned [`ProjectFile`] envelope
 //! - `PUT  /api/project` — replace the whole project: parsed through the model's
 //!   version gate, validated, persisted atomically (tmp+rename), then handed to
 //!   the engine. Bad payloads are rejected with the reason and leave disk,
 //!   memory, and the live engine untouched.
+//! - `GET  /ws`          — read-only [`LiveStatus`] push frames
+//! - `POST /api/transport/{play,stop,record}`, `/api/scene/{n}`
+//!   (→ `?bar=N` pending), `/api/voice`, `/api/overlay/{mix|seq|none}`,
+//!   `/api/takes/rename`
+//! - `GET  /api/presets` — preset catalog read from the LOADED soundfont
+//!   (labels must never be hand-typed)
+//! - `GET  /api/projects`, `POST /api/projects/{save_as,load,delete}`,
+//!   `GET /api/projects/raw` — project library
+//! - `GET/PUT /api/keymap` + `POST /api/keymap/reset` — D26 keymap file
+//! - `GET  /api/mapping` — read-only device mapper view (D29: PUT owed)
 
 use axum::extract::Path as PathParam;
 use axum::extract::State;

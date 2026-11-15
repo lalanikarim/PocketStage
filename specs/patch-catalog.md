@@ -1,9 +1,11 @@
 # Patch catalog — soundfont sets, patch references, voice picker (plan)
 
-**Status: PLANNED — decisions from session 12 chat folded in. Decision
-slot D27 reserved.** Backlog items 18 (voice picker) + 19 (soundfont
-sets). Implements-next per user; discuss-phase done, open questions
-narrowed to Q-R1..Q-R3 (residuals, non-blocking for phase A).
+**Status: IN PROGRESS — phase A SHIPPED (session 13), phases B–F planned.**
+Decisions from session 12 chat folded in; decision slot D27 reserved. Backlog
+items: 18 (voice picker) ✅ closed by phase A, 19 (soundfont sets) open.
+Discuss-phase done; open questions narrowed to Q-R1..Q-R3 (residuals,
+non-blocking for phase B). Not the immediate next task — §6 item 15 goes first
+(HANDOFF §9), then this resumes at phase B.
 
 ## Goal
 

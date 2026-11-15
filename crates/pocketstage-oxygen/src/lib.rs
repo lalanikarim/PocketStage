@@ -4,7 +4,10 @@
 //! [`pocketstage_midi::Event`]s into semantic [`Action`]s using the measured
 //! factory map (`specs/device-maps/oxygen-49-mkv.md`), JSON-reassignable.
 //!
-//! Part 2 (pending T2 SysEx protocol): LED feedback writes on the Editor port.
+//! Part 2 — **dropped, not pending**: T2 explored the Editor SysEx port and
+//! found no host-controllable LED protocol (pad LEDs are local momentary
+//! state), so there is no output half to this crate. State feedback is
+//! voice-confirmed instead (D21: kick/rim/tom) — see HANDOFF "T2".
 //!
 //! Per-port mapping: feed port `:0` (music) events through a mapper built on
 //! [`default_mapping`] and port `:1` (HUI) events through one built on

@@ -75,10 +75,7 @@ pads on the music port.
     { "source": { "note": 61 }, "command": "seq_next_bar" },
     { "source": { "note": 63 }, "command": "seq_flip" }
   ],
-  "fader_buttons": [
-    { "source": { "note": 16, "port": "hui" }, "command": "bank_prev" },
-    { "source": { "note": 17, "port": "hui" }, "command": "bank_next" }
-  ],
+  "fader_buttons": [],
   "knobs": []
 }
 ```
@@ -97,13 +94,22 @@ pads on the music port.
   our own preset-mode inventory (`no MIDI output`) both say `‹`/`›` are
   device-local preset scrollers while PRESET is active — which is exactly the
   mode MIX lives in (D21). A default binding would be silent when needed and
-  live only where MIX has no consumable controls. Users may still bind them
-  manually; nothing in the schema changes.
+  live only where MIX has no consumable controls. Nothing in the schema
+  changes and users MAY still write a binding for them — but be precise about
+  what that buys today: **the engine has no consumer** (there is no bank-
+  paging `Event`; the feeder matches these commands to an empty arm). They are
+  vocabulary kept for wire-format stability, so a hand-bound bank key parses,
+  routes and does nothing until/unless MIX paging is designed — which D30 also
+  argues against on usefulness grounds (8 channels fit one page).
 - `fader_buttons`: per-button command bindings (Q2). T7 take 2 decoded:
   **buttons 1–8 = HUI-port notes 0–7** (button N → note N−1); the 9th
   button is **DAW BUTTON MODE** (a device-local mode cycler — never a
   binding target). Source shape `{"note":N,"port":"hui"}`. Per D28 these
-  NC1 numbers ARE the shipped default source.
+  NC1 numbers are the measured source to bind against — but the section
+  **ships EMPTY**: buttons already act as channel selectors through the
+  built-in mapper path, so a row here only exists to give a button a
+  *different* command (e.g. binding `›` on note 47 to `bank_next` is legal
+  and fires in DAW mode only — see the `commands` bullet and D30).
 - `knobs`: **section-shaped, ships empty.** Target semantics are
   continuous parameters, NOT momentary commands — deliberately NOT frozen
   in v0.1 (Q-V2a): parameter naming (`{"param": {"track": N, "target":
@@ -181,10 +187,11 @@ untouched, which is exactly what freezing it bought us):
    data, any default is a guess — and guessed defaults are how silent
    misroutes happen (Q7).
 
-Fader_button defaults stay gated on take 2 (buttons confirmed as notes there).
-Bank commands were ungated by take 2 and then re-gated by **D30**: their wire
-numbers are mode-conditional (DAW-mode-only), so they ship unbound — see the
-`commands` bullet above.
+(Fader-button defaults were gated on T7 take 2 for a while; that gate is long
+closed — buttons measured as HUI notes 0–7, and the section still ships empty,
+see the `fader_buttons` bullet.) Bank commands were ungated by take 2 and then
+re-gated by **D30**: their wire numbers are mode-conditional (DAW-mode-only),
+so they ship unbound — see the `commands` bullet above.
 
 ## Default source port qualification — D30 (session 15)
 
@@ -230,7 +237,7 @@ no version field. `voice` stays externally-tagged (Addition A); phase 2
 must ship `POST /api/overlay/{mix|seq|none}` (Addition B). D26 in
 scratchpad R14 + HANDOFF §7.
 
-### Phase 1 — `DawKeymap` struct (oxygen crate, pure + serde)
+### Phase 1 — `DawKeymap` struct (oxygen crate, pure + serde) — ✅ DONE (s14)
 
 - Structs: `DawKeymap`, `Source` (frozen v0.1 enum: note/cc + optional
   port), `VoiceBinding`, `CommandBinding`, `FaderButtonBinding`,
@@ -243,7 +250,7 @@ scratchpad R14 + HANDOFF §7.
   port-aware); empty file → defaults; program/note/cc range checks.
 - Acceptance: `cargo test -p pocketstage-oxygen` green; no engine changes.
 
-### Phase 2 — persistence + HTTP control plane (server crate)
+### Phase 2 — persistence + HTTP control plane (server crate) — ✅ DONE (s14)
 
 - `KeymapSlot` (newtype over `Mutex<Arc<DawKeymap>>`) in the server crate,
   shared with engine main() at boot; file path resolution mirrors the
@@ -258,7 +265,8 @@ scratchpad R14 + HANDOFF §7.
   reset restores defaults; file written atomically (reuse the session-12
   durable-write pattern from `ProjectStore::replace`).
 
-### Phase 3 — feeder consumption (engine main.rs)
+### Phase 3 — feeder consumption (engine main.rs) — ✅ DONE (s14; hardware
+ear-check + Q4 PASSED s14b/c)
 
 - Replace hardcoded branches in `run_live_midi` with keymap lookups:
   note → `VoiceSlot(voice,label)` | `Command(cmd)` | fall through to the
@@ -272,7 +280,8 @@ scratchpad R14 + HANDOFF §7.
 - Acceptance: device-free tests green; live test = remap one voice + one
   command from the API, feel it immediately, no restart.
 
-### Phase 4 — web UI ("DAW keys" card)
+### Phase 4 — web UI ("DAW keys" card) — ✅ DONE (s14; remap loop verified
+live s14b)
 
 - Binding table editor: rows = voices + commands (+ buttons if Q2=yes);
   "capture" flow: click a row → press a key on the Oxygen → note arrives

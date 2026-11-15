@@ -398,7 +398,7 @@ Corrected inventory (MK5):
 | Keys | 49 | Velocity-sensitive, **no aftertouch** |
 | Pads | 16 | Velocity-sensitive, **single-color backlight (not RGB)** |
 | Knobs | 8 | Assignable rotary |
-| Faders | 4 | Assignable — matches our 4 tracks exactly 👍 |
+| Faders | 4 ❌ | **WRONG — measured 9** (`device-maps/oxygen-49-mkv.md`); this row is what mis-founded R2's "max 4 tracks", corrected by D31 (cap = channel budget, 8) |
 | Pitch/Mod | 1 combined lever | Pitch bend + mod wheel in one |
 | Transport buttons | ~6 | Dedicated: rewind/stop/pause/FF/rec/loop |
 | Octave up/down, program/bank | buttons | Onboard |
@@ -414,6 +414,8 @@ Design implications:
 
 All 16 pads + 8 knobs + 4 faders + transport buttons confirmed sufficient for the PLAY/SEQ/MIX mode design.
 
+> ⚠️ Two numbers in this section were later **disproved by measurement**: the device has **9** faders (not 4) and 8 velocity pads across 2 banks (not 16 physical). See `specs/device-maps/oxygen-49-mkv.md`; consequence for the data model is D31 (`MAX_TRACKS` = channel budget = 8).
+
 TODO: confirm model, then document exact CC map for that hardware.
 
 ## R2. Domain model (concrete)
@@ -421,7 +423,7 @@ TODO: confirm model, then document exact CC map for that hardware.
 ```
 Project
 ├── bpm (fixed per project in v0.1)
-├── Tracks (max 4)
+├── Tracks (max 4 ❌ → 8, D31)
 │   ├── name, color
 │   ├── instrument slot: {soundfont, program} or builtin-synth patch
 │   └── clip slots[8]          ← one clip per scene
@@ -432,6 +434,11 @@ Project
 │   └── steps: {note, velocity, on/off}
 └── Takes[]                    ← recorded MIDI performances
 ```
+
+> ❌ **D31 correction to this diagram:** the track cap is **8**, not 4 — and
+> it was never a fader count. It is FluidSynth's channel budget: a track owns
+> channel `index` unless overridden (D3) while the engine reserves 8..=15 for
+> the pad kit + metronome (`PAD_CH_BASE`). See HANDOFF §7 D31.
 
 Decisions this forces:
 - **Clip = (track × scene) cell.** Chorus drum pattern and verse drum pattern are separate clips, same track. Scene launch plays the whole column. Arrangement and live set become the SAME data structure — big simplification.

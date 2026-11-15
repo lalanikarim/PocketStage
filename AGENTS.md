@@ -10,7 +10,7 @@ control, never an audio path. Single Rust binary, FluidSynth + soundfonts.
 ## Read these first (in order)
 
 1. `HANDOFF.md` — current state, backlog, environment facts, decision log snapshot
-2. `specs/brainstorming/scratchpad.md` — full design brainstorm + decisions D1–D10 (R-sections supersede earlier prose)
+2. `specs/brainstorming/scratchpad.md` — full design brainstorm (+ the D1–D16 decision table; R-sections supersede earlier prose). **The authoritative decision log is `HANDOFF.md` §7, current through D31** — later decisions live there, not here.
 3. `SPIKE_RESULTS.md` — validated audio architecture + platform quirks
 
 Do not start feature work without checking the backlog in `HANDOFF.md` §6 and

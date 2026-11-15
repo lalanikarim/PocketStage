@@ -71,6 +71,12 @@ Folder is `~/Projects/PocketStage`; remote **https://github.com/lalanikarim/Pock
 
 ## 3. Current state of the code (session 11 wrap)
 
+> ⚠️ **Dated snapshot.** Everything below describes session 11; sessions 12–15
+> changed details without rewriting it (notably D26 keymaps, D30 default-source
+> qualification and D31's `MAX_TRACKS` = 8 with MIX faders following the project
+> — the "F1–F4→gain, tracks 1–4" line below is no longer the whole story).
+> Authoritative state lives in §6 (backlog), §7 (decisions) and §9/§10.
+
 **R12 IMPLEMENTED (session 11):** D24 write-through lane → MIX overlay →
 SEQ overlay, each test-first on the harness. Pads 9/10 inside PRESET toggle
 MIX/SEQ (voice-confirmed kick/rim/tom — no LEDs), any mode switch exits.
@@ -373,7 +379,8 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 8c. **FX sends DONE (session 8)**: Track.reverb/.chorus (0..=1, None =
     soundfont default) → CC91/CC93 in apply_track_voice; mixer sliders.
 8d. **Structure CRUD DONE (session 8)**: rename/GM-program/delete/add
-    tracks (≤4), rename the 8 scene columns; engine clamps active AND
+    tracks (cap was ≤4, now ≤8 per D31 — the web reads it from
+    `/api/health`), rename the 8 scene columns; engine clamps active AND
     pending-quantized scene indices when a PUT shrinks the scene list
     (caught live: pending S5 used to fire after an 8→3 shrink).
 8e. **Clear-all takes DONE (session 8)**: web button + time-bounded
@@ -426,12 +433,25 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     checks of sessions 8/9/10/11 features (overlay toggles, mix rides, step
     painting), pedal probe, T2 round 2, Pi validation + deployment kit
     (user deferred).
-15. **Web UX: mixer edits should apply immediately** (user report, session
-    11): volume/gain sliders in the web UI only take effect after an
-    explicit Save click — dragging should be audible live. Sketch: debounced
-    auto-save on slider release (or a lightweight per-control PATCH-style
-    lane); mind the dirty-flag guard (refresh() must not clobber unsaved
-    edits) and don't PUT per mousemove event. Todo, software-only.
+15. **Web UX: mixer edits should apply immediately — NEXT UP (agreed after
+    the session-15 doc audit)** (user report, session 11): volume/gain sliders
+    in the web UI only take effect after an explicit Save click — dragging
+    should be audible live. Sketch: debounced auto-save on slider release (or a
+    lightweight per-control PATCH-style lane); mind the dirty-flag guard
+    (refresh() must not clobber unsaved edits) and don't PUT per mousemove
+    event. Todo, software-only. Notes for the implementer:
+    - Range inputs fire `input` continuously and `change` on release — the
+      debounce can key off `change` alone, mirroring how the engine's MIX
+      write-through lane waits for ~500 ms of quiet
+      (`WRITE_THROUGH_QUIET_SAMPLES`) rather than flushing per CC.
+    - Every mixer edit already lands in the fetched `ProjectFile` and rides
+      `PUT /api/project`; a live-apply path is that same PUT, so validation,
+      atomic write and engine adoption come for free — no new endpoint needed
+      unless we want per-field PATCH semantics (decide first; server-side
+      validation must stay the single authority).
+    - D31 side effect: the mixer now renders up to 8 tracks, so whatever
+      debounce/queue is added gets exercised by more rows — avoid an N×PUT
+      storm on project-wide re-renders.
 16. **One voice at a time + white-key browser — IMPLEMENTED (session 11b,
     D25)** ✅: exactly one active voice in PRESET; DAW white-key selection;
     kit spans both pad banks in Drums; melodic pads play the voice. Layering
@@ -550,7 +570,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D28 | **Personality pin: NC1** (supersedes D26's "pin N1/N2"): measured unit exposes ONLY NC1 across every documented selection path (guide combo hold-SHIFT+DAW/PRESET, all preset slots); NC1's outputs are plain MIDI messages with Mackie-style numbering (notes 0–7/46/47, tick constants, PB faders) — consuming them is mapping, not the bidirectional Mackie-protocol emulation that stays a hard non-goal. Defaults ship from take-2 NC1 numbers; MIX keeps using PRESET-mode faders CC33–41 | ✅ ruled (s14c) |
 | D29 | **Phase 5 SHIPS — expose device `Mapping` via GET/PUT `/api/mapping`** (supersedes Q7's "stays closed"; ruled s14c): T7 gate satisfied by takes 1–2 + D28 (NC1 measured); implementation must still land the mapper-state-on-swap ruling (spec phase-5 §, likely apply-at-transport-stopped + `rebase(old,new)` carry-over) and mirror the keymap loader discipline (never-fail-open, loud warn). Read-only GET already shipped | ✅ ruled (s14c); implementation owed |
 | D31 | **`MAX_TRACKS` 4 → 8: the cap is a channel budget, not a fader count** (session 15). R2's "max 4 tracks (matches Oxygen 49 MKV's 4 faders exactly)" was factually wrong — the measured device map has **9** faders (`oxygen-49-mkv.md`), and the real constraint was always FluidSynth's channel map: a track owns channel `index` unless overridden (D3) while the engine reserves 8..=15 for the pad kit + metronome (`PAD_CH_BASE`) ⇒ channels 0..=7 fit, 8 does not. Law test `track_cap_matches_the_channel_budget` locks the reasoning. Consequences: `default_project()` starters decoupled from the cap (still a 4-piece boot — capacity ≠ content); engine MIX gates stop hardcoding 4 — **F(n) → gain of track n for every track that exists** (R12's own "F5–F9 unused until more channels exist" clause finally exercised), fader-button detail select follows, knob rows stay a four-channel page (only 8 knobs; channels 5–8 reach pan/sends via their detail page); web reads the cap from `GET /api/health` (`max_tracks`) instead of mirroring it. **Known sharp edge (unchanged, now easier to hit):** `Track.channel` overrides are only range-checked 0..=15, and the documented reason for the override is a GM drum track on channel 9 — which sits inside the pad bank (8..=15), so such a track aliases pad 2 / CONFIRM_RIM. Needs its own ruling before anyone routes past channel 7 | ✅ ruled (s15); implemented |
-| D30 | **Bank commands ship unbound + defaults music-port qualified** (session 15; kills backlog task "MIX bank paging + BankPrev/BankNext wiring + ‹/› defaults"). Two measured reasons: (1) `‹`/`›` are **mode-conditional** — guide v1.2 §10 + our preset-mode table agree they emit NOTHING in PRESET mode (device-local preset scroll), while the T7 numbers (HUI notes 46/47) are DAW-mode Mackie controls; MIX lives inside PRESET (D21) and its faders/knobs are the PRESET CC map, so a ‹/›→MIX-page binding would be silent exactly when it is needed and live only where MIX has no consumable inputs. Mackie-style track-bank scroll is also meaningless at 4 tracks on one page. `bank_prev`/`bank_next` stay in the frozen vocabulary (manually bindable), **no defaults**. (2) Built-in voice/command defaults were claiming their notes on *every* port, which made any HUI-qualified default fail `DawKeymap::validate()` (`voices[6] (Nylon Guitar) … claim note 47`); defaults now say `"port":"music"` — byte-identical routing (keys/pads are port :0 in both modes), whole HUI note space freed for future DAW-mode bindings | ✅ ruled (s15); implemented |
+| D30 | **Bank commands ship unbound + defaults music-port qualified** (session 15; kills backlog task "MIX bank paging + BankPrev/BankNext wiring + ‹/› defaults"). Two measured reasons: (1) `‹`/`›` are **mode-conditional** — guide v1.2 §10 + our preset-mode table agree they emit NOTHING in PRESET mode (device-local preset scroll), while the T7 numbers (HUI notes 46/47) are DAW-mode Mackie controls; MIX lives inside PRESET (D21) and its faders/knobs are the PRESET CC map, so a ‹/›→MIX-page binding would be silent exactly when it is needed and live only where MIX has no consumable inputs. Mackie-style track-bank scroll is also meaningless at 4 tracks on one page. `bank_prev`/`bank_next` stay in the frozen vocabulary — hand-bindable but with **no engine consumer** (no paging `Event` exists; the feeder arm is empty by ruling), and **no defaults**. (2) Built-in voice/command defaults were claiming their notes on *every* port, which made any HUI-qualified default fail `DawKeymap::validate()` (`voices[6] (Nylon Guitar) … claim note 47`); defaults now say `"port":"music"` — byte-identical routing (keys/pads are port :0 in both modes), whole HUI note space freed for future DAW-mode bindings | ✅ ruled (s15); implemented |
 
 ---
 
@@ -609,8 +629,12 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 
 ## 9. How to resume (suggested prompt for next session)
 
-> Read HANDOFF.md (§6 backlog, §7 decisions through D26.1) and AGENTS.md.
-> Session 14b wrap: **keymap phases 1–4 hardware-validated** — live
+> Read HANDOFF.md (§6 backlog, §7 decisions through **D31**) and AGENTS.md.
+> **NEXT SESSION STARTS HERE → §6 item 15: web mixer edits must apply live**
+> (user report s11: gain/pan/send sliders only sound after an explicit Save;
+> want debounced auto-save on slider release, no PUT per mousemove, and the
+> dirty-flag guard must not clobber unsaved edits). Software-only; test-first.
+> Session 14b wrap (historical): **keymap phases 1–4 hardware-validated** — live
 > remap loop confirmed by ears + log (voice hot-reload, command remap →
 > `overlay=MIX`, reset → defaults, corrupt keymap file boots warn +
 > defaults + live server). See §10 session 14b for the T7 take-1
@@ -630,12 +654,14 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 > HUI note space; routing byte-identical). **Same session, D31:
 > `MAX_TRACKS` 4 → 8** (channel budget, not fader count — R2's rationale was
 > factually wrong); MIX faders now address every channel of the project and
-> the web reads the cap from `/api/health`. Next work is pure software:
-> (a) knob param-leaf ruling, then knob consumption (amendment drafted,
-> direction CW=1/CCW=65); (b) Phase 5 Mapping PUT per **D29 (ruled s14c:
+> the web reads the cap from `/api/health`. Next work, pure software, in the
+> order agreed with the user after the s15 doc audit:
+> **(a) §6 item 15 — live-apply web mixer edits (START HERE);**
+> (b) knob param-leaf ruling, then knob consumption (amendment drafted,
+> direction CW=1/CCW=65); (c) Phase 5 Mapping PUT per **D29 (ruled s14c:
 > ships)** — rule mapper-state-on-swap first, mirror the keymap loader; then
-> §6 item 15 (live-apply web mixer edits), item 19 phase B (patch catalog —
-> its phase E feeds the keymap voice field via Addition A). New candidate
+> item 19 phase B (patch catalog — its phase E feeds the keymap voice field via
+> Addition A). New candidate
 > opened by D31: channels 5–8 have no knob-page row (8 knobs can't cover 8×2
 > fields) — a second send page or real paging needs its own ruling; ditto the
 > `Track.channel` → pad-channel aliasing sharp edge noted in D31. Hardware-gated
@@ -1060,4 +1086,5 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
       instead of mirroring the constant. Open sharp edge logged in D31:
       `Track.channel` overrides into 8..=15 alias the pad bank — and channel 9
       is the *documented* way to do GM drums. Needs its own ruling.
-    - 197 tests green; clippy + fmt clean.
+    - 199 tests green (30 model / 85 engine / 43 oxygen / 28 server /
+      13 midi); clippy `-D warnings` + fmt clean.
