@@ -357,6 +357,10 @@ fn main() {
                     feed_max,
                     delay_max,
                 ] = s_stats.snapshot_and_reset();
+                // All snapshot values are PER-WINDOW counters (reset each
+                // 2 s): `cycles` ~375 is healthy at 5.33 ms periods, and
+                // `events=0` simply means the queue was idle this window.
+                // Do not read them as cumulative — cost a debugging scare.
                 let busy_pct = busy_ns as f64 / (window.as_nanos() as f64) * 100.0;
                 let q_avg = if events > 0 {
                     q_sum as f64 / events as f64

@@ -1,13 +1,15 @@
 # DAW keymap — configurable DAW-mode bindings (multiphase plan)
 
-**Status: PHASE 0 DONE — schema v0.1 FROZEN (session 13; v0 rectified after
-MKV docs review — see schema section). Phases 1–4 ready to implement,
-T7 probe gates knob/bank consumption. Decision D26 in scratchpad R14 +
-HANDOFF §7.**
+**Status: PHASES 1–4 DONE + hardware ear-checked (sessions 13–14b); the
+remap loop validated live on the unit (hot reload, command toggles,
+reset, corrupt-file boot — see HANDOFF §10 s14b). Q4 PRESET-mode check
+left open. Schema v0.1 FROZEN; T7 take 1 captured — knob semantics
+AMENDMENT DRAFTED below, pending ruling + take 2 (direction encoding,
+bank/fader_button defaults). Phase 5 = open ship decision. Decision D26
+in scratchpad R14 + HANDOFF §7.**
 Requested session 12: "configure DAW mode key and button mappings so we can
 manage it in a json file … what we don't want to allow remapping is Preset
-mode." All seven open questions answered (rulings at each Q below); no code
-written yet.
+mode." All seven open questions answered (rulings at each Q below).
 
 ## Goal
 
@@ -68,8 +70,8 @@ pads on the music port.
     { "source": { "note": 63 }, "command": "seq_flip" }
   ],
   "fader_buttons": [
-    { "source": { "cc": 49, "port": "hui" }, "command": "bank_prev" },
-    { "source": { "cc": 50, "port": "hui" }, "command": "bank_next" }
+    { "source": { "note": 16, "port": "hui" }, "command": "bank_prev" },
+    { "source": { "note": 17, "port": "hui" }, "command": "bank_next" }
   ],
   "knobs": []
 }

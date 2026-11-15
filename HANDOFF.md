@@ -605,7 +605,9 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 > (specs/daw-keymap.md draft), bank/fader_button defaults, Phase 5 ship
 > decision. Next software candidates: §6 item 15 (live-apply web mixer
 > edits), item 19 phase B (patch catalog — its phase E feeds the keymap
-> voice field via Addition A). Live env: engine detached on :7777
+> voice field via Addition A). Hardware-gated backlog still standing:
+> pedal probe, Pi validation, items 14/16 ear-checks. Live env: engine
+> detached on :7777
 > (`pkill -x pocketstage-eng` — see AGENTS gotchas); project library in
 > ~/.pocketstage/projects; keymap file currently at defaults; note
 > labels use middle-C=C3 convention (bottom key C1) — numbers are truth.
