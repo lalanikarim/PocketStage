@@ -489,6 +489,51 @@ fn take_muted_defaults_false_and_round_trips() {
 }
 
 #[test]
+fn gain_above_unity_is_rejected() {
+    // D33: track gain is a CC7 ATTENUATOR — 1.0 already means full level, and
+    // the old 0..=2 range promised a boost the engine could never deliver
+    // (FluidSynth rejects CC values above 127, so the channel just kept its
+    // previous level). Values above unity are now refused at the door; boost
+    // belongs to `master_gain`, which drives the synth's real output stage.
+    let mut p = sample_project();
+    p.tracks[0].gain = Some(1.4);
+    assert!(matches!(
+        p.validate().unwrap_err(),
+        ValidationError::GainOutOfRange { .. }
+    ));
+    p.tracks[0].gain = Some(1.0);
+    p.validate().unwrap();
+}
+
+#[test]
+fn legacy_boost_values_clamp_on_load() {
+    // Projects saved while gain validated up to 2.0 must keep booting: the
+    // stored number was inaudible either way, so parsing clamps it to unity and
+    // the next PUT persists the honest value. No SCHEMA_VERSION bump — the
+    // format is unchanged, only the legal value range tightened.
+    let json = r#"{
+        "version": 1,
+        "project": {
+            "name": "OldBoost",
+            "tracks": [{ "name": "T1", "instrument": {}, "clips": [null], "gain": 1.7 }],
+            "scenes": [{ "name": "A" }]
+        }
+    }"#;
+    let file = ProjectFile::from_json_str(json).unwrap();
+    assert_eq!(file.project.tracks[0].gain, Some(1.0));
+    file.validate().unwrap();
+
+    // Values that were always illegal stay illegal — no silent fixes.
+    let negative = json.replace("\"gain\": 1.7", "\"gain\": -0.5");
+    assert!(
+        ProjectFile::from_json_str(&negative)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+}
+
+#[test]
 fn mixer_range_checks() {
     let mut p = sample_project();
     p.tracks[0].gain = Some(2.5);

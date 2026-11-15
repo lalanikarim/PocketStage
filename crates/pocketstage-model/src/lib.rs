@@ -84,7 +84,9 @@ pub enum ValidationError {
     UnsortedTake { take: String },
     #[error("duplicate take name '{take}' (names are the adoption key)")]
     DuplicateTakeName { take: String },
-    #[error("track '{track}' gain {gain} out of range 0..=2")]
+    #[error(
+        "track '{track}' gain {gain} out of range 0..=1 (CC7 attenuates only — boost lives in master_gain)"
+    )]
     GainOutOfRange { track: String, gain: f64 },
     #[error("track '{track}' pan {pan} out of range -1..=1")]
     PanOutOfRange { track: String, pan: f64 },
@@ -129,7 +131,10 @@ impl ProjectFile {
         if version > SCHEMA_VERSION as u64 {
             return Err(ModelError::UnsupportedVersion(version as u32));
         }
-        serde_json::from_value(value).map_err(|e| ModelError::Invalid(e.to_string()))
+        let mut file: ProjectFile =
+            serde_json::from_value(value).map_err(|e| ModelError::Invalid(e.to_string()))?;
+        file.project.normalize_legacy_values();
+        Ok(file)
     }
 
     fn json_type_name(v: &serde_json::Value) -> &'static str {
@@ -158,7 +163,9 @@ impl ProjectFile {
 /// Schema note: fields added since v1 (`loop_bars`, `Track::channel`) are
 /// optional with defaults — old files parse unchanged and new files stay
 /// readable by older builds (unknown fields ignored), so `SCHEMA_VERSION`
-/// stays at 1.
+/// stays at 1. Tightened value ranges travel the same way: a legacy value is
+/// clamped by [`Project::normalize_legacy_values`] while parsing rather than
+/// breaking the file (`Track::gain` → 0..=1, D33).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
@@ -277,6 +284,26 @@ impl Project {
     }
 
     /// Validate all invariants the engine relies on (see HANDOFF/scratchpad R2).
+    /// Value migration applied when a file is PARSED (not on write).
+    ///
+    /// `Track::gain` used to validate up to 2.0. That ceiling was a lie — CC7
+    /// tops out at unity and FluidSynth rejects the out-of-range CC a "boost"
+    /// would have produced, so such values were never audible (D33). Clamp them
+    /// to unity on load so pre-D33 projects keep booting; the next PUT writes
+    /// the honest number back. `SCHEMA_VERSION` stays at 1: the format never
+    /// changed, only which values are legal. Values that were always illegal
+    /// (negative gain) are deliberately left alone for `validate` to reject —
+    /// no silent fixes of garbage.
+    pub fn normalize_legacy_values(&mut self) {
+        for t in &mut self.tracks {
+            if let Some(g) = t.gain
+                && g > 1.0
+            {
+                t.gain = Some(1.0);
+            }
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ValidationError> {
         if self.tracks.len() > MAX_TRACKS {
             return Err(ValidationError::TooManyTracks(self.tracks.len()));
@@ -337,7 +364,7 @@ impl Project {
                 });
             }
             if let Some(g) = track.gain
-                && !(0.0..=2.0).contains(&g)
+                && !(0.0..=1.0).contains(&g)
             {
                 return Err(ValidationError::GainOutOfRange {
                     track: track.name.clone(),
@@ -469,8 +496,14 @@ pub struct Track {
     /// for a GM drum track, which must sit on channel 9.
     #[serde(default)]
     pub channel: Option<u8>,
-    /// Mixer gain multiplier; `None` = 1.0. Applied as CC7 on the track's
+    /// Mixer level, `0.0..=1.0`; `None` = 1.0. Applied as CC7 on the track's
     /// channel (mute is CC7=0 — no extra engine state).
+    ///
+    /// An ATTENUATOR, not a booster (D33): CC7 maxes at 127 = unity, so `1.0`
+    /// is as loud as this channel gets and there is nothing above it. FluidR3
+    /// levels differ per patch, so relative balance between tracks is what
+    /// this controls; overall loudness/boost is `Project::master_gain`, which
+    /// drives the synth's real float output stage.
     #[serde(default)]
     pub gain: Option<f64>,
     /// Stereo pan −1 (left) ..= +1 (right); `None` = center. Applied as CC10

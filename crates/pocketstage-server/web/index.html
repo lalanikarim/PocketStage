@@ -260,8 +260,11 @@ function renderMixer(pf) {
     mute.type = "checkbox"; mute.checked = !!t.mute; mute.title = "mute";
 
     const gain = document.createElement("input");
-    gain.type = "range"; gain.min = 0; gain.max = 2; gain.step = 0.01;
-    gain.value = t.gain ?? 1; gain.title = "gain 0..2";
+    // Track level is a CC7 attenuator (D33): 1.0 = unity, no boost above it.
+    // Overall loudness lives in the Master row (real synth output gain).
+    gain.type = "range"; gain.min = 0; gain.max = 1; gain.step = 0.01;
+    gain.value = Math.min(t.gain ?? 1, 1);
+    gain.title = "level (cut only) — use Master to boost";
     const gval = document.createElement("span"); gval.className = "mval";
 
     const pan = document.createElement("input");
