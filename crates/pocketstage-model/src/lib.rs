@@ -236,23 +236,37 @@ impl Project {
         let starters: [(&str, u8, [u8; 3]); 4] = [
             ("Piano", 0, [240, 220, 130]),   // Acoustic Grand
             ("E.Piano", 4, [130, 200, 240]), // EPiano 1
-            ("Pad", 89, [190, 140, 240]),    // Pad 2 (warm)
-            ("Bass", 33, [140, 240, 150]),   // Finger Bass
+            // Measured choice: FluidR3 "Pad 2 (warm)" (89) gates to ~-49 dBFS
+            // on a 16th grid (attack slower than one step) and vanishes;
+            // this preset sits ~15 dB higher under the same gating. See
+            // `demo` + examples/scene_render_lab.rs.
+            ("Pad", 91, [190, 140, 240]),  // Choir Aahs
+            ("Bass", 33, [140, 240, 150]), // Finger Bass
         ];
+        // A playable starter arrangement (see `demo`): scenes are an actual
+        // Am-F-C-G progression instead of eight empty columns, so a fresh
+        // install has something to launch, ride and edit immediately.
+        let clips = demo::starter_clips();
+        debug_assert_eq!(
+            clips.len(),
+            starters.len(),
+            "arrangement must have one row per starter track"
+        );
         Project {
             name: "Untitled".into(),
             bpm: default_bpm(),
             loop_bars: default_loop_bars(),
             tracks: starters
                 .iter()
-                .map(|(name, program, color)| Track {
+                .enumerate()
+                .map(|(i, (name, program, color))| Track {
                     name: (*name).into(),
                     color: *color,
                     instrument: InstrumentSlot {
                         soundfont: None,
                         gm_program: *program,
                     },
-                    clips: vec![None; MAX_SCENES],
+                    clips: clips[i].clone(),
                     channel: None,
                     gain: None,
                     pan: None,
@@ -262,12 +276,7 @@ impl Project {
                     root_note: None,
                 })
                 .collect(),
-            scenes: (1..=MAX_SCENES)
-                .map(|i| Scene {
-                    name: format!("S{i}"),
-                    quantize: None,
-                })
-                .collect(),
+            scenes: demo::starter_scenes(),
             takes: Vec::new(),
             fx_reverb: None,
             fx_chorus: None,
@@ -685,6 +694,8 @@ pub enum RecordedEvent {
         program: u8,
     },
 }
+
+mod demo;
 
 #[cfg(test)]
 mod tests;

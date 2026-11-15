@@ -784,3 +784,106 @@ fn validate_rejects_duplicate_take_names() {
         Err(ValidationError::DuplicateTakeName { .. })
     ));
 }
+
+// ------------------------------------------------------- starter arrangement
+
+/// The starter project ships a real arrangement (see `demo`): these tests are
+/// the contract that keeps it an arrangement and not eight empty columns.
+fn starter_clips() -> Vec<Vec<Option<Clip>>> {
+    Project::default_project()
+        .tracks
+        .iter()
+        .map(|t| t.clips.clone())
+        .collect()
+}
+
+#[test]
+fn starter_arrangement_fits_the_track_and_scene_grid() {
+    let clips = starter_clips();
+    let p = Project::default_project();
+    assert_eq!(clips.len(), p.tracks.len());
+    for row in &clips {
+        assert_eq!(row.len(), MAX_SCENES);
+    }
+    // Every clip's step count must match its own bar count — validate() checks
+    // this, but a clear message here beats a generic one from a fixture.
+    for (t, row) in clips.iter().enumerate() {
+        for (s, clip) in row.iter().enumerate() {
+            if let Some(clip) = clip {
+                assert_eq!(
+                    clip.pattern.steps.len(),
+                    clip.pattern.bars as usize * STEPS_PER_BAR,
+                    "track {t} scene {s} clip '{}'",
+                    clip.name
+                );
+                for note in clip.pattern.steps.iter().flatten() {
+                    // Musical range: nothing sub-bass or dog-whistle in a demo.
+                    assert!((24..=108).contains(&note.pitch), "{}", note.pitch);
+                    assert!((1..=127).contains(&note.velocity));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn starter_arrangement_is_dynamic_across_scenes() {
+    let clips = starter_clips();
+    let active = |scene: usize| clips.iter().filter(|row| row[scene].is_some()).count();
+    // A scene that means silence must actually be empty, or "launch silence"
+    // is a lie and there is no way to test the all-off case.
+    assert_eq!(active(6), 0, "the Silence cue scene");
+    // The two full-mix scenes use every track, so mixer rides have something
+    // to grab onto in both.
+    assert_eq!(active(2), 4, "Full");
+    assert_eq!(active(4), 4, "Climax");
+    // And the sparse ones leave rows empty on purpose (that's what makes them
+    // useful for gain/mute A/B tests).
+    assert!((1..=2).contains(&active(0)), "Intro should stay sparse");
+    assert_eq!(active(5), 1, "Outro is a single row");
+    // Somewhere must be louder than somewhere else — otherwise the whole
+    // "dynamic arrangement" idea is decoration in a comment.
+    let notes = |scene: usize| -> usize {
+        clips
+            .iter()
+            .filter_map(|row| row[scene].as_ref())
+            .map(|c| c.pattern.steps.iter().filter(|s| s.is_some()).count())
+            .sum()
+    };
+    assert!(notes(4) > notes(0), "Climax must out-play Intro");
+    assert!(notes(1) >= 30, "Groove needs actual material");
+}
+
+#[test]
+fn starter_scenes_are_named_and_quantized_by_role() {
+    let p = Project::default_project();
+    let names: Vec<&str> = p.scenes.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "Intro", "Groove", "Full", "Break", "Climax", "Outro", "Silence", "Edit"
+        ]
+    );
+    // Two explicit launch-quantize overrides, so the snap modes are audible out
+    // of the box (D5): Full snaps to a beat, Climax to a bar.
+    assert_eq!(p.scenes[2].quantize, Some(Quantize::NextBeat));
+    assert_eq!(p.scenes[4].quantize, Some(Quantize::NextBar));
+    // The editing bed fires immediately — step edits should be heard at once.
+    assert_eq!(p.scenes[7].quantize, Some(Quantize::Immediate));
+    // Everything else inherits the project default.
+    assert_eq!(p.scenes[0].quantize, None);
+}
+
+#[test]
+fn starter_edit_scene_loops_one_bar_for_fast_feedback() {
+    // The "Edit" column exists for the SEQ overlay: short clips mean a toggled
+    // step is audible within a second instead of after a four-bar cycle.
+    let clips = starter_clips();
+    for row in &clips {
+        if let Some(clip) = &row[7] {
+            assert_eq!(clip.pattern.bars, 1, "{}", clip.name);
+        }
+    }
+    assert!(clips[0][7].is_some(), "Edit has a melody track to edit");
+    assert!(clips[3][7].is_some(), "Edit has a bass track to edit");
+}

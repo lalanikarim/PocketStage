@@ -2089,15 +2089,19 @@ mod harness_tests {
         let mut pf = h.project();
         pf.project.tracks[2].channel = Some(11);
         pf.project.tracks[2].clips[0] = Some(Harness::clip("Hit", &[(0, 60, 100)]));
+        // Read the program from the project instead of hardcoding it: this test
+        // is about ROUTING, and it shouldn't break every time the starter
+        // arrangement's instrument choice changes.
+        let prog = pf.project.tracks[2].instrument.gm_program as i32;
         h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
         h.tick(1);
         let calls = h.calls();
         assert!(
-            calls.contains(&Call::Prog(11, 89)),
+            calls.contains(&Call::Prog(11, prog)),
             "swap programs the OVERRIDDEN channel (track 3 -> ch 11)"
         );
         assert!(
-            !calls.contains(&Call::Prog(2, 89)),
+            !calls.contains(&Call::Prog(2, prog)),
             "raw index channel must stay untouched"
         );
 
@@ -3084,6 +3088,10 @@ mod harness_tests {
     #[test]
     fn seq_events_are_inert_outside_the_overlay() {
         let mut h = Harness::new();
+        // Snapshot rather than "all none": the starter project ships a real
+        // arrangement, so an empty grid is no longer the baseline — and "these
+        // events changed nothing" is the claim being tested anyway.
+        let before = h.core.project.tracks[0].clips.clone();
         h.send(Event::SeqStep { step: 1 });
         h.send(Event::SeqNextBar);
         h.send(Event::SeqFlipWindow);
@@ -3091,7 +3099,10 @@ mod harness_tests {
         h.send(Event::SeqStep { step: 9 });
         h.tick(1);
         assert!(h.calls().is_empty());
-        assert!(h.core.project.tracks[0].clips.iter().all(|c| c.is_none()));
+        assert_eq!(
+            h.core.project.tracks[0].clips, before,
+            "seq events outside the overlay must not touch clips"
+        );
     }
 
     #[test]
