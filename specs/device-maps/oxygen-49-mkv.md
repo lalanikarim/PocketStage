@@ -146,3 +146,47 @@ Findings:
   needs SystemMessage support from day one.
 - Clock spam: sequencer input must be filtered (`EventFilter::ALL except...`
   or discard TimingClock in the pump) — 45 Hz otherwise.
+
+## T7 — DAW-mode personality sweep (take 1, session 14)
+
+Tool: `midi_probe t7` (labelled segments + CC-inventory summary). Raw log:
+`t7-capture-2026-11-14.log` (20 899 events). **Take-1 caveats:** PRESET-SHIFT
+segment partial; segment→personality labels tentative (click positions not
+counted at the unit); `<`/`>` presses not isolated from the general sweeps.
+
+**Findings:**
+
+1. **Baseline re-confirmed** (seg 0): PRESET mode emits exactly the factory
+   map — faders CC33–41, knobs CC44–47+62/63/75/76, fader buttons CC49–56
+   (clean 0/127 press+release pairs), mod CC1, all on ch13 (1-based).
+2. **Five of six DAW segments are the same family**: knobs = endless rotary
+   encoders → **HUI port, ch0, CC16–23**, observed values 1..65 (relative
+   tick-style, never absolute); faders → **pitch-bend on the HUI port**
+   (~907 events per sweep, NOT CC); strip/fader buttons → **Note On/Off on
+   the HUI port** (notes ≈16–47, Mackie-style), NOT CC.
+3. **One personality is plain MIDI on the music port** (seg 4): knobs/faders
+   arrive as GM-flavoured absolute CCs on ch0 — 7, 14, 42, 70, 71, 72, 73,
+   91 — HUI port silent apart from mode pulses. This is the profile our
+   N1/N2 pinning wants; which factory name it is needs take 2.
+4. **Mode pulses re-confirmed**: DAW/PRESET buttons = cc113/cc112 momentary
+   on the HUI port (T6 holds).
+5. Some PRESET+SHIFT combos emit **CC123 (all notes off)** on the music
+   port — worth knowing before anyone wonders about mid-phrase note kills.
+
+**Implications for the DAW keymap (D26):**
+
+- `fader_buttons` defaults must be **note sources on the HUI port** — the
+  spec example's `{"cc":49,"port":"hui"}` was wrong; v0.1 schema handles
+  the correct shape fine, only the doc example mis-guessed.
+- Knob targets will need **relative-encoder semantics** (value = tick
+  delta-ish, not position). Freezing knobs unfrozen in v0.1 is validated —
+  a naive absolute-value param design would have been wrong.
+- Fader *position* on HUI-family personalities rides pitch-bend: NOT
+  expressible as a v0.1 source. Accepted — PocketStage's MIX rides PRESET-
+  mode faders (CC33–41), and pinning plain-MIDI keeps us off the Mackie
+  protocol entirely.
+
+**Take 2 owed:** full PRESET-SHIFT sweep; isolate `<`/`>` presses (bank
+command defaults); identify N1/N2 by unit display + click count from a
+known start; per-button HUI note table (which physical button = which
+note).
