@@ -193,6 +193,47 @@ let dirty = false;           // local edits not yet PUT to the store
 function setSave() { $("save").textContent = dirty ? "Save ●" : "Save"; }
 function markDirty() { dirty = true; setSave(); }
 
+// ------------------------------------------------------------- live apply
+// Mixer/take-mute edits must be audible without pressing Save. They write
+// through over the SAME `PUT /api/project` path Save uses: server-side
+// validation, the atomic write and engine adoption stay the single authority
+// (no per-field PATCH endpoint to keep in sync with the model).
+//
+// Throttle shape is copied from the engine's MIX write-through lane, which
+// flushes after ~500 ms of quiet rather than per CC: apply immediately on the
+// first touch of a burst, then at most every LIVE_GAP_MS while the pointer
+// keeps moving, plus a trailing flush so the final value always lands. Range
+// inputs fire `input` per pixel and `change` only on release — keying off
+// `input` + throttle is what makes a drag feel live without a PUT storm (with
+// D31's 8 tracks that would otherwise be rows × mousemove).
+let liveTimer = null, saveInFlight = false, liveFails = 0, lastLive = 0;
+const LIVE_GAP_MS = 500, LIVE_TRAIL_MS = 250, LIVE_MAX_TRIES = 3;
+
+function scheduleLiveApply(retry = false) {
+  markDirty();
+  // A fresh gesture gets a fresh failure budget; only the retry tail counts.
+  if (!retry) liveFails = 0;
+  if (liveTimer) clearTimeout(liveTimer);
+  const wait = Math.max(0, LIVE_GAP_MS - (Date.now() - lastLive));
+  liveTimer = setTimeout(liveApplyNow, wait);
+}
+
+async function liveApplyNow() {
+  liveTimer = null;
+  // The raw-JSON escape hatch is explicit-Save only: never PUT a document the
+  // user is still composing.
+  if (!$("raw").hidden || !dirty) return;
+  if (saveInFlight) { liveTimer = setTimeout(liveApplyNow, LIVE_TRAIL_MS); return; }
+  lastLive = Date.now();
+  await save({ live: true });
+  if (!dirty) return;
+  // Still dirty = the store rejected it (or an edit landed mid-PUT). Retry on
+  // the tail, but never hammer a server that keeps refusing this document:
+  // after LIVE_MAX_TRIES the doc stays dirty and Save ● says so by hand.
+  if (liveFails < LIVE_MAX_TRIES) scheduleLiveApply(true);
+  else msg("live apply failing — press Save", true);
+}
+
 function msg(text, isErr) {
   const el = $("msg");
   el.textContent = text || "";
@@ -238,7 +279,7 @@ function renderMixer(pf) {
       const v = document.createElement("span"); v.className = "mval";
       const upd = () => { v.textContent = title.split(" ")[0] + " " + (+s.value).toFixed(2); };
       upd();
-      s.addEventListener("input", () => { t[key] = +s.value; markDirty(); upd(); });
+      s.addEventListener("input", () => { t[key] = +s.value; scheduleLiveApply(); upd(); });
       return [s, v];
     };
     const [rev, revv] = mkSend("reverb", "rev send");
@@ -250,11 +291,11 @@ function renderMixer(pf) {
     };
     labels();
 
-    gain.addEventListener("input", () => { t.gain = +gain.value; markDirty(); labels(); });
-    pan.addEventListener("input", () => { t.pan = +pan.value; markDirty(); labels(); });
+    gain.addEventListener("input", () => { t.gain = +gain.value; scheduleLiveApply(); labels(); });
+    pan.addEventListener("input", () => { t.pan = +pan.value; scheduleLiveApply(); labels(); });
     mute.addEventListener("input", () => {
       t.mute = mute.checked; row.classList.toggle("muted", mute.checked);
-      markDirty();
+      scheduleLiveApply();
     });
 
     row.append(name, mute, gain, gval, pan, pval, rev, revv, cho, chov);
@@ -278,7 +319,7 @@ function renderMixer(pf) {
         + (pf.project[key] == null && +s.value === dflt ? " (stock)" : "");
     };
     upd();
-    s.addEventListener("input", () => { pf.project[key] = +s.value; markDirty(); upd(); });
+    s.addEventListener("input", () => { pf.project[key] = +s.value; scheduleLiveApply(); upd(); });
     return [s, v];
   };
   const [grev, grevv] = mkGlobal("fx_reverb", 0.9, "rev");
@@ -325,7 +366,9 @@ function renderProject(pf) {
     mute.type = "checkbox"; mute.checked = !!t.muted; mute.title = "mute take";
     mute.style.marginRight = "8px";
     mute.addEventListener("input", () => {
-      t.muted = mute.checked; markDirty();
+      // Live, like Solo next to it: muting a take during playback should be
+      // heard on the next loop, not on the next Save click.
+      t.muted = mute.checked; scheduleLiveApply();
       label.textContent = t.name + (t.muted ? " (muted)" : "");
       label.style.color = t.muted ? "var(--dim)" : "";
     });
@@ -380,15 +423,26 @@ function renderProject(pf) {
   }
 }
 
-async function putProject(body, okMsg) {
+async function putProject(body, okMsg, opts = {}) {
+  if (opts.live) saveInFlight = true;
   try {
     const r = await fetch("/api/project", { method: "PUT",
       headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
-    if (!r.ok) { msg("rejected: " + (await r.text()), true); return; }
-    dirty = false; setSave();
-    msg(okMsg);
-    refresh();
-  } catch (e) { msg("save failed: " + e, true); }
+    if (!r.ok) {
+      if (opts.live) liveFails++;
+      msg("rejected: " + (await r.text()), true);
+      return;
+    }
+    dirty = false; liveFails = 0; setSave();
+    if (okMsg) msg(okMsg);
+    // A live apply re-fetches nothing: the document we just PUT *is* the
+    // store's truth, and re-rendering would rebuild the slider under the
+    // pointer mid-drag.
+    if (!opts.live) refresh();
+  } catch (e) {
+    if (opts.live) liveFails++;
+    msg("save failed: " + e, true);
+  } finally { if (opts.live) saveInFlight = false; }
 }
 
 async function refresh() {
@@ -400,7 +454,7 @@ async function refresh() {
   } catch (e) { msg("project fetch failed: " + e, true); }
 }
 
-async function save() {
+async function save(opts = {}) {
   if (!project) return;
   let body;
   if (!$("raw").hidden) {
@@ -412,7 +466,8 @@ async function save() {
     body.project.bpm = parseFloat($("p-bpm").value);
     body.project.loop_bars = parseInt($("p-loop").value, 10);
   }
-  await putProject(body, "saved — engine applies at next safe point");
+  // Live applies say "applied": the same write, no Save click involved.
+  await putProject(body, opts.live ? "applied" : "saved — engine applies at next safe point", opts);
 }
 
 // D25 voice display/picker. Labels come from GET /api/presets — i.e. the
@@ -510,7 +565,7 @@ function connect() {
 $("p-name").addEventListener("input", markDirty);
 $("p-bpm").addEventListener("input", markDirty);
 $("p-loop").addEventListener("input", markDirty);
-$("save").addEventListener("click", save);
+$("save").addEventListener("click", () => save());
 $("toggle").addEventListener("click", () => {
   const raw = $("raw");
   raw.hidden = !raw.hidden;
