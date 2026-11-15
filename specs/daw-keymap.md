@@ -3,10 +3,12 @@
 **Status: PHASES 1–4 DONE + hardware ear-checked (sessions 13–14b); the
 remap loop validated live on the unit (hot reload, command toggles,
 reset, corrupt-file boot — see HANDOFF §10 s14b). Q4 PRESET-mode check
-left open. Schema v0.1 FROZEN; T7 take 1 captured — knob semantics
-AMENDMENT DRAFTED below, pending ruling + take 2 (direction encoding,
-bank/fader_button defaults). Phase 5 = open ship decision. Decision D26
-in scratchpad R14 + HANDOFF §7.**
+PASSED (s14c). Schema v0.1 FROZEN; T7 takes 1–2 decoded — knob semantics
+AMENDMENT DRAFTED below (direction RESOLVED CW=1/CCW=65; bank ‹/› = HUI
+notes 46/47; buttons 1–8 = HUI notes 0–7). Remaining data gate: **take 3
+(conditional)** — reach pinned N1/N2 personality deliberately and re-
+sweep; its numbers ship as defaults (all take-2 numbers are NC1/Mackie).
+Phase 5 = open ship decision. Decision D26 in scratchpad R14 + HANDOFF §7.**
 Requested session 12: "configure DAW mode key and button mappings so we can
 manage it in a json file … what we don't want to allow remapping is Preset
 mode." All seven open questions answered (rulings at each Q below).
@@ -87,11 +89,11 @@ pads on the music port.
   `bank_prev`, `bank_next` (last two = MIX-overlay paging, mirroring the
   documented `<`/`>` track-bank scroll; no default binding in built-in
   defaults until T7 measures the real notes). Momentary semantics.
-- `fader_buttons`: per-button command bindings (Q2). T7 take 1
-  correction: the buttons above the faders emit **Note On/Off on the
-  HUI port** (notes ≈16–47, Mackie-style), NOT CCs — correct source
-  shape is `{"note":N,"port":"hui"}`; per-button note table awaits
-  take 2 before any defaults ship.
+- `fader_buttons`: per-button command bindings (Q2). T7 take 2 decoded:
+  **buttons 1–8 = HUI-port notes 0–7** (button N → note N−1); the 9th
+  button is **DAW BUTTON MODE** (a device-local mode cycler — never a
+  binding target). Source shape `{"note":N,"port":"hui"}`. Caveat: these
+  are NC1 numbers; if take 3 lands on N1/N2, defaults come from there.
 - `knobs`: **section-shaped, ships empty.** Target semantics are
   continuous parameters, NOT momentary commands — deliberately NOT frozen
   in v0.1 (Q-V2a): parameter naming (`{"param": {"track": N, "target":
@@ -110,11 +112,15 @@ pads on the music port.
 ## Device personality pinning & T7 (new in v0.1)
 
 The MKV guide documents DAW mode as six factory personalities (NC1/NC2/
-M|h Mackie variants, N1/N2 plain-MIDI, N3 Ableton clip-launch), selected
-SHIFT+DAW/PRESET + `<`/`>`, **not user-editable, no readback**. Our
-keymap is only valid for one selection → **pin N1 or N2** (plain CC;
-no Mackie/HUI protocol emulation — hard non-goal). Setup docs must state
-the required unit configuration.
+M|h Mackie variants, N1/N2 plain-MIDI, N3 Ableton clip-launch), cycled
+by **holding SHIFT and pressing DAW/PRESET** (guide v1.2 exact combo —
+not `<`/`>`), **not user-editable, no readback**. Our keymap is only
+valid for one selection → **pin N1 or N2** (plain CC; no Mackie/HUI
+protocol emulation — hard non-goal). Setup docs must state the required
+unit configuration. STATUS s14c: attempts on our unit stayed on NC1
+(all ten preset slots enter DAW as NC1); take-1 captured a plain-MIDI
+control set by accident, proving an N-personality IS reachable —
+**take 3** must land on it deliberately (device map §T7 take 2).
 
 **T7 probe (hardware, before phases 3–4 consume knob/bank bindings):**
 capture what each of the six personalities emits on both ports; whether
@@ -149,10 +155,11 @@ untouched, which is exactly what freezing it bought us):
 2. `target.kind` ∈ `relative | absolute`. Relative: each CC message is a
    tick; param moves `step` units per tick (default 1). Absolute: CC
    value 0..=127 maps linearly onto the param range.
-3. **Relative DIRECTION encoding is NOT measured yet** — take 2 must
-   sweep one knob slowly clockwise-only, then counter-clockwise-only,
-   and diff raw values before this freezes. Sign conventions guessed
-   wrong are silent bugs (knob feels inverted).
+3. ~~Relative DIRECTION encoding is NOT measured yet~~ **RESOLVED take 2
+   (s14c): clockwise = value 1, counter-clockwise = value 65** — tick
+   constants, one message per tick, no position data ever. Knob-group
+   selectors (PAN/DEVICE/SENDS) verified wire-neutral: knobs stay CC16–23
+   ch0 regardless of group.
 4. The `param` leaf stays OPEN (shared namespace with the D22 MIX-
    becomes-data endgame and item-19 patch refs): first real consumer
    rules it; knobs stay shaped-but-unconsumed until then.

@@ -462,15 +462,23 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     PASSED session 14b** — hot voice remap + command remap confirmed
     by ears and log (`[daw] select`, `overlay=MIX`), reset → defaults,
     corrupt keymap boots warn+defaults+live server. **Q4 PRESET-mode
-    overlay-follows-remap check left OPEN** (strong log evidence, no
-    explicit confirm). T7 take 1 captured + analyzed (findings + raw
+    overlay-follows-remap check PASSED (s14c)**. T7 take 1 captured +
+    analyzed (findings + raw
     log in specs/device-maps/): knobs are RELATIVE rotors on HUI CC16–23,
     faders ride pitch-bend there, buttons are NOTES — knob target
     semantics DRAFTED in specs/daw-keymap.md pending ruling. **Take 2
-    owed** (PRESET-SHIFT full sweep, isolated `<>` presses, N1/N2 ID,
-    per-button HUI note table, transport × personality) — it gates bank
-    + fader_button defaults and the knob direction encoding. Phase 5
-    (device Mapping exposure) stays an open ship decision.**
+    DONE session 14c** — fully decoded (see device map T7 take-2 section):
+    knob direction CW=1/CCW=65 tick constants; ‹/› = HUI notes 46/47;
+    fader buttons 1–8 = HUI notes 0–7 (button 9 = DAW BUTTON MODE,
+    excluded); PAN/DEVICE/SENDS knob-groups don't change wire numbers;
+    transport personality-invariant; PRESET-SHIFT has no hidden wire
+    behavior. **Q4 check CLOSED — passed** (remapped key toggled live
+    overlay in PRESET; old binding inert). Remaining gate: **take 3
+    (conditional)** — all take-2 numbers are NC1/Mackie, but D26 pins
+    N1/N2 plain-MIDI; reach N1/N2 deliberately (guide combo: hold SHIFT
+    + press DAW/PRESET) and re-sweep → THAT personality's numbers become
+    the shipped defaults. Phase 5 (device Mapping exposure) stays an
+    open ship decision.**
 18. **Voice picker on the web — DONE** (`POST /api/voice` accepting the
     model's `ActiveVoice` serde form (`"drums"` | `{"program": N}`, >127 →
     400); `EngineCommand::SelectVoice` runs as the ordinary
@@ -530,7 +538,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D23 | **SEQ overlay** (R12): live step programmer — bank-1 pads 1–8 toggle steps of an 8-step window on the selected track; bank 2 keeps commands (pad 10 exit, pad 11 next bar, pad 12 flip half-window); edits quantize to the engine's 16th grid | ✅ Implemented (s11) |
 | D24 | **Write-through lane** (R12): engine-originated project edits flow out on a dedicated mpsc to the store (debounced), never back in — single writer intact; engine applies edits locally first. Debounce is sample-counted in the engine; the server drain coalesces bursts to one persist. First rider: CycleLoopBars — B-key survives reboot now (event itself removed by D25) | ✅ Implemented (s11) |
 | D25 | **One voice at a time** (session 11 feedback; supersedes D12's always-on kit layer + D13's pitch%12 browser): PRESET has exactly ONE active performance voice. Selection = DAW-mode white-key browser anchored at C2 — slot 0 is Drums, next 11 white keys are the curated GM patches; black keys carry only overlay commands. Melodic voice: all 49 keys play it and pad presses are melody notes too (pads transmit plain notes 36–51, nothing to disambiguate). Drums voice: notes 36–51 = kit across both banks (`drum_kit_2` additive field; bank-2 channels mirror bank 1 — same kill group, documented trade-off), other notes silent. Overlay enter/exit = black-key command notes (G#3 MIX, A#3 SEQ; +C#4 next bar, D#4 flip while SEQ lives), armed in either mode — a follow-up to the user's unified-note rule replaced the earlier "DAW pads 9/10" scheme and REMOVED hardware scene launching (web UI / HTTP only): with one note stream, notes 36–51 cannot be both instrument and buttons. Voice persists via `Project.active_voice` + write-through; mirrored on `LiveStatus.active_voice` (VOICE_DRUMS sentinel) → /ws + stats + UI | ✅ Implemented (s11b), ear-checks owed |
-| D26 | **Configurable DAW keymap** (R14 + addendum): global `~/.pocketstage/keymap.json`, schema **v0.1** — unified frozen SOURCE object (`{"note":N}`/`{"cc":N}` + optional port) consumed by typed sections (voices/commands/fader_buttons/knobs-empty); same map drives overlay commands inside PRESET; PRESET instrument routing NOT expressible (can't-be-remapped by construction); feeder-only consumption (R5), corrupt file → defaults never-fail boot; manual note entry v1; voice field externally-tagged for future patch refs; unit personality PINNED to N1/N2 plain-MIDI (no Mackie/HUI emulation, no N3) | ✅ v0.1 frozen (s13); phases 1–4 implemented (s14), hardware ear-checked (s14b; Q4 PRESET check open); T7 take-1 done — knobs measured RELATIVE on HUI (amendment drafted in spec), take 2 gates bank/fader-button defaults + knob direction encoding |
+| D26 | **Configurable DAW keymap** (R14 + addendum): global `~/.pocketstage/keymap.json`, schema **v0.1** — unified frozen SOURCE object (`{"note":N}`/`{"cc":N}` + optional port) consumed by typed sections (voices/commands/fader_buttons/knobs-empty); same map drives overlay commands inside PRESET; PRESET instrument routing NOT expressible (can't-be-remapped by construction); feeder-only consumption (R5), corrupt file → defaults never-fail boot; manual note entry v1; voice field externally-tagged for future patch refs; unit personality PINNED to N1/N2 plain-MIDI (no Mackie/HUI emulation, no N3) | ✅ v0.1 frozen (s13); phases 1–4 implemented (s14), hardware ear-checked incl. Q4 (s14b/c); T7 takes 1–2 decoded (knobs relative CW=1/CCW=65, <> = HUI 46/47, buttons 1–8 = HUI 0–7, #9 is a mode button); take 3 conditional: reach N1/N2 deliberately — pinned personality's numbers ship as defaults |
 | D26.1 | **Schema rectification v0→v0.1** (R14 addendum, locked Option B): re-frozen pre-code after MKV docs review showed knobs (CC/HUI) are DAW mode's primary controls; command vocab incl. bank_prev/next; knob param-target semantics intentionally unfrozen (additive later); no version field until phase 1 ships SCHEMA=1 | ✅ (s13) |
 
 ---
@@ -599,10 +607,13 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 > buttons = notes; one plain-MIDI personality found) and the device
 > gotchas that masqueraded as keymap bugs (octave-dual layer state +
 > power-cycle-surviving octave shift — see specs/device-maps/ field
-> notes). **Next at keyboard (one ~10 min sitting): T7 take 2 + the open
-> Q4 check** (enter MIX in DAW → flip to PRESET → remapped key toggles
-> off, old key dead). Then: rule the knob amendment
-> (specs/daw-keymap.md draft), bank/fader_button defaults, Phase 5 ship
+> notes; take 2 decoded + Q4 PASSED s14c — see §10). **Next at keyboard:
+> T7 take 3 (conditional)** — reach N1/N2 via the guide combo (hold
+> SHIFT + press DAW/PRESET), verify on display, full control sweep; that
+> pinned personality's wire numbers become the shipped keymap defaults
+> (bank/buttons/knobs). Then: rule the knob amendment
+> (specs/daw-keymap.md draft — direction encoding already resolved
+> CW=1/CCW=65), implement defaults + bank command wiring, Phase 5 ship
 > decision. Next software candidates: §6 item 15 (live-apply web mixer
 > edits), item 19 phase B (patch catalog — its phase E feeds the keymap
 > voice field via Addition A). Hardware-gated backlog still standing:
@@ -975,3 +986,21 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   power-cycle with no MIDI output — both masqueraded as keymap bugs.
   Note-label convention switched project-wide to middle-C=C3 (bottom
   key = C1; labels only, wire numbers untouched). 192 tests green.
+- **Session 14c (T7 take 2 + Q4 close)**: Q4 PASSED on hardware
+  (mix_toggle remapped to note 72: toggled live MIX in PRESET mode both
+  ways; old note 56 inert as a command — played the perform voice, which
+  is correct). Take 2 captured systematically (raw log committed,
+  t7b-capture): knob direction RESOLVED (CW=1, CCW=65 tick constants,
+  no position data), ‹/› = HUI notes 46/47, fader buttons 1–8 = HUI
+  notes 0–7, and the T6 "button 9 anomaly" explained — it is DAW BUTTON
+  MODE (SHIFT + it cycles Rec/Select/Mute/Solo meaning, device-local).
+  PAN/DEVICE/SENDS knob-groups verified wire-neutral for knobs;
+  transport invariant (94/93/95/86); PRESET-SHIFT sweep = no hidden
+  behavior; PAD BANK stickiness explains 14b's pad-offset confusion;
+  take-1 CC123 mystery = SHIFT+PANIC per guide. Guide PDF located
+  (~/Documents, v1.2) and cross-referenced — personality switch combo is
+  hold-SHIFT + DAW/PRESET, but unit stayed on NC1 across attempts;
+  take-1's plain-MIDI segment was likely an accidental N-personality →
+  **take 3 (conditional)**: reach N1/N2 deliberately and re-sweep, since
+  D26 pins plain-MIDI and shipped defaults must come from THAT
+  personality, not NC1.

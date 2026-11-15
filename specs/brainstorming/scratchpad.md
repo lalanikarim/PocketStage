@@ -791,8 +791,9 @@ mirrored (no readback). **T7 probe** (all six personalities × both ports,
 knob-submode wire behavior, <> message capture) gates phases 3–4 for
 knob/bank bindings.
 
-**Status (s14b):** T7 take 1 done — knobs measured RELATIVE on HUI CC16–23,
-faders pitch-bend there, buttons NOTES there; one plain-MIDI personality
-found. Knob target-semantics amendment DRAFTED in specs/daw-keymap.md
-(relative|absolute kinds) pending ruling + take 2 (direction encoding,
-`<>` capture, N1/N2 ID). Historical prose above unchanged.
+**Status (s14c):** T7 takes 1–2 done — knobs relative on HUI CC16–23
+(CW=1/CCW=65), faders pitch-bend there, buttons NOTES there; ‹/› = HUI
+notes 46/47; only NC1 selectable so far (guide combo: hold SHIFT +
+DAW/PRESET — take 3 targets the pinned N-personities). Knob target-
+semantics amendment DRAFTED in specs/daw-keymap.md (relative|absolute
+kinds) pending ruling. Historical prose above unchanged.

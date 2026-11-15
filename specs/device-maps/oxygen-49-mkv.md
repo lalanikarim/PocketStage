@@ -216,3 +216,46 @@ what N1/N2 send instead, e.g. system-RT start/stop).
 - Project-wide label convention (s14b): middle C = **C3** (Yamaha/DAW
   style), bottom key = **C1**. Wire numbers unchanged; when names and
   numbers disagree, trust the number.
+
+## T7 take 2 (session 14c) — decoded, guide cross-referenced
+
+Raw log: `t7b-capture-2026-11-15.log`. Systematic sweeps + the v1.2 user
+guide PDF (`~/Documents/Oxygen Series MKV - User Guide - v1.2.pdf`, extract
+tooling: pdftotext). **Decoded, all in NC1 (the only personality we could
+select):**
+
+- **Knob direction encoding RESOLVED**: rotors emit only two constants —
+  **CW = 1, CCW = 65** — one message per tick, no position. Take-1's
+  "1..65 range" was never a range.
+- **Bank scroll <>**: ‹ = HUI-port **note 46**, › = HUI-port **note 47**
+  (clean press+release pairs; bank defaults can now be wired).
+- **Fader buttons 1–8** = HUI-port **notes 0–7** (button N → note N−1),
+  one press each, cleanly separated.
+- **"Button 9" = DAW BUTTON MODE**, not a control: SHIFT + it cycles
+  fader-button *meaning* (Track Rec Arm / Select / Mute / Solo,
+  device-local). Closes the T6 open question — after pressing it, our
+  buttons went silent on the wire in NC1. Setup docs must leave this at
+  its default mode.
+- **DAW KNOB CONTROL**: pad secondary functions (guide: SHIFT+pads;
+  physically labeled PAN/DEVICE/SENDS) — direct presses emit music-port
+  ch0 notes **PAN=36, DEVICE=37, SENDS=38**. Knob wire numbers do NOT
+  change across groups (verified: CC16–23 ch0 throughout). Device-local
+  group state; PocketStage ignores it.
+- **PAD BANK 1/2** = SHIFT+pad1/pad2, sticky — bank 2 sends notes 44–51
+  (this, not a bug, explains the pad-offset sightings in session 14b).
+- **Transport personality-invariant confirmed**: play 94, stop 93,
+  record 95, loop 86 (HUI notes) — matches A2 exactly. Bonus guide fact:
+  double-press STOP = stop + rewind to start.
+- **Take-1 CC123 mystery solved from the guide**: SHIFT + PANIC sends
+  All-Notes-Off on all 16 channels.
+
+**Personality selection (guide, unresolved on our unit):** "press and
+hold the SHIFT button and the DAW/PRESET button" cycles NC1 → NC2 → M|h
+→ N1 → N2 → N3. Session 14c attempts stayed on NC1 (all P01–P10 slots
+enter DAW as NC1). Take-1's plain-MIDI segment (music-port GM-ish CCs
+7/14/42/70–73/91) was very likely an **N-personality reached by
+accident** mid-mash — meaning N1/N2 ARE reachable and need a deliberate
+re-capture. **Take 3 (conditional):** reach N1/N2 intentionally via the
+guide combo, verify on the display, full sweep → that personality's
+numbers are what keymap DEFAULTS must use (D26 pins plain-MIDI; NC1 is
+Mackie and off-limits for defaults).
