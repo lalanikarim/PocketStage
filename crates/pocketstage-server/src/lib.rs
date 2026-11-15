@@ -31,7 +31,7 @@ use std::time::Duration;
 use pocketstage_model::{ActiveVoice, Project, ProjectFile, SCHEMA_VERSION, Take};
 // Re-exported so embedders (engine) and handlers share one DawKeymap type;
 // the schema stamp is logged at boot next to the keymap path.
-pub use pocketstage_oxygen::{DawKeymap, KEYMAP_SCHEMA};
+pub use pocketstage_oxygen::{DawKeymap, KEYMAP_SCHEMA, Mapping};
 
 // ----------------------------------------------------------------- commands
 
@@ -421,6 +421,11 @@ pub struct AppState {
     /// layer validates + persists into it, the engine's MIDI feeder reads
     /// it. Never touched by the audio thread.
     keymap: Option<Arc<KeymapSlot>>,
+    /// Device-layer control maps as constructed at boot (music port + HUI
+    /// port). READ-ONLY exposure (phase 5 prep, Q7): GET /api/mapping lets
+    /// probes and debugging see what the feeder actually interprets —
+    /// editing measured ground truth stays a separate ship decision.
+    device_mappings: Option<Box<(Mapping, Mapping)>>,
 }
 
 impl AppState {
@@ -434,6 +439,7 @@ impl AppState {
             take_feed: None,
             edit_feed: None,
             keymap: None,
+            device_mappings: None,
         }
     }
 
@@ -441,6 +447,13 @@ impl AppState {
     /// before the server thread starts).
     pub fn with_keymap(mut self, slot: Arc<KeymapSlot>) -> Self {
         self.keymap = Some(slot);
+        self
+    }
+
+    /// Publish the device-layer mappings the feeder built at boot (the same
+    /// `Mapping` values passed to the Oxygen mappers) for GET /api/mapping.
+    pub fn with_device_mappings(mut self, music: Mapping, hui: Mapping) -> Self {
+        self.device_mappings = Some(Box::new((music, hui)));
         self
     }
 
@@ -470,6 +483,7 @@ impl AppState {
             take_feed: Some(Arc::new(Mutex::new(take_feed))),
             edit_feed: Some(Arc::new(Mutex::new(edit_feed))),
             keymap: None,
+            device_mappings: None,
         }
     }
 
@@ -592,6 +606,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/takes/rename", post(rename_take))
         .route("/api/keymap", get(get_keymap).put(put_keymap))
         .route("/api/keymap/reset", post(reset_keymap))
+        .route("/api/mapping", get(get_mapping))
         .route("/api/overlay/{target}", post(set_overlay))
         .with_state(state)
 }
@@ -1098,6 +1113,27 @@ async fn reset_keymap(State(state): State<AppState>) -> Result<StatusCode, Keyma
     })?;
     slot.reset()?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Read-only view of the device-layer control maps the feeder built at
+/// boot (phase 5 prep). Q7 stands: editing measured ground truth via the
+/// UI stays a separate ship decision until the hardware probes are done —
+/// this endpoint only makes what IS live inspectable (debugging, T7).
+async fn get_mapping(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let Some((music, hui)) = state.device_mappings.as_deref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no device mappings published".into(),
+        ));
+    };
+    Ok(Json(serde_json::json!({
+        "music": music,
+        "hui": hui,
+        "editable": false,
+        "note": "device-layer map = measured ground truth (read-only); the semantic DAW bindings are at /api/keymap",
+    })))
 }
 
 /// Addition B: `POST /api/overlay/{mix|seq|none}` — exact overlay control

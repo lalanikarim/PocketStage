@@ -1105,3 +1105,47 @@ async fn overlay_routes_forward_exact_targets() {
     assert!(rx.try_recv().is_err());
     cleanup(&path);
 }
+
+// ------------------------------------------------- device mapping (read-only)
+
+#[tokio::test]
+async fn mapping_endpoint_is_read_only_view() {
+    let path = temp_path("mapping-get");
+    cleanup(&path);
+    let state = AppState::standalone(std::sync::Arc::new(
+        ProjectStore::open_or_default(&path).unwrap(),
+    ))
+    .with_device_mappings(
+        pocketstage_oxygen::default_mapping(),
+        pocketstage_oxygen::hui_mapping(),
+    );
+    let (status, body) = call(
+        router(state),
+        Request::builder()
+            .uri("/api/mapping")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["editable"], serde_json::json!(false));
+    // The measured factory map is what comes back (T1 ground truth).
+    assert_eq!(v["music"]["pad_note_base"], serde_json::json!(36));
+    assert_eq!(v["music"]["mode_daw_cc"], serde_json::json!(113));
+    // HUI view carries the transport notes the music view lacks.
+    assert!(v["music"]["transport_notes"].is_null());
+    assert!(v["hui"]["transport_notes"].is_object());
+
+    // No mappings published → 503 (standalone default).
+    let (status, _) = call(
+        router(test_state(&path)),
+        Request::builder()
+            .uri("/api/mapping")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    cleanup(&path);
+}

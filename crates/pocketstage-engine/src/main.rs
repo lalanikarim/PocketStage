@@ -256,7 +256,10 @@ fn main() {
     let http_state =
         AppState::embedded(Arc::clone(&store), ctx, Arc::clone(&live), take_rx, edit_rx)
             .with_presets(presets)
-            .with_keymap(Arc::clone(&keymap));
+            .with_keymap(Arc::clone(&keymap))
+            // Read-only exposure of what the feeder's mappers interpret
+            // (phase 5 prep; Q7: no PUT until probes say it is safe).
+            .with_device_mappings(default_mapping(), hui_mapping());
     match pocketstage_server::spawn_engine_server(http_state, ([0, 0, 0, 0], port).into()) {
         Ok(()) => println!("[server] control plane on http://0.0.0.0:{port} (LAN-trusted)"),
         Err(e) => eprintln!("[server] NOT started ({e}) — audio unaffected"),
