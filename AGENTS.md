@@ -115,6 +115,32 @@ Rules that keep this architecture intact:
   controls are plain MIDI with Mackie-style numbering on port ,1 — no
   personality hunting needed, factory state is the setup requirement.
 - Useful checks: `aconnect -l`, `amidi -p hw:3,0 -d`, `aplay -l`.
+- Vendor manuals for the controller are **not in this repo** (copyright) — see
+  the next section for where they live and how to fetch them.
+
+## Vendor documentation (not in repo — copyright)
+
+M-Audio's manuals are copyrighted; this repo is public, so we cite them, we do
+not host them. Format-shifting (`pdftotext`) a manual into `.txt`/`.md` is still
+a verbatim copy — it just makes the copy less obvious. A DMCA takedown disables
+the whole repository, not one file, so this is a hard rule.
+
+| Document | Version | Why it matters |
+|---|---|---|
+| Oxygen Series MKV — User Guide | v1.2 | Preset-vs-DAW mode behavior, `‹`/`›` semantics (§10 → **D30**), control inventory, personality-switch combo |
+| Oxygen 49 — Quickstart Guide | v1.1 | button layout / setup cross-checks |
+
+- **Get them from** `m-audio.com/support` (product page → *Manuals &
+  Documentation*). Keep the PDFs out of tree; extract greppable text into the
+  gitignored `vendor-docs/` directory:
+  `pdftotext -layout "Oxygen Series MKV - User Guide - v1.2.pdf" vendor-docs/mkv-guide-v1.2.txt`
+- **Ground truth is ours, not theirs:** `specs/device-maps/oxygen-49-mkv.md` is
+  the measured document the code follows. Update *that* when a probe teaches us
+  something; quote the guide only in brief, always naming document + version
+  (that's how D30 records §10). Long pastes into repo files: never.
+- `vendor-docs/README.md` is tracked and restates this policy where the files
+  would land; the directory itself is gitignored so a stray PDF can't be added
+  by accident (`git status` stays clean).
 
 ## Git conventions
 

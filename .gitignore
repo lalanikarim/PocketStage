@@ -1,2 +1,7 @@
 .pi/
 target/
+
+# Third-party vendor manuals: reference locally, never commit (copyright — the
+# repo is public). See vendor-docs/README.md for what to fetch and why.
+vendor-docs/*
+!vendor-docs/README.md
