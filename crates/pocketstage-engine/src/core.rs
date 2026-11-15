@@ -359,10 +359,28 @@ impl Stats {
 
 // ------------------------------------------------------------ voice helpers
 
+/// Scale (0.0..=1.0) → CC data byte, clamped to the wire range.
+///
+/// Clamping is not cosmetic: FluidSynth REJECTS a CC outside 0..=127 and a
+/// rejected message leaves the channel at its previous value — so an
+/// out-of-range field would silently stick the fader at whatever level it held
+/// before instead of applying an extreme. The render lane never trusts
+/// cross-lane data (D20), so every CC goes through here.
+#[inline]
+fn to_cc(scale: f64) -> i32 {
+    (scale * 127.0).round().clamp(0.0, 127.0) as i32
+}
+
 /// Apply a track's voice state — program + mixer — to its internal channel
-/// (D3: track N → channel N). Mute is CC7=0; gain 0..=2 maps onto CC7;
+/// (D3: track N → channel N). Mute is CC7=0; gain 0..=1 maps onto CC7;
 /// pan −1..=+1 maps onto CC10. Called at boot and on every project swap, so
 /// mixer edits ride the existing PUT → SetProject path with no new plumbing.
+///
+/// **Gain is an attenuator, not a booster.** CC7 tops out at 127 = unity, so
+/// `gain = 1.0` is as loud as this channel can go and there is nowhere above
+/// it to go (D33; FluidSynth 2.3.4 has no per-channel float gain — checked:
+/// no `fluid_synth_set_channel_gain` symbol). Boost belongs to
+/// `Project::master_gain`, which drives the synth's real output stage.
 pub fn apply_track_voice<S: SynthBackend>(synth: &mut S, chan: i32, track: &Track) {
     synth.program_change(chan, track.instrument.gm_program as i32);
     let gain = if track.mute {
@@ -370,17 +388,17 @@ pub fn apply_track_voice<S: SynthBackend>(synth: &mut S, chan: i32, track: &Trac
     } else {
         track.gain.unwrap_or(1.0)
     };
-    synth.cc(chan, 7, (gain * 127.0).round() as i32);
+    synth.cc(chan, 7, to_cc(gain));
     let pan = ((track.pan.unwrap_or(0.0) + 1.0) * 63.5)
         .round()
         .clamp(0.0, 127.0) as i32;
     synth.cc(chan, 10, pan);
     // FX sends: None = leave the soundfont's own preset value untouched.
     if let Some(v) = track.reverb {
-        synth.cc(chan, 91, (v * 127.0).round() as i32);
+        synth.cc(chan, 91, to_cc(v));
     }
     if let Some(v) = track.chorus {
-        synth.cc(chan, 93, (v * 127.0).round() as i32);
+        synth.cc(chan, 93, to_cc(v));
     }
 }
 
@@ -1966,6 +1984,45 @@ mod harness_tests {
         assert!(calls.contains(&Call::Prog(1, 4)), "track 2 program");
         assert!(calls.contains(&Call::Cc(1, 7, 0)), "mute → CC7=0");
         assert!(calls.contains(&Call::Cc(1, 91, 127)), "reverb send full");
+    }
+
+    #[test]
+    fn swap_clamps_hostile_mixer_values_into_cc_range() {
+        // CC data is 0..=127 and FluidSynth REJECTS values outside that range
+        // — and a rejected CC leaves the channel at its PREVIOUS level, so an
+        // out-of-range field does not merely fail to apply, it silently sticks
+        // at the old value (D32 ear-check: track gain right of center was dead
+        // because CC7=203 never landed). Validation caps gain at unity now
+        // (D33), but the render lane never trusts cross-lane data (D20):
+        // clamp to the edge, never drop the message.
+        let mut h = Harness::new();
+        {
+            let t = &mut h.core.project.tracks[1];
+            t.gain = Some(5.0);
+            t.pan = Some(-3.0);
+            t.reverb = Some(9.0);
+            t.chorus = Some(-2.0);
+        }
+        let pf = h.project();
+        h.tx_cmd.send(EngineCommand::SetProject(pf)).unwrap();
+        h.tick(1);
+        let calls = h.calls();
+        assert!(
+            calls.contains(&Call::Cc(1, 7, 127)),
+            "gain clamped to CC7 max"
+        );
+        assert!(
+            calls.contains(&Call::Cc(1, 10, 0)),
+            "pan clamped to CC10 min"
+        );
+        assert!(
+            calls.contains(&Call::Cc(1, 91, 127)),
+            "reverb send clamped to CC91 max"
+        );
+        assert!(
+            calls.contains(&Call::Cc(1, 93, 0)),
+            "chorus send clamped to CC93 min"
+        );
     }
 
     #[test]
