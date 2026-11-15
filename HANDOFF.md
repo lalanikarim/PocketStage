@@ -433,25 +433,32 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     checks of sessions 8/9/10/11 features (overlay toggles, mix rides, step
     painting), pedal probe, T2 round 2, Pi validation + deployment kit
     (user deferred).
-15. **Web UX: mixer edits should apply immediately — NEXT UP (agreed after
-    the session-15 doc audit)** (user report, session 11): volume/gain sliders
-    in the web UI only take effect after an explicit Save click — dragging
-    should be audible live. Sketch: debounced auto-save on slider release (or a
-    lightweight per-control PATCH-style lane); mind the dirty-flag guard
-    (refresh() must not clobber unsaved edits) and don't PUT per mousemove
-    event. Todo, software-only. Notes for the implementer:
-    - Range inputs fire `input` continuously and `change` on release — the
-      debounce can key off `change` alone, mirroring how the engine's MIX
-      write-through lane waits for ~500 ms of quiet
-      (`WRITE_THROUGH_QUIET_SAMPLES`) rather than flushing per CC.
-    - Every mixer edit already lands in the fetched `ProjectFile` and rides
-      `PUT /api/project`; a live-apply path is that same PUT, so validation,
-      atomic write and engine adoption come for free — no new endpoint needed
-      unless we want per-field PATCH semantics (decide first; server-side
-      validation must stay the single authority).
-    - D31 side effect: the mixer now renders up to 8 tracks, so whatever
-      debounce/queue is added gets exercised by more rows — avoid an N×PUT
-      storm on project-wide re-renders.
+15. **Web UX: mixer edits apply immediately — DONE (session 16, D32)** ✅:
+    gain/pan/mute/FX-send sliders, the Global FX + Master rows and the per-take
+    mute checkbox now write themselves through — no Save click (user report,
+    session 11). Client-side throttle in `index.html`
+    (`scheduleLiveApply` / `liveApplyNow`): apply at once on the first touch of
+    a burst, then at most every `LIVE_GAP_MS` while the pointer keeps moving,
+    plus a trailing flush so the final value always lands — deliberately the
+    engine's own write-through shape (`WRITE_THROUGH_QUIET_SAMPLES`). The write
+    IS the same `PUT /api/project` Save performs: validation, atomic write and
+    engine adoption stay server-side, **no per-field PATCH endpoint** (D32).
+    Live applies skip the post-save `refresh()` — re-rendering would rebuild the
+    slider under the pointer, and the document just PUT *is* the store truth.
+    Guards: never auto-PUT while the raw-JSON editor is open (explicit-Save
+    only), one in-flight PUT at a time (`saveInFlight` + trailing retry), and a
+    bounded retry tail (`LIVE_MAX_TRIES`) so a document the store keeps
+    rejecting can't hammer the server — it stays dirty and `Save ●` says so.
+    Accepted consequence: **a mixer edit saves the whole document**, including
+    unsaved name/bpm/structure edits (single-document semantics; patching into
+    a saved snapshot instead would silently revert those on the next refresh).
+    Two latent bugs this traffic pattern exposed, both fixed test-first:
+    `ProjectStore::replace` assigned memory *after* dropping the path lock (an
+    interleaving could leave GET serving a document disk did not have) and
+    `apply_swap` cleared the key-chatter table, swallowing held-note releases —
+    see D32 + §10 session 16. **Ear-check owed:** drag feel, and `LIVE_GAP_MS`
+    tuning on the Pi (a sustained drag is ≈2 project writes per second of
+    pointer movement).
 16. **One voice at a time + white-key browser — IMPLEMENTED (session 11b,
     D25)** ✅: exactly one active voice in PRESET; DAW white-key selection;
     kit spans both pad banks in Drums; melodic pads play the voice. Layering
@@ -570,6 +577,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D28 | **Personality pin: NC1** (supersedes D26's "pin N1/N2"): measured unit exposes ONLY NC1 across every documented selection path (guide combo hold-SHIFT+DAW/PRESET, all preset slots); NC1's outputs are plain MIDI messages with Mackie-style numbering (notes 0–7/46/47, tick constants, PB faders) — consuming them is mapping, not the bidirectional Mackie-protocol emulation that stays a hard non-goal. Defaults ship from take-2 NC1 numbers; MIX keeps using PRESET-mode faders CC33–41 | ✅ ruled (s14c) |
 | D29 | **Phase 5 SHIPS — expose device `Mapping` via GET/PUT `/api/mapping`** (supersedes Q7's "stays closed"; ruled s14c): T7 gate satisfied by takes 1–2 + D28 (NC1 measured); implementation must still land the mapper-state-on-swap ruling (spec phase-5 §, likely apply-at-transport-stopped + `rebase(old,new)` carry-over) and mirror the keymap loader discipline (never-fail-open, loud warn). Read-only GET already shipped | ✅ ruled (s14c); implementation owed |
 | D31 | **`MAX_TRACKS` 4 → 8: the cap is a channel budget, not a fader count** (session 15). R2's "max 4 tracks (matches Oxygen 49 MKV's 4 faders exactly)" was factually wrong — the measured device map has **9** faders (`oxygen-49-mkv.md`), and the real constraint was always FluidSynth's channel map: a track owns channel `index` unless overridden (D3) while the engine reserves 8..=15 for the pad kit + metronome (`PAD_CH_BASE`) ⇒ channels 0..=7 fit, 8 does not. Law test `track_cap_matches_the_channel_budget` locks the reasoning. Consequences: `default_project()` starters decoupled from the cap (still a 4-piece boot — capacity ≠ content); engine MIX gates stop hardcoding 4 — **F(n) → gain of track n for every track that exists** (R12's own "F5–F9 unused until more channels exist" clause finally exercised), fader-button detail select follows, knob rows stay a four-channel page (only 8 knobs; channels 5–8 reach pan/sends via their detail page); web reads the cap from `GET /api/health` (`max_tracks`) instead of mirroring it. **Known sharp edge (unchanged, now easier to hit):** `Track.channel` overrides are only range-checked 0..=15, and the documented reason for the override is a GM drum track on channel 9 — which sits inside the pad bank (8..=15), so such a track aliases pad 2 / CONFIRM_RIM. Needs its own ruling before anyone routes past channel 7 | ✅ ruled (s15); implemented |
+| D32 | **Live-apply web mixer edits = debounced whole-document PUT; no PATCH endpoint** (session 16, backlog item 15). Mixer/take-mute controls schedule the existing `PUT /api/project` on a leading-edge + rate-capped + trailing flush throttle (`LIVE_GAP_MS` 500 ms ≈ the engine's own write-through quiet window). Rejected alternatives: (a) per-field PATCH endpoint — a second write path means a second validator, a second persistence path and a second adoption story for fields the model already owns; the whole-document PUT is already validated, atomic and adopted at ≤8 tracks with no measurable cost (12-way concurrent burst: all 204, swaps cheap, xruns 0); (b) patching the edit into a *saved* snapshot rather than the live document — it would silently revert the user's other unsaved edits on the next refresh. So: one write path, one authority (server validation), and "the fader saved the document" is honest because `Save ●` clears with it. Client rules: raw-JSON editor open ⇒ explicit Save only; one PUT in flight; bounded retry tail so a rejected document can't hammer the server. **Two invariants this made load-bearing (both fixed + tested):** `ProjectStore::replace` must assign memory *inside* the path lock (else an interleaving leaves GET serving what disk isn't), and `EngineCore::apply_swap` must NOT clear the key-chatter table — it describes notes physically sounding, and a swap silences nothing; clearing it swallowed held-key releases and pending note-offs (stuck voice until Stop). Tests: `concurrent_replaces_keep_disk_and_memory_in_step`, `put_burst_forwards_every_accepted_swap_to_engine`, `held_note_releases_across_a_project_swap`, `pending_release_survives_a_project_swap` | ✅ ruled (s16); implemented |
 | D30 | **Bank commands ship unbound + defaults music-port qualified** (session 15; kills backlog task "MIX bank paging + BankPrev/BankNext wiring + ‹/› defaults"). Two measured reasons: (1) `‹`/`›` are **mode-conditional** — guide v1.2 §10 + our preset-mode table agree they emit NOTHING in PRESET mode (device-local preset scroll), while the T7 numbers (HUI notes 46/47) are DAW-mode Mackie controls; MIX lives inside PRESET (D21) and its faders/knobs are the PRESET CC map, so a ‹/›→MIX-page binding would be silent exactly when it is needed and live only where MIX has no consumable inputs. Mackie-style track-bank scroll is also meaningless at 4 tracks on one page. `bank_prev`/`bank_next` stay in the frozen vocabulary — hand-bindable but with **no engine consumer** (no paging `Event` exists; the feeder arm is empty by ruling), and **no defaults**. (2) Built-in voice/command defaults were claiming their notes on *every* port, which made any HUI-qualified default fail `DawKeymap::validate()` (`voices[6] (Nylon Guitar) … claim note 47`); defaults now say `"port":"music"` — byte-identical routing (keys/pads are port :0 in both modes), whole HUI note space freed for future DAW-mode bindings | ✅ ruled (s15); implemented |
 
 ---
@@ -629,11 +637,16 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 
 ## 9. How to resume (suggested prompt for next session)
 
-> Read HANDOFF.md (§6 backlog, §7 decisions through **D31**) and AGENTS.md.
-> **NEXT SESSION STARTS HERE → §6 item 15: web mixer edits must apply live**
-> (user report s11: gain/pan/send sliders only sound after an explicit Save;
-> want debounced auto-save on slider release, no PUT per mousemove, and the
-> dirty-flag guard must not clobber unsaved edits). Software-only; test-first.
+> Read HANDOFF.md (§6 backlog, §7 decisions through **D32**) and AGENTS.md.
+> **NEXT SESSION STARTS HERE → knob param-leaf ruling, then knob consumption**
+> (item 17's remaining (b): the relative-knob amendment is drafted in
+> `specs/daw-keymap.md`, direction measured CW=1/CCW=65; rule the param-target
+> leaf, then wire it). Software-only until the ear-check.
+> Session 16 wrap: **§6 item 15 DONE (D32)** — web mixer/take-mute edits apply
+> live over the existing PUT path (throttled client-side, no PATCH endpoint);
+> fixed `ProjectStore::replace` memory-vs-disk ordering and a swap-clears-
+> chatter-guards stuck-note bug. Owed from it: browser ear-check of drag feel +
+> `LIVE_GAP_MS` on the Pi.
 > Session 14b wrap (historical): **keymap phases 1–4 hardware-validated** — live
 > remap loop confirmed by ears + log (voice hot-reload, command remap →
 > `overlay=MIX`, reset → defaults, corrupt keymap file boots warn +
@@ -656,7 +669,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 > factually wrong); MIX faders now address every channel of the project and
 > the web reads the cap from `/api/health`. Next work, pure software, in the
 > order agreed with the user after the s15 doc audit:
-> **(a) §6 item 15 — live-apply web mixer edits (START HERE);**
+> ~~(a) §6 item 15 — live-apply web mixer edits~~ **DONE (s16, D32)**;
 > (b) knob param-leaf ruling, then knob consumption (amendment drafted,
 > direction CW=1/CCW=65); (c) Phase 5 Mapping PUT per **D29 (ruled s14c:
 > ships)** — rule mapper-state-on-swap first, mirror the keymap loader; then
@@ -1088,3 +1101,42 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
       is the *documented* way to do GM drums. Needs its own ruling.
     - 199 tests green (30 model / 85 engine / 43 oxygen / 28 server /
       13 midi); clippy `-D warnings` + fmt clean.
+- **Session 16 (web mixer edits apply live, D32)**: backlog item 15, plus a
+    docs-normalization pass on AGENTS.md first (it cited HANDOFF section
+    numbers, decision IDs and "current through D31", which made every doc
+    update a two-file change — now it addresses documents by *role* only, with
+    a drift clause; no rules changed).
+    - **Design (D32)**: ruled for the existing whole-document `PUT /api/project`
+      on a throttle, against a per-field PATCH endpoint — one write path keeps
+      server validation as the single authority and costs nothing measurable.
+      Throttle mirrors the engine's write-through lane: leading edge immediate,
+      `LIVE_GAP_MS` floor between applies while the pointer moves, trailing
+      flush so the last value lands. Live applies skip the post-save re-fetch
+      (would rebuild the slider under the pointer); raw-JSON editor open means
+      explicit-Save-only; one PUT in flight; retry tail bounded by
+      `LIVE_MAX_TRIES` so a rejected document can't hammer the server.
+      Wired: track gain/pan/mute, reverb/chorus sends, Global FX + Master rows,
+      per-take mute (matching Solo, which already PUT immediately).
+    - **Verified, not eyeballed**: the throttle logic was extracted from the
+      embedded script and driven against fakes (one 40-event drag → 2 PUTs; a
+      sustained 3.5 s drag → 5, rate-capped; rejecting server → 3 then stop;
+      raw editor open → 0), plus `node --check` on the script (CI has no JS
+      gate) and a 12-way concurrent PUT burst against a live standalone server
+      (all 204, memory == disk, no `.json.tmp` debris, invalid doc → 400).
+    - **Two latent bugs the new traffic pattern exposed** (both test-first):
+      `ProjectStore::replace` dropped the path lock *before* assigning the
+      in-memory copy — an interleaving could leave GET serving a document disk
+      did not have, i.e. a silent revert on restart
+      (`concurrent_replaces_keep_disk_and_memory_in_step`); and `apply_swap`
+      called `reset_key_guards()`, which
+      erased held-key DOWN flags and releases deferred inside their grace
+      window — with swaps now routine, holding a chord while dragging a fader
+      stuck a voice until Stop (`held_note_releases_across_a_project_swap`,
+      `pending_release_survives_a_project_swap`; the first failed before the
+      fix). Rule of thumb recorded in D32: the chatter table describes notes
+      physically sounding, and a swap silences nothing.
+    - 203 tests green (30 model / 87 engine / 43 oxygen / 30 server /
+      13 midi); clippy `-D warnings` + fmt clean. Engine on :7777 is the
+      pre-session binary — restart it before the browser ear-check
+      (`pkill -x pocketstage-eng`; `pkill -f pocketstage-server` self-matched
+      and killed the harness shell again, as AGENTS warns).
