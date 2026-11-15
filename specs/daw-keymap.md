@@ -8,8 +8,9 @@ AMENDMENT DRAFTED below (direction RESOLVED CW=1/CCW=65; bank ‹/› = HUI
 notes 46/47; buttons 1–8 = HUI notes 0–7). **D28 ruled (s14c): NC1 is
 the pinned personality** — the only one this unit exposes; its messages
 are plain MIDI with Mackie-style numbering, so take-2 numbers ship as
-defaults. Phase 5 = open ship decision. Decisions D26 + D28 in
-scratchpad R14 + HANDOFF §7.**
+defaults. **Phase 5 ruled to SHIP (D29, s14c)** — Mapping GET/PUT
+implementation owed, honoring the phase-5 preconditions. Decisions
+D26 + D28 + D29 in scratchpad R14 + HANDOFF §7.**
 Requested session 12: "configure DAW mode key and button mappings so we can
 manage it in a json file … what we don't want to allow remapping is Preset
 mode." All seven open questions answered (rulings at each Q below).
@@ -259,13 +260,14 @@ scratchpad R14 + HANDOFF §7.
 - Reset-to-defaults button; import/export raw JSON (textarea) as escape hatch.
 - Acceptance: full remap loop with zero file-handling by the user.
 
-### Phase 5 — optional: device-layer `Mapping` exposure
+### Phase 5 — device-layer `Mapping` exposure — RULED TO SHIP (D29, s14c)
 
 - `GET/PUT /api/mapping` for oxygen `Mapping` (pad base, fader CCs…) with
   its existing `validate()`; UI advanced tab. Separate ship decision (Q7).
 - **PREP LANDED (session 14b):** read-only `GET /api/mapping` — serves the
   two live boot mappings (music + HUI) with `"editable": false`; pure
-  observation for debugging/T7, Q7 untouched. PUT stays unbuilt.
+  observation for debugging/T7. PUT owed per D29; the two open rulings
+below bind it.
 - **Open design rulings required before any PUT ships** (this is the part
   that made Phase 5 different from phases 1–4 — say so in the spec):
   1. **Loader**: mirror the keymap (`POCKETSTAGE_MAPPING` env override,
@@ -328,6 +330,8 @@ scratchpad R14 + HANDOFF §7.
    `Mapping` is measured ground truth; UI-editing it without hardware
    probes invites silent misroute incidents. Phase 5 stays a separate
    ship decision.
+   *(D29, s14c: superseded — Phase 5 ruled to SHIP; the preconditions
+   below (loader, mapper-state-on-swap) still bind the implementation.)*
 
 ## Test-first notes (repo law)
 

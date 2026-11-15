@@ -480,8 +480,10 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     cancelled; no hardware gate remains. Next code work: (a) MIX bank
     paging + feeder wiring for BankPrev/BankNext with shipped defaults
     ‹/› = HUI notes 46/47; (b) knob param-leaf ruling, then knob
-    consumption (amendment drafted). Phase 5 (device Mapping exposure)
-    stays an open ship decision.**
+    consumption (amendment drafted). **Phase 5 ruled to SHIP (D29,
+    s14c)** — device Mapping exposed via GET/PUT; honors the spec's
+    phase-5 preconditions (mapper-state-on-swap ruling first; loader
+    mirrors keymap never-fail-open).**
 18. **Voice picker on the web — DONE** (`POST /api/voice` accepting the
     model's `ActiveVoice` serde form (`"drums"` | `{"program": N}`, >127 →
     400); `EngineCommand::SelectVoice` runs as the ordinary
@@ -544,6 +546,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D26 | **Configurable DAW keymap** (R14 + addendum): global `~/.pocketstage/keymap.json`, schema **v0.1** — unified frozen SOURCE object (`{"note":N}`/`{"cc":N}` + optional port) consumed by typed sections (voices/commands/fader_buttons/knobs-empty); same map drives overlay commands inside PRESET; PRESET instrument routing NOT expressible (can't-be-remapped by construction); feeder-only consumption (R5), corrupt file → defaults never-fail boot; manual note entry v1; voice field externally-tagged for future patch refs; unit personality PINNED to N1/N2 plain-MIDI (no Mackie/HUI emulation, no N3) | ✅ v0.1 frozen (s13); phases 1–4 implemented (s14), hardware ear-checked incl. Q4 (s14b/c); T7 takes 1–2 decoded (knobs relative CW=1/CCW=65, <> = HUI 46/47, buttons 1–8 = HUI 0–7, #9 is a mode button); pinning superseded by D28 (NC1) |
 | D26.1 | **Schema rectification v0→v0.1** (R14 addendum, locked Option B): re-frozen pre-code after MKV docs review showed knobs (CC/HUI) are DAW mode's primary controls; command vocab incl. bank_prev/next; knob param-target semantics intentionally unfrozen (additive later); no version field until phase 1 ships SCHEMA=1 | ✅ (s13) |
 | D28 | **Personality pin: NC1** (supersedes D26's "pin N1/N2"): measured unit exposes ONLY NC1 across every documented selection path (guide combo hold-SHIFT+DAW/PRESET, all preset slots); NC1's outputs are plain MIDI messages with Mackie-style numbering (notes 0–7/46/47, tick constants, PB faders) — consuming them is mapping, not the bidirectional Mackie-protocol emulation that stays a hard non-goal. Defaults ship from take-2 NC1 numbers; MIX keeps using PRESET-mode faders CC33–41 | ✅ ruled (s14c) |
+| D29 | **Phase 5 SHIPS — expose device `Mapping` via GET/PUT `/api/mapping`** (supersedes Q7's "stays closed"; ruled s14c): T7 gate satisfied by takes 1–2 + D28 (NC1 measured); implementation must still land the mapper-state-on-swap ruling (spec phase-5 §, likely apply-at-transport-stopped + `rebase(old,new)` carry-over) and mirror the keymap loader discipline (never-fail-open, loud warn). Read-only GET already shipped | ✅ ruled (s14c); implementation owed |
 
 ---
 
@@ -618,7 +621,9 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 > software: (a) MIX bank paging + feeder wiring for BankPrev/BankNext +
 > default bindings ‹/› = HUI notes 46/47; (b) knob param-leaf ruling,
 > then knob consumption (amendment drafted, direction CW=1/CCW=65);
-> (c) Phase 5 ship decision. Next software candidates: §6 item 15 (live-apply web mixer
+> (c) implement Phase 5 Mapping PUT per **D29 (ruled s14c: ships)** —
+> rule mapper-state-on-swap first, mirror keymap loader. Next software
+> candidates: §6 item 15 (live-apply web mixer
 > edits), item 19 phase B (patch catalog — its phase E feeds the keymap
 > voice field via Addition A). Hardware-gated backlog still standing:
 > pedal probe, Pi validation, items 14/16 ear-checks. Live env: engine
@@ -1009,4 +1014,8 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   (only personality available; outputs are plain MIDI with Mackie-style
   numbering, consumption is mapping not emulation; bidirectional Mackie
   protocol stays a non-goal). Take 3 cancelled — no hardware gate
-  remains; take-2 numbers ship as defaults.
+  remains; take-2 numbers ship as defaults. Final ruling of the day:
+  **D29 — Phase 5 ships** (device Mapping via GET/PUT, superseding Q7's
+  closure; mapper-state-on-swap ruling + never-fail-open loader remain
+  as implementation preconditions). Next session starts with task A:
+  MIX bank paging + BankPrev/BankNext wiring + ‹/› defaults.
