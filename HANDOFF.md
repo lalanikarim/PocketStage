@@ -577,6 +577,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D28 | **Personality pin: NC1** (supersedes D26's "pin N1/N2"): measured unit exposes ONLY NC1 across every documented selection path (guide combo hold-SHIFT+DAW/PRESET, all preset slots); NC1's outputs are plain MIDI messages with Mackie-style numbering (notes 0–7/46/47, tick constants, PB faders) — consuming them is mapping, not the bidirectional Mackie-protocol emulation that stays a hard non-goal. Defaults ship from take-2 NC1 numbers; MIX keeps using PRESET-mode faders CC33–41 | ✅ ruled (s14c) |
 | D29 | **Phase 5 SHIPS — expose device `Mapping` via GET/PUT `/api/mapping`** (supersedes Q7's "stays closed"; ruled s14c): T7 gate satisfied by takes 1–2 + D28 (NC1 measured); implementation must still land the mapper-state-on-swap ruling (spec phase-5 §, likely apply-at-transport-stopped + `rebase(old,new)` carry-over) and mirror the keymap loader discipline (never-fail-open, loud warn). Read-only GET already shipped | ✅ ruled (s14c); implementation owed |
 | D31 | **`MAX_TRACKS` 4 → 8: the cap is a channel budget, not a fader count** (session 15). R2's "max 4 tracks (matches Oxygen 49 MKV's 4 faders exactly)" was factually wrong — the measured device map has **9** faders (`oxygen-49-mkv.md`), and the real constraint was always FluidSynth's channel map: a track owns channel `index` unless overridden (D3) while the engine reserves 8..=15 for the pad kit + metronome (`PAD_CH_BASE`) ⇒ channels 0..=7 fit, 8 does not. Law test `track_cap_matches_the_channel_budget` locks the reasoning. Consequences: `default_project()` starters decoupled from the cap (still a 4-piece boot — capacity ≠ content); engine MIX gates stop hardcoding 4 — **F(n) → gain of track n for every track that exists** (R12's own "F5–F9 unused until more channels exist" clause finally exercised), fader-button detail select follows, knob rows stay a four-channel page (only 8 knobs; channels 5–8 reach pan/sends via their detail page); web reads the cap from `GET /api/health` (`max_tracks`) instead of mirroring it. **Known sharp edge (unchanged, now easier to hit):** `Track.channel` overrides are only range-checked 0..=15, and the documented reason for the override is a GM drum track on channel 9 — which sits inside the pad bank (8..=15), so such a track aliases pad 2 / CONFIRM_RIM. Needs its own ruling before anyone routes past channel 7 | ✅ ruled (s15); implemented |
+| D33 | **`Track.gain` is an attenuator: range tightened to 0..=1, every CC clamped to the wire range** (session 16b, found by user ear-check during the D32 verification). The model validated `gain 0..=2` and the engine mapped it to `CC7 = gain × 127`, but CC7 tops out at 127 = **unity**, and FluidSynth does not clamp an out-of-range CC — it **rejects** it, so the channel keeps its previous level. Lab `crates/pocketstage-engine/examples/cc_range_lab.rs` (offline render, held pad, RMS per step): CC7=127 → −23.3 dBFS, CC7=10 → −68.8, **CC7=203 → −69.7 (the cut, i.e. dropped)**, CC7=127 again → −25.2. Audibly: the right half of every track-gain slider was dead *and stuck at whatever level it last held* — "volume goes down but not up". FluidSynth 2.3.4 exports no `fluid_synth_set_channel_gain` (checked with `nm -D`), so per-channel boost does not exist here; boost belongs to `Project::master_gain`, which drives the real float output stage (`fluid_synth_set_gain`) and works in both directions. Ruled: **(a)** honest attenuation — model range 0..=1, UI slider max 1 ("level (cut only) — use Master to boost"); rejected (b) remapping 0..=2 onto CC7 so unity sits mid-slider (labels a boost that cannot exist) and (c) per-voice generator edits (session 8 already proved live `GEN_ATTENUATION` writes never reach the mixer for one-shots). Legacy files with gain > 1 keep booting: `Project::normalize_legacy_values()` clamps to unity **while parsing**, so `SCHEMA_VERSION` stays at 1 (format unchanged, only legal values) and the next PUT persists the honest number — always-illegal values (negatives) stay illegal, no silent fixes. Separately and independently of the range question: `apply_track_voice` now routes every CC through `to_cc()`, clamping to 0..=127 like the pan mapping already did — D20's "never trust cross-lane data" applies to *values*, not just indices, because a dropped CC is worse than a wrong one (it freezes the old level) | ✅ ruled (s16b); implemented |
 | D32 | **Live-apply web mixer edits = debounced whole-document PUT; no PATCH endpoint** (session 16, backlog item 15). Mixer/take-mute controls schedule the existing `PUT /api/project` on a leading-edge + rate-capped + trailing flush throttle (`LIVE_GAP_MS` 500 ms ≈ the engine's own write-through quiet window). Rejected alternatives: (a) per-field PATCH endpoint — a second write path means a second validator, a second persistence path and a second adoption story for fields the model already owns; the whole-document PUT is already validated, atomic and adopted at ≤8 tracks with no measurable cost (12-way concurrent burst: all 204, swaps cheap, xruns 0); (b) patching the edit into a *saved* snapshot rather than the live document — it would silently revert the user's other unsaved edits on the next refresh. So: one write path, one authority (server validation), and "the fader saved the document" is honest because `Save ●` clears with it. Client rules: raw-JSON editor open ⇒ explicit Save only; one PUT in flight; bounded retry tail so a rejected document can't hammer the server. **Two invariants this made load-bearing (both fixed + tested):** `ProjectStore::replace` must assign memory *inside* the path lock (else an interleaving leaves GET serving what disk isn't), and `EngineCore::apply_swap` must NOT clear the key-chatter table — it describes notes physically sounding, and a swap silences nothing; clearing it swallowed held-key releases and pending note-offs (stuck voice until Stop). Tests: `concurrent_replaces_keep_disk_and_memory_in_step`, `put_burst_forwards_every_accepted_swap_to_engine`, `held_note_releases_across_a_project_swap`, `pending_release_survives_a_project_swap` | ✅ ruled (s16); implemented |
 | D30 | **Bank commands ship unbound + defaults music-port qualified** (session 15; kills backlog task "MIX bank paging + BankPrev/BankNext wiring + ‹/› defaults"). Two measured reasons: (1) `‹`/`›` are **mode-conditional** — guide v1.2 §10 + our preset-mode table agree they emit NOTHING in PRESET mode (device-local preset scroll), while the T7 numbers (HUI notes 46/47) are DAW-mode Mackie controls; MIX lives inside PRESET (D21) and its faders/knobs are the PRESET CC map, so a ‹/›→MIX-page binding would be silent exactly when it is needed and live only where MIX has no consumable inputs. Mackie-style track-bank scroll is also meaningless at 4 tracks on one page. `bank_prev`/`bank_next` stay in the frozen vocabulary — hand-bindable but with **no engine consumer** (no paging `Event` exists; the feeder arm is empty by ruling), and **no defaults**. (2) Built-in voice/command defaults were claiming their notes on *every* port, which made any HUI-qualified default fail `DawKeymap::validate()` (`voices[6] (Nylon Guitar) … claim note 47`); defaults now say `"port":"music"` — byte-identical routing (keys/pads are port :0 in both modes), whole HUI note space freed for future DAW-mode bindings | ✅ ruled (s15); implemented |
 
@@ -629,6 +630,14 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   port only, perfect lockstep over 4 toggles, no port-open bursts (earlier
   "burst" was echo of real presses). Initial mode still unknown at boot —
   assume PRESET; self-heals on first toggle. Full table in device map §T6.
+- **Track 1 shares a channel with the live keybed voice.** `LEAD_CH = 0` and
+  track 1 lives on channel 0 (D3), so the Mixer's first row (`Piano`) rides the
+  keys you are playing: its gain changes your live level and muting it silences
+  the keybed. Observed during the s16b ear-check; harmless when the first track
+  *is* the performance voice, confusing when it isn't (a real project could have
+  `Pad` as track 1 while the picked voice is a piano). Fix needs its own ruling
+  (move the lead to an unused channel vs reserve one), and it interacts with the
+  D31 `Track.channel` → pad-bank aliasing edge.
 - **Fader 9 button collision** — heuristic (bare 127→0) could misfire only if someone
   moves that fader top-to-bottom between two MIDI samples; effectively impossible at
   USB rates, but it's a known theoretical edge.
@@ -637,7 +646,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 
 ## 9. How to resume (suggested prompt for next session)
 
-> Read HANDOFF.md (§6 backlog, §7 decisions through **D32**) and AGENTS.md.
+> Read HANDOFF.md (§6 backlog, §7 decisions through **D33**) and AGENTS.md.
 > **NEXT SESSION STARTS HERE → knob param-leaf ruling, then knob consumption**
 > (item 17's remaining (b): the relative-knob amendment is drafted in
 > `specs/daw-keymap.md`, direction measured CW=1/CCW=65; rule the param-target
@@ -1140,3 +1149,30 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
       pre-session binary — restart it before the browser ear-check
       (`pkill -x pocketstage-eng`; `pkill -f pocketstage-server` self-matched
       and killed the harness shell again, as AGENTS warns).
+- **Session 16b (ear-check findings: D32 verified + D33)**: engine restarted on
+    the new binary (live burst through HTTP: 6 swaps, xruns 0, busy ~0.5 %);
+    user walked the checklist and confirmed live apply works — but two findings
+    fell out of the walkthrough.
+    - **"Where is the gain/pan slider?"** — the mixer grid has no column
+      headers, only `title` tooltips, so controls are unidentifiable without
+      hovering. Not fixed here (offered, awaiting the user); a header row +
+      per-row letters is pure markup/CSS.
+    - **"Volume goes down but not up" → D33.** Track gain mapped to
+      `CC7 = gain × 127` while the model allowed `gain 0..=2`: CC7 tops out at
+      unity, and FluidSynth *rejects* an out-of-range CC rather than clamping,
+      so the channel froze at its previous level. New lab
+      `examples/cc_range_lab.rs` measures it (−23.3 dBFS @127, −68.8 @10,
+      **−69.7 @203 = dropped**, −25.2 back @127). Ruled (a): gain is an
+      attenuator — model range 0..=1 with legacy clamp-on-parse
+      (`normalize_legacy_values`, `SCHEMA_VERSION` stays 1), UI slider capped at
+      1 labelled "cut only", boost left to Master (real float output gain);
+      no per-channel boost exists in FluidSynth 2.3.4 (`nm -D`: no
+      `fluid_synth_set_channel_gain`). Independently: every CC in
+      `apply_track_voice` now goes through `to_cc()` clamping —
+      `swap_clamps_hostile_mixer_values_into_cc_range` failed before the fix.
+    - Logged as a watch-list risk (not yet ruled): track 1 shares channel 0 with
+      `LEAD_CH`, so the first mixer row rides the live keybed — muting it
+      silences the keys.
+    - 205 tests green (32 model / 88 engine / 43 oxygen / 30 server /
+      13 midi); clippy `-D warnings` + fmt clean; `node --check` on the UI
+      script.
