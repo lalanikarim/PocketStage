@@ -192,7 +192,8 @@ counted at the unit); `<`/`>` presses not isolated from the general sweeps.
   mode faders (CC33–41), and pinning plain-MIDI keeps us off the Mackie
   protocol entirely.
 
-**Take 2 owed:** full PRESET-SHIFT sweep; isolate `<`/`>` presses (bank
+**Take 2 owed (FULFILLED — see "T7 take 2" section below for all of
+these):** full PRESET-SHIFT sweep; isolate `<`/`>` presses (bank
 command defaults); identify N1/N2 by unit display + click count from a
 known start; per-button HUI note table (which physical button =
 which note); **transport buttons (play/stop/record/loop) one press per

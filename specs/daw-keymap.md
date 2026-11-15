@@ -132,6 +132,8 @@ CC numbers or only meaning (device-local state is invisible to us — no
 readback); confirm `<`/`>` bank-scroll messages for default bindings.
 Non-goals reaffirmed: HUI protocol emulation; mirroring device-local knob
 submode state; N3 pad semantics (conflict with D25 unified note rule).
+**Executed: takes 1–2 fully decoded (s14b/c, raw logs + answers in the
+device map); take 3 cancelled per D28 — see pinning section above.**
 
 ## Knob semantics amendment — DRAFT (session 14b, pending ruling)
 

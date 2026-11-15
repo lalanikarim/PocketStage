@@ -111,6 +111,9 @@ Rules that keep this architecture intact:
 - PipeWire audio; Oxygen 49 MKV is ALSA card 3 / sequencer client 28
   (`28:0` USB MIDI, `28:1` Mackie/HUI, `28:2` Editor SysEx).
 - Soundfont: `/usr/share/sounds/sf2/FluidR3_GM.sf2`.
+- DAW mode exposes **NC1 only** on this unit's firmware (D28): its
+  controls are plain MIDI with Mackie-style numbering on port ,1 — no
+  personality hunting needed, factory state is the setup requirement.
 - Useful checks: `aconnect -l`, `amidi -p hw:3,0 -d`, `aplay -l`.
 
 ## Git conventions
