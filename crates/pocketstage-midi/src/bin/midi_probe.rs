@@ -248,7 +248,9 @@ fn note_name(key: u8) -> String {
     const NAMES: [&str; 12] = [
         "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
     ];
-    format!("({}{})", NAMES[key as usize % 12], key as i32 / 12 - 1)
+    // Yamaha/DAW convention: middle C (60) is C3 (labels only; numbers
+    // on the wire are untouched).
+    format!("({}{})", NAMES[key as usize % 12], key as i32 / 12 - 2)
 }
 
 // ----------------------------------------------------------------------- T7

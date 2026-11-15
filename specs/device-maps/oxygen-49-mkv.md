@@ -4,6 +4,12 @@ Ground truth captured via `midi_probe watch` (raw ALSA sequencer), July 2026.
 Two sessions: DAW mode (accidental) and **Preset mode** (DAW LED unlit).
 This file is the spec for `pocketstage-oxygen`'s default mapping.
 
+**Naming convention (session 14):** all user-facing note *labels* use the
+Yamaha/DAW style with middle C = **C3** — so the Oxygen's bottom key
+(note 36) is called **C1**. MIDI numbers are unchanged; older doc lines
+written as "C2..G3" for the default browser mean notes 36..55, which read
+C1..G2 under this convention. When in doubt, trust the number.
+
 ## Identity & ports
 
 - USB `0763:0002`, three rawmidi/sequencer subdevices:
