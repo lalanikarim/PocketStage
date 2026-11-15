@@ -442,8 +442,8 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     Drums, black-key commands (G#3/A#3 enter/exit overlays in both modes,
     C#4/D#4 SEQ bar/window while live), hardware scene launch REMOVED (web
     UI / HTTP only), voice persistence across reboot.
-17. **Configurable DAW-mode key/button mappings — PHASE 0 DONE, schema v0
-    FROZEN (session 13, D26)**: JSON-managed DawKeymap (voice browser +
+17. **Configurable DAW-mode key/button mappings — Phases 0–4 DONE
+    (sessions 13–14, D26; see §10 session 14 for what shipped)**: JSON-managed DawKeymap (voice browser +
     overlay commands + fader buttons), global `~/.pocketstage/keymap.json`,
     web-managed, hot-reloaded via KeymapSlot read by the main-thread feeder
     only. All Q1–Q7 ruled (global / keys+buttons / WYSIWYG audition /
@@ -458,8 +458,10 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     note/cc+port, typed sections, knobs section empty-allowed (param
     targets additive later), bank_prev/next commands named, unit pinned
     N1/N2 plain-MIDI, T7 probe (six personalities × both ports) gates
-    knob/bank consumption in phases 3–4. **Phases 1–4 ready to
-    implement.**
+    knob/bank consumption. **Implemented sessions 14: phases 1–4 (see §10).
+    Owed: live ear-check of the remap loop; T7 for knob targets +
+    bank_prev/next behavior + fader-button default bindings; phase 5
+    (device Mapping exposure) stays an open ship decision.**
 18. **Voice picker on the web — DONE** (`POST /api/voice` accepting the
     model's `ActiveVoice` serde form (`"drums"` | `{"program": N}`, >127 →
     400); `EngineCommand::SelectVoice` runs as the ordinary
@@ -519,7 +521,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D23 | **SEQ overlay** (R12): live step programmer — bank-1 pads 1–8 toggle steps of an 8-step window on the selected track; bank 2 keeps commands (pad 10 exit, pad 11 next bar, pad 12 flip half-window); edits quantize to the engine's 16th grid | ✅ Implemented (s11) |
 | D24 | **Write-through lane** (R12): engine-originated project edits flow out on a dedicated mpsc to the store (debounced), never back in — single writer intact; engine applies edits locally first. Debounce is sample-counted in the engine; the server drain coalesces bursts to one persist. First rider: CycleLoopBars — B-key survives reboot now (event itself removed by D25) | ✅ Implemented (s11) |
 | D25 | **One voice at a time** (session 11 feedback; supersedes D12's always-on kit layer + D13's pitch%12 browser): PRESET has exactly ONE active performance voice. Selection = DAW-mode white-key browser anchored at C2 — slot 0 is Drums, next 11 white keys are the curated GM patches; black keys carry only overlay commands. Melodic voice: all 49 keys play it and pad presses are melody notes too (pads transmit plain notes 36–51, nothing to disambiguate). Drums voice: notes 36–51 = kit across both banks (`drum_kit_2` additive field; bank-2 channels mirror bank 1 — same kill group, documented trade-off), other notes silent. Overlay enter/exit = black-key command notes (G#3 MIX, A#3 SEQ; +C#4 next bar, D#4 flip while SEQ lives), armed in either mode — a follow-up to the user's unified-note rule replaced the earlier "DAW pads 9/10" scheme and REMOVED hardware scene launching (web UI / HTTP only): with one note stream, notes 36–51 cannot be both instrument and buttons. Voice persists via `Project.active_voice` + write-through; mirrored on `LiveStatus.active_voice` (VOICE_DRUMS sentinel) → /ws + stats + UI | ✅ Implemented (s11b), ear-checks owed |
-| D26 | **Configurable DAW keymap** (R14 + addendum): global `~/.pocketstage/keymap.json`, schema **v0.1** — unified frozen SOURCE object (`{"note":N}`/`{"cc":N}` + optional port) consumed by typed sections (voices/commands/fader_buttons/knobs-empty); same map drives overlay commands inside PRESET; PRESET instrument routing NOT expressible (can't-be-remapped by construction); feeder-only consumption (R5), corrupt file → defaults never-fail boot; manual note entry v1; voice field externally-tagged for future patch refs; unit personality PINNED to N1/N2 plain-MIDI (no Mackie/HUI emulation, no N3) | ✅ v0.1 frozen (s13); phases 1–4 ready, T7 probe gates knob/bank |
+| D26 | **Configurable DAW keymap** (R14 + addendum): global `~/.pocketstage/keymap.json`, schema **v0.1** — unified frozen SOURCE object (`{"note":N}`/`{"cc":N}` + optional port) consumed by typed sections (voices/commands/fader_buttons/knobs-empty); same map drives overlay commands inside PRESET; PRESET instrument routing NOT expressible (can't-be-remapped by construction); feeder-only consumption (R5), corrupt file → defaults never-fail boot; manual note entry v1; voice field externally-tagged for future patch refs; unit personality PINNED to N1/N2 plain-MIDI (no Mackie/HUI emulation, no N3) | ✅ v0.1 frozen (s13); phases 1–4 implemented (s14) — ear-check owed; T7 probe gates knob targets + bank behavior |
 | D26.1 | **Schema rectification v0→v0.1** (R14 addendum, locked Option B): re-frozen pre-code after MKV docs review showed knobs (CC/HUI) are DAW mode's primary controls; command vocab incl. bank_prev/next; knob param-target semantics intentionally unfrozen (additive later); no version field until phase 1 ships SCHEMA=1 | ✅ (s13) |
 
 ---
@@ -580,28 +582,26 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 ## 9. How to resume (suggested prompt for next session)
 
 > Read HANDOFF.md (§6 backlog, §7 decisions through D26.1) and AGENTS.md.
-> Session 13 wrap: voice picker shipped (POST /api/voice + dropdown), then
-> hotfixed — labels now read from the LOADED SOUNDFONT via boot-time FFI
-> preset catalog (`Synth::preset_list` → `GET /api/presets`); a hand-typed
-> GM table had mislabelled most picks (engine was always innocent —
-> `examples/voice_ref.rs` renders ground truth). Rule: UI labels/icons come
-> from the font and the brand kit, never hardcoded. DAW-keymap plan fully
-> decided: schema **v0.1 FROZEN** (specs/daw-keymap.md; rulings scratchpad
-> R14 + addendum; D26/D26.1) — unified note/cc+port source object, typed
-> sections, knobs empty-allowed (param targets additive later), unit
-> personality pinned N1/N2 plain-MIDI, PRESET routing unrepresentable by
-> construction; phases 1–4 implementation-ready, T7 probe (six MKV
-> personalities × both ports) gates knob/bank consumption. Favicon from
-> brand kit (single 48px — multi-size is an open nicety). Housekeeping
-> done: library clean (Gig + UI Test Clip removed, Takes 1–2 kept).
-> **Next software candidate: §6 item 15 (live-apply web mixer edits)**;
-> keymap phase 1 (pure `DawKeymap`+`Source` in oxygen) also ready. 166
-> tests, all gates green. Hardware-gated backlog: ear-checks (§6 items
-> 14+16), pedal probe, T7, Pi validation. Software niceties: live CC
-> values in /ws, fader ramp smoothing, pitch-per-step SEQ editing,
-> VOICES labels from catalog, multi-size favicon. Live env: engine runs
-> detached on :7777 (`pkill -x pocketstage-eng` — see AGENTS gotchas);
-> project library in ~/.pocketstage/projects (Default only).
+> Session 14 wrap: **DAW keymap phases 1–4 implemented** (D26) — pure
+> `DawKeymap` schema v0.1 in oxygen (defaults regression-lock the old
+> hardcoded table); `KeymapSlot` + GET/PUT /api/keymap + reset +
+> POST /api/overlay/{mix|seq|none} (Addition B anti-brick) in server;
+> engine feeder routes DAW notes + PRESET overlay commands through the
+> live map (`route_daw_note`, hot reload per-message, old VOICES/
+> white_slot/CMD_* constants deleted); "DAW keys" web card edits the
+> table (manual entry per Q5, raw-JSON escape hatch, dup pre-flagging).
+> PRESET instrument routing untouched — still literal code by D26
+> invariant. 191 tests, gates green. **Owed before closing item 17:
+> live ear-check of the remap loop (PUT a voice/command, feel it with no
+> restart); T7 probe gates knob targets, bank_prev/next behavior and
+> default fader-button bindings** (bank commands parse but currently do
+> nothing in the feeder). Next software candidates: §6 item 15 (live-
+> apply web mixer edits), item 19 phase B (patch catalog — its phase E
+> feeds the keymap voice field via Addition A). Hardware-gated backlog:
+> ear-checks (§6 items 14+16, now incl. keymap loop), pedal probe, T7,
+> Pi validation. Live env: engine runs detached on :7777
+> (`pkill -x pocketstage-eng` — see AGENTS gotchas); project library in
+> ~/.pocketstage/projects; keymap file only created on first PUT.
 
 ---
 
@@ -924,3 +924,25 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   include_bytes! straight from assets/ (single source of truth, no copy to
   drift), served at /favicon.ico as image/x-icon. Rule: UI icons come from
   the brand kit, never hand-made. 166 tests, gates green.
+- **Session 14**: DAW keymap phases 1–4 implemented (item 17, D26) in four
+  commits + docs reconciliation up front (Q2 ruling text + patch-catalog
+  cross-ref fixed to match the v0.1 freeze; AGENTS gotcha added on
+  file-edit indents). Phase 1 `oxygen::keymap`: Source enum with serde
+  shape `{"note":N}|{"cc":N}` + optional port, typed sections, validate()
+  + per-space port-aware duplicates() exposed for UIs, Default ==
+  old engine table (regression-locked). Phase 2 server: KeymapSlot
+  (never-fail open → defaults + loud warn on corrupt; replace = validate→
+  tmp+rename→publish→version bump), GET/PUT /api/keymap + reset, path
+  POCKETSTAGE_KEYMAP > ~/.pocketstage/keymap.json, AppState.with_keymap,
+  EngineCommand::SetOverlay + POST /api/overlay/{mix|seq|none} (exact
+  state, idempotent, SEQ keeps the P2-5 DAW refusal; core harness-tested).
+  Phase 3 engine: run_live_midi reads Arc<KeymapSlot> per message (hot
+  reload, R5-safe), route_daw_note pure fn replaces VOICES/white_slot/
+  CMD_* constants; PRESET overlay commands follow the remap (Q4),
+  instrument paths literal BY DESIGN; bank_prev/next parse but do nothing
+  pending T7. Phase 4 web: "DAW keys" card — voice/command/fader-button
+  rows with font-labelled pickers, manual note entry (Q5), raw JSON
+  escape hatch, client dup pre-flag (server re-validates verbatim),
+  reset button, overlay MIX/SEQ/off escape buttons. node --check caught a
+  JS `sel` redeclaration — syntax-check embedded scripts, CI doesn't.
+  191 tests, four gates green.
