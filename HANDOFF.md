@@ -1217,3 +1217,6 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
       assume emptiness.
     - 211 tests green (36 model / 88 engine / 43 oxygen / 30 server / 13 midi);
       clippy `-D warnings` + fmt clean.
+    - Live-verified by the user on hardware ("works"): 39 project swaps from
+      live mixer edits, **0 xruns**, peak busy 6.6 % (typical 0.5 %), takes and
+      mixer state surviving both the arrangement PUT and an engine restart.
