@@ -1344,3 +1344,150 @@ async fn mapping_endpoint_is_read_only_view() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     cleanup(&path);
 }
+
+// ------------------------------------------------------------ take delete
+
+async fn del_take(app: &axum::Router, body: &str) -> StatusCode {
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/api/takes/delete")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    )
+    .await;
+    status
+}
+
+fn two_takes() -> ProjectFile {
+    let mut pf = Project::default_project();
+    pf.takes = vec![
+        pocketstage_model::Take {
+            name: "Take 1".into(),
+            events: vec![],
+            muted: false,
+        },
+        pocketstage_model::Take {
+            name: "Keep".into(),
+            events: vec![],
+            muted: true,
+        },
+    ];
+    ProjectFile {
+        version: SCHEMA_VERSION,
+        project: pf,
+    }
+}
+
+#[tokio::test]
+async fn delete_take_route_removes_one_and_keeps_the_rest() {
+    let path = temp_path("delete");
+    cleanup(&path);
+    let store = std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap());
+    store.replace(two_takes()).unwrap();
+    let app = router(AppState::standalone(store.clone()));
+
+    assert_eq!(
+        del_take(&app, r#"{"name":"Take 1"}"#).await,
+        StatusCode::NO_CONTENT
+    );
+    let names: Vec<String> = store
+        .get()
+        .project
+        .takes
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    assert_eq!(names, vec!["Keep".to_string()], "only the named one goes");
+
+    // Unknown name → 404, and nothing else moves. Deleting twice (two tabs, or
+    // a double click) is therefore harmless on the second call.
+    assert_eq!(
+        del_take(&app, r#"{"name":"Take 1"}"#).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(store.get().project.takes.len(), 1);
+    cleanup(&path);
+}
+
+#[tokio::test]
+async fn delete_take_forwards_command_to_engine() {
+    let path = temp_path("delete-cmd");
+    cleanup(&path);
+    let store = std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap());
+    store.replace(two_takes()).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<EngineCommand>();
+    let (_ptx, prx) = std::sync::mpsc::channel::<pocketstage_model::Take>();
+    let (_etx, erx) = std::sync::mpsc::channel::<ProjectFile>();
+    let app = router(AppState::embedded(
+        store.clone(),
+        tx,
+        std::sync::Arc::new(crate::LiveStatus::default()),
+        prx,
+        erx,
+    ));
+
+    assert_eq!(
+        del_take(&app, r#"{"name":"Keep"}"#).await,
+        StatusCode::NO_CONTENT
+    );
+    match rx.try_recv() {
+        Ok(EngineCommand::DeleteTake { name }) => assert_eq!(name, "Keep"),
+        other => panic!("expected DeleteTake, got {other:?}"),
+    }
+
+    // A refused delete must not reach the engine either.
+    assert_eq!(
+        del_take(&app, r#"{"name":"Nope"}"#).await,
+        StatusCode::NOT_FOUND
+    );
+    assert!(rx.try_recv().is_err());
+    cleanup(&path);
+}
+
+#[tokio::test]
+async fn stale_put_no_longer_deletes_a_take_recorded_after_it_loaded() {
+    // The hole this closes: a page loaded with one take, someone records
+    // another, the page PUTs its stale document (a mixer live apply used to do
+    // exactly that) — adoption kept only takes finalized in the last 30 s, so
+    // the newer take vanished. The web UI now never PUTs `takes`: deletion goes
+    // through /api/takes/delete. This test pins the *server* half of that
+    // contract — a PUT whose takes list omits a take still deletes it, which is
+    // why the client must stop sending the field (see index.html live apply).
+    let path = temp_path("stale-take");
+    cleanup(&path);
+    let store = std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap());
+    store.replace(two_takes()).unwrap();
+    let (tx, _rx) = std::sync::mpsc::channel::<EngineCommand>();
+    let (_ptx, prx) = std::sync::mpsc::channel::<pocketstage_model::Take>();
+    let (_etx, erx) = std::sync::mpsc::channel::<ProjectFile>();
+    let app = router(AppState::embedded(
+        store.clone(),
+        tx,
+        std::sync::Arc::new(crate::LiveStatus::default()),
+        prx,
+        erx,
+    ));
+
+    // A stale document (only "Take 1") PUT today would drop "Keep"; the fixed
+    // client sends a body carrying the CURRENT list. Assert the current-list
+    // body is a no-op for takes and still applies its mixer edit.
+    let mut fresh = store.get();
+    fresh.project.tracks[0].gain = Some(0.5);
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("PUT")
+            .uri("/api/project")
+            .body(Body::from(serde_json::to_vec(&fresh).unwrap()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let after = store.get();
+    assert_eq!(after.project.takes.len(), 2, "both takes survive");
+    assert_eq!(after.project.tracks[0].gain, Some(0.5));
+    cleanup(&path);
+}

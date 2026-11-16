@@ -71,6 +71,12 @@ pub enum EngineCommand {
     /// (take adoption after later swaps keys on names — renaming only the
     /// store side would duplicate the take on the next swap).
     RenameTake { from: String, to: String },
+    /// Drop a take by name on the audio thread as well. Pairs with the web
+    /// delete endpoint: the store has already forgotten it, but without this the
+    /// engine keeps looping what the user just deleted until the next swap —
+    /// and a `mine` entry left behind would resurrect it through the swap
+    /// keep-rule.
+    DeleteTake { name: String },
     /// Addition B (D26, keymap phase 2): force the overlay to an exact
     /// state. Anti-brick control — a bad keymap must never trap the user,
     /// so a web-side exit/entry that bypasses keymap bindings exists.
@@ -637,6 +643,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/delete", post(delete_project))
         .route("/api/projects/raw", get(raw_project))
         .route("/api/takes/rename", post(rename_take))
+        .route("/api/takes/delete", post(delete_take))
         .route("/api/keymap", get(get_keymap).put(put_keymap))
         .route("/api/keymap/reset", post(reset_keymap))
         .route("/api/mapping", get(get_mapping))
@@ -920,6 +927,42 @@ async fn raw_project(
 }
 
 // ------------------------------------------------------------- take rename
+
+#[derive(Debug, serde::Deserialize)]
+struct DeleteBody {
+    name: String,
+}
+
+/// Delete a recorded take by name. Store first (durable), then the engine's
+/// live copy — same order as [`rename_take`].
+///
+/// This endpoint is the reason takes are not deleted by *omission from a PUT*
+/// body: a page holding a document from before someone recorded a take used to
+/// be able to erase it just by saving (swap adoption only protects takes
+/// finalized in the last 30 s). A named, explicit operation cannot do that by
+/// accident, which is what lets the web UI treat `takes` as not its property.
+async fn delete_take(
+    State(state): State<AppState>,
+    Json(body): Json<DeleteBody>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let mut pf = state.store.get();
+    let before = pf.project.takes.len();
+    pf.project.takes.retain(|t| t.name != body.name);
+    if pf.project.takes.len() == before {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no take named '{}'", body.name),
+        ));
+    }
+    state
+        .store
+        .replace(pf)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(tx) = &state.engine {
+        let _ = tx.send(EngineCommand::DeleteTake { name: body.name });
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
 
 #[derive(Debug, serde::Deserialize)]
 struct RenameBody {

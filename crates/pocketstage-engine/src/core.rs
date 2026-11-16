@@ -664,6 +664,7 @@ impl EngineCore {
                     remote_ev.push_back(TimedEvent::now(Event::SelectVoice { voice: v }));
                 }
                 EngineCommand::RenameTake { from, to } => self.rename_take(&from, &to),
+                EngineCommand::DeleteTake { name } => self.delete_take(&name),
                 EngineCommand::SetOverlay(t) => {
                     remote_ev.push_back(TimedEvent::now(Event::SetOverlay(t)));
                 }
@@ -768,6 +769,15 @@ impl EngineCore {
         self.stats
             .project_updates
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Delete a live take (web ✕). Forgetting the `mine` entry matters as much
+    /// as dropping the take: the keep-rule re-adds any recently-finalized take
+    /// that an incoming document still lists, and this one must not come back
+    /// through it. Unknown names are a no-op.
+    fn delete_take(&mut self, name: &str) {
+        self.takes.retain(|t| t.name != name);
+        self.mine.retain(|(n, _)| n != name);
     }
 
     /// Rename a live take (and its "mine" entry so the swap keep-rule keeps
@@ -2552,6 +2562,44 @@ mod harness_tests {
         h.tick(1);
         assert_eq!(h.core.takes.len(), 1, "no duplicate after rename+swap");
         assert_eq!(h.core.takes[0].name, "Bass Line");
+    }
+
+    #[test]
+    fn delete_take_stops_playback_and_forgets_mine() {
+        let mut h = Harness::new();
+        h.send(Event::Play);
+        h.send(Event::StartRecording);
+        h.send(Event::NoteOn {
+            chan: 0,
+            key: 60,
+            vel: 90,
+        });
+        h.tick(1);
+        h.send(Event::Stop); // "Take 1" lands in takes + mine
+        h.tick(1);
+        assert_eq!(h.core.takes.len(), 1);
+        assert_eq!(h.core.mine.len(), 1);
+
+        h.tx_cmd
+            .send(EngineCommand::DeleteTake {
+                name: "Take 1".into(),
+            })
+            .unwrap();
+        h.tick(1);
+        assert!(h.core.takes.is_empty(), "a deleted take goes silent");
+        assert!(
+            h.core.mine.is_empty(),
+            "and the swap keep-rule must not resurrect it"
+        );
+
+        // Unknown names are a no-op (double-click, or two tabs).
+        h.tx_cmd
+            .send(EngineCommand::DeleteTake {
+                name: "nope".into(),
+            })
+            .unwrap();
+        h.tick(1);
+        assert!(h.core.takes.is_empty());
     }
 
     // ---- write-through lane (D24) ------------------------------------------
