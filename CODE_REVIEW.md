@@ -152,7 +152,8 @@ no schema bump; test that previously-valid files still parse.
 - `flush_guarded_offs` scans 2048 slots/period — integer-cheap, fine.
 - Bank-2 kit channels mirror bank 1 (shared kill groups) — documented
   trade-off in D25.
-- Item 15 (live mixer auto-save) stays open: feature, not hygiene.
+- Item 15 (live mixer auto-save) shipped in session 16 (D32); its stale-document
+  follow-up is D34 — see the decision log, not this ledger.
 
 ## Fix order (session 12 plan)
 
