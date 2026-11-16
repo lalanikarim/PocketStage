@@ -188,10 +188,74 @@ function hlScene(n) {
   const chip = document.querySelector(`#remote button[data-cmd="scene/${n}"]`);
   if (chip) chip.classList.add("hot");
 }
-let dirty = false;           // local edits not yet PUT to the store
+// Two kinds of unsaved state, because a live apply no longer PUTs the whole
+// document (see liveApplyNow): `livePending` holds mixer/take-mute values that a
+// flush persists by itself, `needsSave` holds everything else (clips, tracks,
+// scenes, kit, header) which only persists when Save is pressed. The dot shows
+// for either; only the second keeps it lit after a successful flush.
+let dirty = false, needsSave = false, livePending = false;
+// Bumped by every live edit so a flush can tell whether a gesture landed while
+// its PUT was in flight (then the tail has to run again).
+let liveSeq = 0;
 
 function setSave() { $("save").textContent = dirty ? "Save ●" : "Save"; }
-function markDirty() { dirty = true; setSave(); }
+function markDirty() { needsSave = true; dirty = true; setSave(); }
+function markLive() { livePending = true; liveSeq++; dirty = true; setSave(); }
+function clearDirty() { needsSave = false; livePending = false; dirty = false; setSave(); }
+
+// --------------------------------------------------- what a flush is allowed
+// to write (D34). A live apply used to PUT the page's whole document, which
+// silently reverted anything that changed out of band since page load: the
+// hardware voice select (`Event::SelectVoice` writes active_voice engine-side)
+// and — worse — `takes`, where a swap adopts the incoming list and only protects
+// takes finalized in the last 30 s. So riding a fader could delete a take
+// recorded half a minute earlier, and changing the instrument from the keybed
+// undid itself on the next slider touch.
+//
+// Rule: never PUT a document we composed. PUT the *store's* current document
+// with exactly our own controls copied on top. Renderers register patchers
+// (closures writing one control's value into a target document) under a
+// namespace, replaced wholesale whenever that renderer runs again; patchers
+// guard on identity so a document that changed shape server-side gets skipped,
+// not scribbled on.
+// ---8< live-merge:start (behaviour-checked by scripts/live-merge-check.mjs)
+const liveFields = new Map(); // namespace -> [(doc) => void]
+
+function registerLiveFields(ns, patchers) { liveFields.set(ns, patchers); }
+
+function applyLiveFields(doc) {
+  if (!doc || !doc.project) return doc;
+  for (const patchers of liveFields.values()) for (const p of patchers) p(doc);
+  return doc;
+}
+
+// Top-level project fields the page owns. Anything else — active_voice, takes,
+// and every field a future model adds that this UI doesn't render — is taken
+// from the store's current copy on an explicit Save, so pressing Save cannot
+// revert an out-of-band change either. The raw-JSON editor stays the escape
+// hatch for editing those fields by hand (it PUTs verbatim, by design).
+const UI_OWNED = [
+  "name", "bpm", "loop_bars", "tracks", "scenes",
+  "drum_kit", "drum_kit_2", "fx_reverb", "fx_chorus", "master_gain",
+];
+
+// Copy `ours` over `fresh`, keeping every field `ours` doesn't speak.
+function mergeOnto(ours, fresh) {
+  if (!fresh || !fresh.project || !ours || !ours.project) return ours;
+  for (const k of Object.keys(fresh.project)) {
+    if (!UI_OWNED.includes(k)) ours.project[k] = fresh.project[k];
+  }
+  // Owned fields that exist server-side but not in our copy (the server gained a
+  // model field mid-session) must not be dropped, or serde defaults them.
+  for (const k of Object.keys(ours.project)) {
+    if (!(k in fresh.project)) continue;
+    if (ours.project[k] === undefined && fresh.project[k] !== undefined) {
+      ours.project[k] = fresh.project[k];
+    }
+  }
+  return ours;
+}
+// ---8< live-merge:end
 
 // ------------------------------------------------------------- live apply
 // Mixer/take-mute edits must be audible without pressing Save. They write
@@ -210,7 +274,7 @@ let liveTimer = null, saveInFlight = false, liveFails = 0, lastLive = 0;
 const LIVE_GAP_MS = 500, LIVE_TRAIL_MS = 250, LIVE_MAX_TRIES = 3;
 
 function scheduleLiveApply(retry = false) {
-  markDirty();
+  markLive();
   // A fresh gesture gets a fresh failure budget; only the retry tail counts.
   if (!retry) liveFails = 0;
   if (liveTimer) clearTimeout(liveTimer);
@@ -221,17 +285,40 @@ function scheduleLiveApply(retry = false) {
 async function liveApplyNow() {
   liveTimer = null;
   // The raw-JSON escape hatch is explicit-Save only: never PUT a document the
-  // user is still composing.
-  if (!$("raw").hidden || !dirty) return;
+  // user is still composing. And a page whose only pending change needs Save
+  // (a clip edit) has nothing to flush here.
+  if (!$("raw").hidden || !livePending) return;
   if (saveInFlight) { liveTimer = setTimeout(liveApplyNow, LIVE_TRAIL_MS); return; }
   lastLive = Date.now();
-  await save({ live: true });
-  if (!dirty) return;
-  // Still dirty = the store rejected it (or an edit landed mid-PUT). Retry on
-  // the tail, but never hammer a server that keeps refusing this document:
-  // after LIVE_MAX_TRIES the doc stays dirty and Save ● says so by hand.
+  const seq = liveSeq;
+  if (await saveLive() && liveSeq === seq) {
+    livePending = false;
+    dirty = needsSave;
+    setSave();
+    return;
+  }
+  // Not applied = the store rejected it, or an edit landed mid-PUT. Retry on
+  // the tail, but never hammer a server that keeps refusing: after
+  // LIVE_MAX_TRIES Save ● stays lit and says so by hand.
   if (liveFails < LIVE_MAX_TRIES) scheduleLiveApply(true);
   else msg("live apply failing — press Save", true);
+}
+
+// Read-modify-write: start from the store's CURRENT document, overwrite only the
+// fields this page owns (see liveFields), PUT that. Out-of-band changes —
+// hardware voice select, a take recorded after this page loaded, another tab's
+// clip edit — ride along untouched instead of being reverted.
+async function saveLive() {
+  let fresh;
+  try {
+    const r = await fetch("/api/project");
+    if (!r.ok) { liveFails++; msg("live apply: refresh rejected " + r.status, true); return false; }
+    fresh = await r.json();
+  } catch (e) { liveFails++; msg("live apply: refresh failed — " + e, true); return false; }
+  applyLiveFields(fresh);
+  const ok = await putProject(fresh, null, { live: true });
+  if (ok) { liveFails = 0; msg("applied"); }
+  return ok;
 }
 
 function msg(text, isErr) {
@@ -244,8 +331,21 @@ function renderMixer(pf) {
   const box = $("mixer");
   box.innerHTML = "";
   const tracks = pf.project.tracks || [];
+  const patches = [];
   if (!tracks.length) box.innerHTML = "<em>No tracks.</em>";
-  for (const t of tracks) {
+  for (const [ti, t] of tracks.entries()) {
+    // Controls register their patcher lazily, on first touch: an untouched
+    // slider must not re-assert its page-load value over a change made
+    // elsewhere (a Mackie fader moving master_gain, another tab). The guard on
+    // index *and* name means a store document that changed shape (track deleted
+    // or renamed elsewhere) is left alone rather than written into the wrong
+    // slot.
+    const reg = (fn) => { let done = false; return () => { if (!done) { done = true; patches.push(fn); } }; };
+    const own = (key, get) => reg((doc) => {
+      const x = (doc.project.tracks || [])[ti];
+      if (x && x.name === t.name) x[key] = get();
+    });
+
     const row = document.createElement("div");
     row.className = "mrow" + (t.mute ? " muted" : "");
 
@@ -282,7 +382,8 @@ function renderMixer(pf) {
       const v = document.createElement("span"); v.className = "mval";
       const upd = () => { v.textContent = title.split(" ")[0] + " " + (+s.value).toFixed(2); };
       upd();
-      s.addEventListener("input", () => { t[key] = +s.value; scheduleLiveApply(); upd(); });
+      const touch = own(key, () => +s.value);
+      s.addEventListener("input", () => { t[key] = +s.value; touch(); scheduleLiveApply(); upd(); });
       return [s, v];
     };
     const [rev, revv] = mkSend("reverb", "rev send");
@@ -294,10 +395,13 @@ function renderMixer(pf) {
     };
     labels();
 
-    gain.addEventListener("input", () => { t.gain = +gain.value; scheduleLiveApply(); labels(); });
-    pan.addEventListener("input", () => { t.pan = +pan.value; scheduleLiveApply(); labels(); });
+    const touchGain = own("gain", () => +gain.value);
+    const touchPan = own("pan", () => +pan.value);
+    const touchMute = own("mute", () => mute.checked);
+    gain.addEventListener("input", () => { t.gain = +gain.value; touchGain(); scheduleLiveApply(); labels(); });
+    pan.addEventListener("input", () => { t.pan = +pan.value; touchPan(); scheduleLiveApply(); labels(); });
     mute.addEventListener("input", () => {
-      t.mute = mute.checked; row.classList.toggle("muted", mute.checked);
+      t.mute = mute.checked; touchMute(); row.classList.toggle("muted", mute.checked);
       scheduleLiveApply();
     });
 
@@ -322,7 +426,8 @@ function renderMixer(pf) {
         + (pf.project[key] == null && +s.value === dflt ? " (stock)" : "");
     };
     upd();
-    s.addEventListener("input", () => { pf.project[key] = +s.value; scheduleLiveApply(); upd(); });
+    const touch = reg((doc) => { doc.project[key] = +s.value; });
+    s.addEventListener("input", () => { pf.project[key] = +s.value; touch(); scheduleLiveApply(); upd(); });
     return [s, v];
   };
   const [grev, grevv] = mkGlobal("fx_reverb", 0.9, "rev");
@@ -342,6 +447,10 @@ function renderMixer(pf) {
   const [gmg, gmgv] = mkGlobal("master_gain", 0.3, "gain", 2);
   mgRow.append(mgName, gmg, gmgv);
   box.appendChild(mgRow);
+
+  // Registered last so every control above (rows and global/master alike) has
+  // pushed its patcher into the array this namespace now owns.
+  registerLiveFields("mixer", patches);
 }
 
 function renderProject(pf) {
@@ -354,10 +463,21 @@ function renderProject(pf) {
   renderStructure();
   renderKit();
   if (!$("raw").hidden) $("raw").value = JSON.stringify(pf, null, 2);
+  renderTakes();
+}
+
+// Recorded takes. The list itself is NOT this page's property: it changes from
+// the keybed (⏺ records while this page sits open), so a whole-document PUT here
+// used to erase takes it had never seen. Mute flags are live-owned (patchers by
+// name); rename and delete go through their own endpoints.
+function renderTakes() {
   const ul = $("takes");
   ul.innerHTML = "";
-  const takes = pf.project.takes || [];
+  registerLiveFields("takes", []);
+  const takes = (project && project.project.takes) || [];
   if (!takes.length) { ul.innerHTML = "<li><em>none yet</em></li>"; return; }
+  const patches = [];
+  const soloRows = [];
   for (const t of takes) {
     const li = document.createElement("li");
 
@@ -371,23 +491,42 @@ function renderProject(pf) {
     mute.addEventListener("input", () => {
       // Live, like Solo next to it: muting a take during playback should be
       // heard on the next loop, not on the next Save click.
-      t.muted = mute.checked; scheduleLiveApply();
+      t.muted = mute.checked; registerMuted(); scheduleLiveApply();
       label.textContent = t.name + (t.muted ? " (muted)" : "");
       label.style.color = t.muted ? "var(--dim)" : "";
     });
 
-    // Solo: audition this take alone using the existing mute flags —
-    // immediate PUT so playback changes right away. Toggle back solos all.
+    // Mute is a live field: the patcher reads the model object by name, so it
+    // lands on top of whatever the store currently holds. Registered lazily like
+    // the mixer controls — except that Solo needs every row at once, so the
+    // registrar is kept on the row for that handler to call.
+    let mutedRegistered = false;
+    const registerMuted = () => {
+      if (mutedRegistered) return;
+      mutedRegistered = true;
+      patches.push((doc) => {
+        const x = (doc.project.takes || []).find((y) => y.name === t.name);
+        if (x) x.muted = t.muted;
+      });
+    };
+
+    // Solo: audition this take alone using the existing mute flags. Toggle back
+    // solos all. Mutating the flags + one live flush is enough — no separate
+    // PUT, and no whole-document write.
     const others = project.project.takes.filter((x) => x.name !== t.name);
     const isSolo = !t.muted && others.every((x) => x.muted);
     const solo = document.createElement("button");
     solo.className = "alt"; solo.textContent = "S"; solo.title = "solo (audition alone)";
     solo.style.margin = "0 0 0 8px"; solo.style.padding = "2px 9px";
     if (isSolo) { solo.style.borderColor = "var(--acc)"; solo.style.color = "var(--acc)"; }
-    solo.addEventListener("click", async () => {
-      const body = structuredClone(project);
-      for (const x of body.project.takes) x.muted = isSolo ? false : (x.name !== t.name);
-      await putProject(body, isSolo ? "unsoloed" : `soloed ${t.name}`);
+    soloRows.push({ t, registerMuted });
+    solo.addEventListener("click", () => {
+      // Every row's flag changes here, so every row's patcher must be in the
+      // flush — including rows the user never touched.
+      for (const r of soloRows) { r.t.muted = isSolo ? false : (r.t.name === t.name); r.registerMuted(); }
+      scheduleLiveApply();
+      renderTakes();
+      msg(isSolo ? "unsoloed" : `soloed ${t.name}`);
     });
 
     const ren = document.createElement("button");
@@ -400,7 +539,7 @@ function renderProject(pf) {
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({ from: t.name, to: to.trim() }) });
       if (!r.ok) { msg("rename rejected: " + (await r.text()), true); return; }
-      dirty = false; setSave();
+      clearDirty();
       await refresh();
     });
 
@@ -409,9 +548,15 @@ function renderProject(pf) {
     del.style.margin = "0 0 0 8px"; del.style.padding = "2px 9px";
     del.addEventListener("click", async () => {
       if (!confirm(`Delete ${t.name}? This cannot be undone.`)) return;
-      const body = structuredClone(project);
-      body.project.takes = body.project.takes.filter((x) => x.name !== t.name);
-      await putProject(body, "take deleted");
+      // Named delete (see /api/takes/delete): deleting by omitting the take from
+      // a PUT body is exactly what used to erase other people's recordings.
+      const r = await fetch("/api/takes/delete", { method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ name: t.name }) });
+      if (!r.ok) { msg("delete rejected: " + (await r.text()), true); return; }
+      clearDirty();
+      msg("take deleted");
+      await refresh();
     });
 
     const count = document.createElement("span");
@@ -424,8 +569,12 @@ function renderProject(pf) {
     li.style.justifyContent = "space-between";
     ul.appendChild(li);
   }
+  registerLiveFields("takes", patches);
 }
 
+// The single PUT site. Returns whether the write landed; flag bookkeeping is the
+// caller's business, because only it knows whether it persisted a live flush or
+// a whole document.
 async function putProject(body, okMsg, opts = {}) {
   if (opts.live) saveInFlight = true;
   try {
@@ -434,17 +583,17 @@ async function putProject(body, okMsg, opts = {}) {
     if (!r.ok) {
       if (opts.live) liveFails++;
       msg("rejected: " + (await r.text()), true);
-      return;
+      return false;
     }
-    dirty = false; liveFails = 0; setSave();
     if (okMsg) msg(okMsg);
-    // A live apply re-fetches nothing: the document we just PUT *is* the
-    // store's truth, and re-rendering would rebuild the slider under the
-    // pointer mid-drag.
-    if (!opts.live) refresh();
+    // A live apply re-renders nothing: re-rendering would rebuild the slider
+    // under the pointer mid-drag, and it already PUT the store's own document.
+    if (!opts.live) await refresh();
+    return true;
   } catch (e) {
     if (opts.live) liveFails++;
     msg("save failed: " + e, true);
+    return false;
   } finally { if (opts.live) saveInFlight = false; }
 }
 
@@ -457,10 +606,12 @@ async function refresh() {
   } catch (e) { msg("project fetch failed: " + e, true); }
 }
 
-async function save(opts = {}) {
+async function save() {
   if (!project) return;
   let body;
   if (!$("raw").hidden) {
+    // The escape hatch PUTs verbatim: editing active_voice/takes by hand is the
+    // one place where "write exactly this document" is the point.
     try { body = JSON.parse($("raw").value); }
     catch (e) { msg("raw JSON does not parse: " + e, true); return; }
   } else {
@@ -468,9 +619,17 @@ async function save(opts = {}) {
     body.project.name = $("p-name").value.trim() || "Untitled";
     body.project.bpm = parseFloat($("p-bpm").value);
     body.project.loop_bars = parseInt($("p-loop").value, 10);
+    // Same read-modify-write as a live flush: fields this page never renders
+    // (active_voice) or deliberately doesn't own (takes) come from the store's
+    // current copy, so Save can't revert a hardware change or drop a take that
+    // someone recorded after this page loaded.
+    try {
+      const r = await fetch("/api/project");
+      if (r.ok) body = mergeOnto(body, await r.json());
+      else console.warn("save merge skipped: refresh returned", r.status);
+    } catch (e) { console.warn("save merge skipped:", e); }
   }
-  // Live applies say "applied": the same write, no Save click involved.
-  await putProject(body, opts.live ? "applied" : "saved — engine applies at next safe point", opts);
+  if (await putProject(body, "saved — engine applies at next safe point")) clearDirty();
 }
 
 // D25 voice display/picker. Labels come from GET /api/presets — i.e. the
@@ -640,7 +799,7 @@ async function renderProjects() {
     btn("load", null, async () => {
       if (sel.value === info.current) return;
       if (dirty && !confirm("Switch project — unsaved edits will be lost?")) return;
-      if (await postJson("/api/projects/load", sel.value)) { dirty = false; setSave();
+      if (await postJson("/api/projects/load", sel.value)) { clearDirty();
         msg(`loaded “${sel.value}”`); refresh(); renderProjects(); }
     }),
     btn("save as…", null, async () => {
@@ -932,11 +1091,19 @@ function renderStepEditor() {
 
 $("cleartakes").addEventListener("click", async () => {
   if (!project) return;
-  const n = (project.project.takes || []).length;
-  if (!n || !confirm(`Delete all ${n} take(s)? This cannot be undone.`)) return;
-  const body = structuredClone(project);
-  body.project.takes = [];
-  await putProject(body, "all takes cleared");
+  const names = (project.project.takes || []).map((t) => t.name);
+  if (!names.length || !confirm(`Delete all ${names.length} take(s)? This cannot be undone.`)) return;
+  // One named delete per take. Clearing by PUTting an empty list is the same
+  // hole as deleting that way: it erases takes this page never saw.
+  let failed = 0;
+  for (const name of names) {
+    const r = await fetch("/api/takes/delete", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+    if (!r.ok && r.status !== 404) failed++;   // 404 = someone else won the race
+  }
+  clearDirty();
+  msg(failed ? failed + " take delete(s) failed" : "all takes cleared", failed > 0);
+  await refresh();
 });
 
 // --------------------------------------------------------------- DAW keymap
