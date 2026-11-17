@@ -673,7 +673,9 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
   *is* the performance voice, confusing when it isn't (a real project could have
   `Pad` as track 1 while the picked voice is a piano). Fix needs its own ruling
   (move the lead to an unused channel vs reserve one), and it interacts with the
-  D31 `Track.channel` → pad-bank aliasing edge.
+  D31 `Track.channel` → pad-bank aliasing edge. **D35 already worked around one
+  consequence of it**: Stop's per-track silence loop hits channel 0 as well, so a
+  damper-held channel would have made ⏹ silently fail to release held keys.
 - **Fader 9 button collision** — heuristic (bare 127→0) could misfire only if someone
   moves that fader top-to-bottom between two MIDI samples; effectively impossible at
   USB rates, but it's a known theoretical edge.
@@ -1308,6 +1310,11 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
       re-arm") rather than an exact call list, because that loop legitimately
       hits channel 0 more than once. Scene switches stay damper-unaware by
       ruling: they don't promise silence.
+    - **Ear-verified on the unit by the user** ("works. ear test passes as
+      described"): sustain through pedal-held releases, kill-on-stop with the
+      foot down, voice switching under a held pedal. Tests pin the CC stream and
+      the kill ordering; only ears can say whether FluidSynth's damper feels like
+      a piano — it does.
     - **Two platform facts captured** (AGENTS.md + HANDOFF env table): card and
       client numbers are not stable across replug/boot (card 3 / client 28 →
       card 1 / client 20), so docs now say resolve-by-name; and the engine's
