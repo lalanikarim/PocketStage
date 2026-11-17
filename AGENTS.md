@@ -46,9 +46,10 @@ cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings   # must be zero
 cargo fmt --all --check                                  # CI enforces both
+node scripts/live-merge-check.mjs                        # web UI gate: no npm, no deps
 ```
 
-CI (`.github/workflows/ci.yml`) runs all four gates on every push/PR. Run them
+CI (`.github/workflows/ci.yml`) runs all five gates on every push/PR. Run them
 locally before pushing; do not push hoping CI will bless it.
 
 The engine binary opens real audio devices — `cargo run --release -p
@@ -114,6 +115,12 @@ Rules that keep this architecture intact:
   at boot (this caused "stacked" held keys). Policy: FX levels only, only when
   the project sets them (`None` = touch nothing). `Settings` must outlive
   `Synth`.
+- **FluidSynth will not release notes on a sustained channel**: with the damper
+  (CC64) engaged, `all_notes_off` / `all_sounds_off` on that channel silently do
+  nothing. Every path that promises silence must send `cc(ch, 64, 0)` *before*
+  the kill (and re-arm it afterwards if the pedal is still physically down).
+  This bites hardest on the lead channel because track 1 routes there by
+  default, so even a per-track silence loop lands on the sustained channel.
 - Uninhabited enums are the opaque-type idiom for C handles; `#[repr(C)]` on
   them is compile error E0084.
 - **File-edit indent traps**: exact-match edits fail (or land mis-indented)
