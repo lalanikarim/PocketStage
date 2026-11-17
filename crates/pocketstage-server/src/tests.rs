@@ -11,13 +11,45 @@ use pocketstage_model::{Project, ProjectFile, SCHEMA_VERSION};
 
 use crate::{AppState, EngineCommand, ProjectStore, router};
 
+/// Every artifact this file creates lives under `ps-server-test-<name>-<pid>`
+/// in the temp dir. The pid is not decoration: two checkouts (or an agent and
+/// a human) sharing one /tmp must not read or delete each other's files, which
+/// was another source of "passes locally, fails in CI" here.
+fn temp_root(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("ps-server-test-{name}-{}", std::process::id()))
+}
+
 fn temp_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("ps-server-test-{name}.json"))
+    std::env::temp_dir().join(format!("ps-server-test-{name}-{}.json", std::process::id()))
 }
 
 fn cleanup(path: &PathBuf) {
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(path.with_extension("json.tmp"));
+}
+
+/// Delete a test directory tree — but only after proving it is one of ours.
+///
+/// This guard exists because a nested-path test used to clean up with
+/// `path.parent().parent().parent()`, which for
+/// `<temp>/ps-server-test-nested-<pid>/deeper/project.json` is **the temp
+/// directory itself**, and handed it to `remove_dir_all`. It usually died on a
+/// root-owned entry before doing much damage, and then again *not* soon enough:
+/// in CI it deleted another test's project file mid-run (`put_burst...` came
+/// back "Untitled" — that helper recreates a default when the file is missing,
+/// so the failure looked like a durability bug and wasn't). Recursive deletes
+/// get a fence, not a comment.
+fn cleanup_tree(path: &std::path::Path) {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let ours = (name.starts_with("ps-server-test-") || name.starts_with("ps-keymap-test-"))
+        && path.parent() == Some(std::env::temp_dir().as_path());
+    if !ours {
+        panic!(
+            "refusing to recursively delete {} — outside the ps-*-test- sandbox",
+            path.display()
+        );
+    }
+    let _ = std::fs::remove_dir_all(path);
 }
 
 #[test]
@@ -97,8 +129,8 @@ fn rejects_bad_payloads_and_changes_nothing() {
 #[test]
 fn replace_creates_missing_parent_dirs() {
     // Regression: first save to a fresh ~/.pocketstage-style location.
-    let mut path =
-        std::env::temp_dir().join(format!("ps-server-test-nested-{}", std::process::id()));
+    let root = temp_root("nested");
+    let mut path = root.clone();
     path.push("deeper");
     path.push("project.json");
     cleanup(&path);
@@ -107,7 +139,9 @@ fn replace_creates_missing_parent_dirs() {
     pf.project.name = "Fresh".into();
     store.replace(pf).unwrap();
     assert!(path.exists());
-    let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap().parent().unwrap());
+    // The sandbox root, NOT three parents up — that arithmetic is what used to
+    // hand the temp directory itself to remove_dir_all (see cleanup_tree).
+    cleanup_tree(&root);
 }
 
 // ------------------------------------------------------------------ HTTP
@@ -427,6 +461,11 @@ async fn put_burst_forwards_every_accepted_swap_to_engine() {
     }
     assert_eq!(got.len(), accepted, "every accepted swap forwards, no more");
     assert_eq!(got.last().map(String::as_str), Some("Ride 5"));
+    // Assert existence first: `open_or_default` recreates a default when the
+    // file is missing, so a deleted artifact otherwise shows up as a bogus
+    // "Untitled != Ride 5" durability failure (that misdirection cost a whole
+    // debugging detour — see CODE_REVIEW.md).
+    assert!(path.exists(), "the burst left no file on disk at all");
     // The rejected burst member left no trace in the store either.
     assert_eq!(
         ProjectStore::open_or_default(&path)
@@ -708,7 +747,7 @@ async fn remote_transport_routes() {
 #[test]
 fn library_migrates_saves_loads_deletes() {
     let root = temp_path("libroot");
-    let _ = std::fs::remove_dir_all(&root);
+    cleanup_tree(&root);
     let lib = root.join("projects");
     std::fs::create_dir_all(&root).unwrap();
     // legacy single file next to the library dir
@@ -755,7 +794,7 @@ fn library_migrates_saves_loads_deletes() {
 #[tokio::test]
 async fn projects_routes_end_to_end() {
     let root = temp_path("libroutes");
-    let _ = std::fs::remove_dir_all(&root); // cleanup() is file-only
+    cleanup_tree(&root); // cleanup() is file-only
     let store = std::sync::Arc::new(ProjectStore::open_library(root.join("projects")).unwrap());
     let app = router(AppState::standalone(store.clone()));
 
@@ -975,7 +1014,7 @@ fn library_ignores_and_sweeps_tmp_leftovers() {
     // ".ps-tmp-X.json" — extension json, so it used to be listed (and could
     // even become the boot project). Now: swept on open, hidden from list().
     let root = temp_path("libtmp");
-    let _ = std::fs::remove_dir_all(&root);
+    cleanup_tree(&root);
     let lib = root.join("projects");
     std::fs::create_dir_all(&lib).unwrap();
 
@@ -993,7 +1032,30 @@ fn library_ignores_and_sweeps_tmp_leftovers() {
     assert_eq!(store.list(), vec!["Default".to_string(), "Gig".to_string()]);
     // The sweep must not eat a live save-as target.
     assert!(std::path::Path::new(&lib.join("Gig.json")).exists());
-    let _ = std::fs::remove_dir_all(&root);
+    cleanup_tree(&root);
+}
+
+#[test]
+fn cleanup_tree_refuses_anything_outside_its_sandbox() {
+    // Regression fence for the recursive-delete-of-the-temp-dir bug.
+    let tmp = std::env::temp_dir();
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cleanup_tree(&tmp)));
+    assert!(
+        caught.is_err(),
+        "the temp dir itself must never be deletable"
+    );
+
+    let foreign = tmp.join("definitely-not-a-pocketstage-test-dir");
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cleanup_tree(&foreign))).is_err(),
+        "a foreign name in the temp dir must be refused too"
+    );
+
+    // Ours is accepted, and actually removed.
+    let mine = temp_root("guard");
+    std::fs::create_dir_all(mine.join("deeper")).unwrap();
+    cleanup_tree(&mine);
+    assert!(!mine.exists());
 }
 
 fn list_names(dir: &std::path::Path) -> Vec<String> {
@@ -1017,7 +1079,7 @@ use crate::KeymapSlot;
 use pocketstage_oxygen::DawKeymap;
 
 fn km_temp(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("ps-keymap-test-{name}.json"))
+    std::env::temp_dir().join(format!("ps-keymap-test-{name}-{}.json", std::process::id()))
 }
 
 fn km_cleanup(path: &PathBuf) {

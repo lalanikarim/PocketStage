@@ -164,3 +164,32 @@ no schema bump; test that previously-valid files still parse.
 4. model: take validation gaps (P2-7).
 5. engine: SEQ-in-DAW policy + doc drift (P2-5, P3).
 6. Live smoke test on the rebuilt binary, then backlog item 15.
+
+---
+
+## Post-review finds (later sessions)
+
+### P1-T. Server test suite recursively deleted the system temp directory
+**Status: FIXED** — nested-path cleanup arithmetic corrected, and recursive
+deletes now go through a guarded `cleanup_tree()` helper that panics unless the
+target is `<temp>/ps-server-test-*` / `ps-keymap-test-*`; regression test
+`cleanup_tree_refuses_anything_outside_its_sandbox`.
+
+`replace_creates_missing_parent_dirs` cleaned up with
+`path.parent().parent().parent()`, which for
+`<temp>/ps-server-test-nested-<pid>/deeper/project.json` is `<temp>` itself —
+handed straight to `remove_dir_all`. It usually bailed early on a root-owned
+entry, which is the only reason dev boxes survived it; readdir order decided the
+rest. Two CI runs died as *other* tests reported impossible state:
+`concurrent_replaces_leave_a_whole_file`, then `put_burst_forwards_every_accepted_swap_to_engine`
+reading back `"Untitled"` — not a durability bug at all, but
+`open_or_default` cheerfully recreating a default after the file was deleted
+under it.
+
+Lessons recorded with the fix: (1) recursive deletes need a fence, not a comment
+— `cleanup_tree` refuses anything outside the prefix rather than trusting its
+caller; (2) test artifact names now carry the pid, so two checkouts (or an agent
+and a human) sharing one `/tmp` can no longer eat each other's files — that was
+the second latent flake source in the same helper; (3) a store that recreates
+defaults on a missing file turns any accidental deletion into a confusing
+correctness failure, so durability tests should assert `path.exists()` too.
