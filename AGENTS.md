@@ -132,8 +132,11 @@ Rules that keep this architecture intact:
 
 ## Device facts (dev box)
 
-- PipeWire audio; Oxygen 49 MKV is ALSA card 3 / sequencer client 28
-  (`28:0` USB MIDI, `28:1` Mackie/HUI, `28:2` Editor SysEx).
+- PipeWire audio; Oxygen 49 MKV exposes three ports (USB MIDI, Mackie/HUI,
+  Editor SysEx). **Card/client numbers are not stable** across boots and
+  replugs — resolve them by name every time: `aconnect -l | grep -i -A3 oxygen`.
+  `lsusb | grep -i m-audio` confirms presence; if it is absent there, the
+  keyboard is powered off or unplugged — that is not a software problem.
 - Soundfont: `/usr/share/sounds/sf2/FluidR3_GM.sf2`.
 - DAW mode exposes **NC1 only** on this unit's firmware: its controls are
   plain MIDI with Mackie-style numbering on the HUI port — no personality
@@ -142,7 +145,10 @@ Rules that keep this architecture intact:
 - Knob/fader/button numbers come from our measured device map, not from
   M-Audio's guide — read `specs/device-maps/oxygen-49-mkv.md` before writing
   anything that matches a raw CC or note number.
-- Useful checks: `aconnect -l`, `amidi -p hw:3,0 -d`, `aplay -l`.
+- Useful checks: `aconnect -l`, `amidi -p hw:<card>,<port> -d`, `aplay -l`.
+  The engine's rawmidi read is **exclusive**: while it runs, `aseqdump -p <c>:0`
+  fails with EAGAIN and `amidi` reports the port busy — snooping the keybed
+  means stopping the engine first (measured session 16e).
 - Vendor manuals for the controller are **not in this repo** (copyright) — see
   the next section for where they live and how to fetch them.
 

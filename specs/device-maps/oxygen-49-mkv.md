@@ -43,7 +43,7 @@ Keys and pads stay on **channel 1**. All values full-range unless noted.
 | Fader button 9 | **CC41 — collides with fader 9 position** | bare 127→0 pair; mapper tap-detects (probe B) |
 | Transport ▶ ⏹ ⏺ 🔁 | HUI notes on port :1 (86/93/94/95) + system Start/Stop/Reset on port 0 | see probe table below — play vs record ONLY distinguishable via HUI notes |
 | Octave −/+ , program ‹ › | **no MIDI output** (internal remapping) | cannot be used as bindings |
-| Sustain pedal | deferred — no pedal on hand at test time | expect CC64 — verify someday |
+| Sustain pedal | **CC64, ch1** — `B0 40 7F` down, `B0 40 00` up (measured, session 16e) | plain switch: one message per transition, nothing repeated while held, no SysEx; shares the note channel (notes measured `90`/`80` ch1 in the same pass) |
 
 ### Always-on behaviors (both modes)
 
@@ -100,7 +100,19 @@ Mapper implications (unblocks D11 mode system v2):
    | ⏺ record | 95 (B6) | Start `FA` + Reset·Reset — **same as play!** |
    ⇒ Engine must listen to port `:1` notes to distinguish loop & record.
    `Mapping::transport_notes` + `hui_mapping()` implement this per-port.
-3. **Sustain pedal**: DEFERRED — user has no pedal on hand. Expect CC64.
+3. **Sustain pedal**: DONE (session 16e, first time a pedal was on hand).
+   Raw capture (`amidi -p hw:1,0 -d -T monotonic`, engine stopped — the engine's
+   rawmidi read is exclusive, so snooping means stopping it; `aseqdump` on the
+   sequencer port fails with EAGAIN while the engine runs):
+   | event | bytes | decoded |
+   |---|---|---|
+   | pedal down | `B0 40 7F` | CC **64** (damper), ch1, value **127** |
+   | pedal up | `B0 40 00` | CC64 ch1 value 0 |
+   Five presses: exactly one `7F` + one `00` each, no bounce/repeats, no
+   intermediate values (not graded), no clock/ActiveSensing side effects beyond
+   the always-on clock. Same channel as the keybed notes in this unit state,
+   which is what makes it usable as a straight per-channel damper pass-through.
+   The keyboard's own display showed `127` on press, matching the wire.
 4. **Pad banks (probes A2/C)**: physical layout 2 rows × 4; top row = higher notes.
    | | bottom row | top row |
    |---|---|---|
@@ -138,7 +150,8 @@ Findings:
 1. **Fader button 9**: only CC49–56 appeared for 9 buttons — press #9 alone.
 2. **Transport → message table**: which of loop/stop/play/record maps to
    Start/Stop/Reset (press each once, ≥2 s apart).
-3. **Sustain pedal** CC (plug in, press) — expect CC64.
+3. ~~**Sustain pedal** CC (plug in, press) — expect CC64.~~ — measured: CC64 ch1,
+   127/0 (session 16e).
 4. **Pad bank 2**: SHIFT+pad1 then press pads — do notes shift (+8? channel change?).
 5. ~~T2: SysEx on port 2 (LED write-back protocol).~~ — done, inconclusive.
 

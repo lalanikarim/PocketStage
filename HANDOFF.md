@@ -212,7 +212,7 @@ no-op button).
 | ALSA dev headers | `libasound2-dev` 1.2.11 ✓ |
 | FluidSynth | runtime `libfluidsynth3` 2.3.4 + **`libfluidsynth-dev` installed this session** ✓ |
 | Soundfont | `/usr/share/sounds/sf2/FluidR3_GM.sf2` present ✓ (also `TimGM6mb.sf2`, `default-GM.sf2`) |
-| Oxygen 49 MKV | **Connected to this laptop**, ALSA card 3, sequencer client 28 with ports: `28:0` USB MIDI (main), `28:1` Mackie/HUI, `28:2` Editor (SysEx) |
+| Oxygen 49 MKV | **Connected to this laptop**; three ports — USB MIDI (main), Mackie/HUI, Editor (SysEx). Numbers MOVE (seen as card 3 / client 28 and as card 1 / client 20): resolve with `aconnect -l \| grep -i -A3 oxygen`, presence with `lsusb \| grep -i m-audio` |
 | Internet | works generally; m-audio.com unreachable from this box (possibly blocked) |
 
 Audio routing note (dev box): the engine's `default` ALSA device resolves to
@@ -228,7 +228,8 @@ Useful device-check commands:
 
 ```bash
 aconnect -l                                  # list ALSA sequencer clients/ports
-amidi -p hw:3,0 -d                           # dump raw MIDI from Oxygen (Ctrl+C stop)
+amidi -p hw:<card>,0 -d                      # dump raw MIDI from Oxygen (Ctrl+C stop)
+                                             # engine must be STOPPED: its rawmidi read is exclusive
 aplay -l                                     # playback devices
 wpctl status                                 # sinks/streams; find the engine's stream id
 ```
@@ -549,6 +550,23 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     guard, lazy activation deferred to Pi numbers.
     Plan: `specs/patch-catalog.md`.
 
+20. **Sustain pedal — pass CC64 through to the synth (NOT IMPLEMENTED; probe
+    done, session 16e)**: measured `B0 40 7F` down / `B0 40 00` up on ch1, the
+    same channel the keybed notes arrive on (device map has the capture). The
+    engine has **no `Event::ControlChange` arm at all** — every CC the midi
+    parser produces is dropped — so the pedal does nothing today. Smallest
+    honest version: handle damper in the event handler and forward it to the
+    lead channel through the existing `SynthBackend::send_cc`; FluidSynth
+    implements the damper pedal itself (defers note-off per channel), so no
+    engine-side note bookkeeping is needed. Roughly ten lines plus a test that
+    a CC64 sequence reaches the backend. Rules needed first:
+    (a) **takes** — `RecordedEvent` has no CC variant, so a take replays without
+        pedal; either record CC64 or accept and document it;
+    (b) **cleanup paths** — voice switch / scene launch / all-notes-off must
+        send `cc(64, 0)` alongside the existing kills, otherwise changing voice
+        with the pedal held leaves notes sustaining forever;
+    (c) D7's old "pedal held = play" transport idea stays out of scope.
+
 ---
 
 ## 7. Decision log snapshot (full detail in scratchpad R7 + D10)
@@ -561,7 +579,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D4 | Record MIDI only in v0.1; offline WAV bounce | Proposed |
 | D5 | Scene launch quantized to next bar (configurable) | Proposed |
 | D6 | Rust workspace, crates per R5 layout | Proposed (scaffolded) |
-| D7 | Transport = Oxygen onboard buttons (a sustain pedal exists but was never on hand; probe deferred, expect CC64) | ✅ |
+| D7 | Transport = Oxygen onboard buttons. The parenthetical "a sustain pedal exists but was never on hand" is now historical: a pedal was measured in session 16e (CC64 ch1, 127/0 — device map), and consuming it is backlog item 20; this row rules only that transport lives on the Oxygen buttons | ✅ (transport); pedal = item 20 |
 | D8 | Curated defaults: FluidR3 GM base + GeneralUser GS upgrade + patch layer (R8) | ✅ |
 | D9 | mDNS + no auth in v0.1 (LAN-trusted) | Proposed |
 | D10 | Name = **PocketStage** | ✅ |
@@ -1254,3 +1272,22 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
       it, plus parses the entire inline script (the web UI has no other test
       coverage at all; this is the first gate that can fail on an `index.html`
       syntax error). 215 Rust tests + node checks green, clippy/fmt clean.
+
+- **Session 16e (hotplug proven + first sustain-pedal measurement)**: the user
+      attached a sustain pedal and the keyboard dropped off USB entirely (absent
+      from `lsusb`, no ALSA card) — engine kept serving audio and HTTP, which is
+      the right failure shape; reconnecting brought all three ports back through
+      the pump's 1 s rescan with **no restart**, logged as `[midi] [+] hw:1,0/1/2`.
+      First real-world proof of hotplug.
+    - **Pedal measured** (the probe D7 deferred for a year): `B0 40 7F` down /
+      `B0 40 00` up — CC64 damper, ch1, binary, one message per transition, no
+      bounce, nothing repeated while held, same channel as the keybed notes.
+      Recorded in `specs/device-maps/oxygen-49-mkv.md`; consuming it is new
+      backlog item 20 (the engine has no `ControlChange` arm at all, so CCs are
+      dropped and the pedal is a no-op until that lands).
+    - **Two platform facts captured** (AGENTS.md + HANDOFF env table): card and
+      client numbers are not stable across replug/boot (card 3 / client 28 →
+      card 1 / client 20), so docs now say resolve-by-name; and the engine's
+      rawmidi read is exclusive — `aseqdump -p <c>:0` fails EAGAIN and `amidi`
+      says "Device or resource busy" while it runs, so any keybed snoop requires
+      stopping the engine.
