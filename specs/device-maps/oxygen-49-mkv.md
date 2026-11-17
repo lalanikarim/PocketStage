@@ -113,6 +113,8 @@ Mapper implications (unblocks D11 mode system v2):
    the always-on clock. Same channel as the keybed notes in this unit state,
    which is what makes it usable as a straight per-channel damper pass-through.
    The keyboard's own display showed `127` on press, matching the wire.
+   Consumed as `Mapping.sustain_cc` → damper pass-through to the lead channel
+   (D35); pattern tracks never receive it and takes do not record it.
 4. **Pad banks (probes A2/C)**: physical layout 2 rows × 4; top row = higher notes.
    | | bottom row | top row |
    |---|---|---|
