@@ -761,7 +761,15 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>, keymap: Arc<Ke
                             println!("[transport] record");
                             send_event(&tx, m.received, Event::StartRecording);
                         }
-                        _ => {} // mod wheel, pitch lever, pad note-offs: no engine effect yet
+                        // Damper pedal (measured CC64 on the keys channel,
+                        // session 16e). Music port only: the HUI port carries
+                        // Mackie traffic whose CCs are not feet.
+                        Action::Sustain { down } if matches!(kport, KeymapPort::Music) => {
+                            send_event(&tx, m.received, Event::Sustain { down })
+                        }
+                        // Mod wheel, pitch lever, pad note-offs, HUI-port CCs:
+                        // no engine effect yet.
+                        _ => {}
                     }
                 }
             }

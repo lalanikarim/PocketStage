@@ -30,6 +30,11 @@ pub struct Mapping {
     pub pad_count: u8,
     /// Mod-wheel CC on the keys channel.
     pub mod_wheel_cc: u8,
+    /// Damper ("sustain") pedal CC on the keys channel. Measured session 16e on
+    /// the real unit: `B0 40 7F` down / `B0 40 00` up — binary, one message per
+    /// transition, nothing repeated while held.
+    #[serde(default = "sustain_cc_default")]
+    pub sustain_cc: u8,
     /// Knob CCs in physical order (knob 1 first). Measured sequence is
     /// deliberately non-contiguous — do not "fix" it.
     pub knobs: Vec<u8>,
@@ -60,6 +65,10 @@ pub struct Mapping {
     /// when `transport_notes` is set.
     #[serde(default = "mode_preset_cc_default")]
     pub mode_preset_cc: u8,
+}
+
+fn sustain_cc_default() -> u8 {
+    64
 }
 
 fn mode_daw_cc_default() -> u8 {
@@ -105,6 +114,7 @@ pub fn default_mapping() -> Mapping {
         pad_note_base: 36,
         pad_count: 16,
         mod_wheel_cc: 1,
+        sustain_cc: sustain_cc_default(),
         knobs: vec![44, 45, 46, 47, 62, 63, 75, 76],
         fader_base_cc: 33,
         fader_count: 9,
@@ -184,6 +194,9 @@ impl Mapping {
                 self.fader_button_base_cc + i,
                 &format!("fader button {}", i + 1),
             )?;
+        }
+        if self.sustain_cc == 0 || self.sustain_cc > 119 {
+            return Err("sustain_cc must be 1..=119".into());
         }
         if self.mode_daw_cc == 0 || self.mode_daw_cc > 119 {
             return Err("mode_daw_cc must be 1..=119".into());

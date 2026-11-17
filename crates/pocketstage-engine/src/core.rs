@@ -38,6 +38,10 @@ pub const WRITE_THROUGH_QUIET_SAMPLES: u64 = RATE as u64 / 2;
 
 /// Keys play track 1's voice (D3: track N → internal channel N).
 pub const LEAD_CH: i32 = 0;
+/// MIDI damper ("sustain") CC — measured on the Oxygen pedal, session 16e
+/// (`B0 40 7F` / `B0 40 00`). FluidSynth implements the damper per channel
+/// itself (threshold ≥64), so the engine only ever forwards it.
+pub const CC_DAMPER: i32 = 64;
 /// Metronome tick channel. Shares with pad 1 (kick): striking the kick
 /// cuts the current click — the same collision the old single-drum-channel
 /// layout had, and harmless for a 30 ms click.
@@ -279,6 +283,15 @@ pub enum Event {
     SeqStep {
         step: u8,
     },
+    /// Damper pedal (measured CC64, session 16e). Forwarded to the live lead
+    /// channel only — pattern tracks keep playing unaffected, and in the drums
+    /// voice the keybed is on pad channels, where a damper means nothing.
+    /// Deliberately **not recorded into takes**: `RecordedEvent` has no CC
+    /// variant, and sustain is a performance gesture around the notes, not part
+    /// of them (ruling on backlog item 20; revisit only with a reason).
+    Sustain {
+        down: bool,
+    },
     /// D23: pad 11 — advance the step window one bar within the clip (wraps).
     SeqNextBar,
     /// D23: pad 12 — flip the window between steps 1–8 and 9–16.
@@ -419,6 +432,11 @@ pub fn voice_code(project: &Project) -> u32 {
 
 /// Voice reset on scene switch: silence every track; (re-)set the program
 /// only for tracks that actually have a clip in this column.
+///
+/// Not damper-aware, deliberately: a scene change does not promise silence, and
+/// letting a foot-held chord ring through into the next scene is the musical
+/// answer. The paths that DO promise silence (Stop, voice switch) handle the
+/// damper explicitly — see `EngineCore::lift_damper`.
 pub fn apply_scene_voice<S: SynthBackend>(synth: &mut S, project: &Project, scene: usize) {
     for (t, track) in project.tracks.iter().enumerate() {
         let chan = project.track_channel(t) as i32;
@@ -502,6 +520,10 @@ pub struct EngineCore {
     /// Per-(channel, key) chatter state — flat array, no allocation on the
     /// audio thread.
     key_guard: [[KeyGuard; 128]; 16],
+    /// Last damper state as *we* left it on the synth. Needed only to re-arm a
+    /// physically-held pedal after a kill path (`kill_lead`) drops it to clear
+    /// sustained notes; the release always arrives, so it cannot drift.
+    sustain_down: bool,
     left: Vec<f32>,
     right: Vec<f32>,
     out: Vec<i16>, // interleaved S16LE, ready for ALSA
@@ -549,6 +571,7 @@ impl EngineCore {
             edit_feed,
             edit_pending_at: None,
             key_guard: [[KEY_UP; 128]; 16],
+            sustain_down: false,
             left: vec![0.0; PERIOD_FRAMES],
             right: vec![0.0; PERIOD_FRAMES],
             out: vec![0; PERIOD_FRAMES * 2],
@@ -775,6 +798,33 @@ impl EngineCore {
     /// as dropping the take: the keep-rule re-adds any recently-finalized take
     /// that an incoming document still lists, and this one must not come back
     /// through it. Unknown names are a no-op.
+    /// Take the damper off the ledger before killing notes. FluidSynth will not
+    /// release anything on a sustained channel, so a kill with the pedal down is
+    /// a *silent failure* — and track 1 shares the lead channel, which means
+    /// even the per-track loop in Stop is affected. No-ops when no pedal is
+    /// down, so the common path emits exactly what it always did.
+    fn lift_damper<S: SynthBackend>(&mut self, synth: &mut S) {
+        if self.sustain_down {
+            synth.cc(LEAD_CH, CC_DAMPER, 0);
+        }
+    }
+
+    /// Put a still-held pedal back down after a kill. The foot, not the engine,
+    /// decides whether notes sustain; every kill path is free to silence the
+    /// moment but must not quietly disarm the pedal while it is pressed.
+    fn rearm_damper<S: SynthBackend>(&mut self, synth: &mut S) {
+        if self.sustain_down {
+            synth.cc(LEAD_CH, CC_DAMPER, 127);
+        }
+    }
+
+    /// Silence the live lead channel with the damper handled around it.
+    fn kill_lead<S: SynthBackend>(&mut self, synth: &mut S) {
+        self.lift_damper(synth);
+        synth.all_notes_off(LEAD_CH);
+        self.rearm_damper(synth);
+    }
+
     fn delete_take(&mut self, name: &str) {
         self.takes.retain(|t| t.name != name);
         self.mine.retain(|(n, _)| n != name);
@@ -866,6 +916,10 @@ impl EngineCore {
                     slot.pending_off_at = t;
                 }
             }
+            Event::Sustain { down } => {
+                self.sustain_down = down;
+                synth.cc(LEAD_CH, CC_DAMPER, if down { 127 } else { 0 });
+            }
             Event::Play => {
                 if self.playing_since.is_none() {
                     self.playing_since = Some(self.total_samples);
@@ -883,6 +937,10 @@ impl EngineCore {
                 self.transport.stop();
                 self.live.active_scene.store(0, Ordering::Relaxed);
                 self.reset_key_guards();
+                // Lifted once up front: the loop below can hit this same
+                // channel (track 1 routes to it by default), and a kill against
+                // a sustained channel does nothing at all.
+                self.lift_damper(synth);
                 for t in 0..self.project.tracks.len() {
                     let chan = self.project.track_channel(t) as i32;
                     synth.all_notes_off(chan);
@@ -890,6 +948,7 @@ impl EngineCore {
                 // Keys live on LEAD_CH regardless of track 1's routing
                 // override — "stop means silent" must cover them too.
                 synth.all_notes_off(LEAD_CH);
+                self.rearm_damper(synth);
             }
             Event::StartRecording => {
                 if self.recording.is_none() {
@@ -921,7 +980,7 @@ impl EngineCore {
                 // Review P2-4: kill held lead notes BEFORE switching — the
                 // feeder re-routes releases by the NEW voice (Drums drops or
                 // redirects them), so anything still down would sustain.
-                synth.all_notes_off(LEAD_CH);
+                self.kill_lead(synth);
                 match voice {
                     ActiveVoice::Program(p) => synth.program_change(LEAD_CH, p as i32),
                     ActiveVoice::Drums => self.confirm(synth, CONFIRM_KICK),
@@ -3182,5 +3241,127 @@ mod harness_tests {
         h.tx_cmd.send(EngineCommand::Stop).unwrap();
         h.tick(1);
         assert!(!h.core.live.playing.load(Ordering::Relaxed));
+    }
+
+    // ---- sustain pedal (measured CC64, session 16e) ----------------------
+
+    #[test]
+    fn sustain_pedal_forwards_damper_to_the_lead_channel() {
+        let mut h = Harness::new();
+        h.send(Event::Sustain { down: true });
+        h.tick(1);
+        assert_eq!(h.calls(), vec![Call::Cc(LEAD_CH, CC_DAMPER, 127)]);
+        h.send(Event::Sustain { down: false });
+        h.tick(1);
+        assert_eq!(h.calls(), vec![Call::Cc(LEAD_CH, CC_DAMPER, 0)]);
+    }
+
+    #[test]
+    fn stop_without_the_pedal_emits_no_damper_traffic() {
+        // The no-pedal path stays byte-for-byte what it was before a pedal
+        // existed — several tests assert exact call lists.
+        let mut h = Harness::new();
+        h.send(Event::Stop);
+        h.tick(1);
+        assert!(
+            !h.calls()
+                .iter()
+                .any(|c| matches!(c, Call::Cc(_, CC_DAMPER, _))),
+            "no damper CC unless a pedal is down"
+        );
+    }
+
+    #[test]
+    fn stop_with_pedal_held_lifts_damper_kills_then_rearms() {
+        let mut h = Harness::new();
+        h.send(Event::Sustain { down: true });
+        h.send(Event::NoteOn {
+            chan: LEAD_CH,
+            key: 60,
+            vel: 90,
+        });
+        h.tick(1);
+        h.calls(); // drain the pedal + strike
+        h.send(Event::Stop);
+        h.tick(1);
+        let calls = h.calls();
+        let idx = |want: Call| calls.iter().position(|c| *c == want);
+        let offs: Vec<usize> = calls
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| **c == Call::NotesOff(LEAD_CH))
+            .map(|(i, _)| i)
+            .collect();
+        // Track 1 routes to the lead channel by default, so Stop kills it more
+        // than once; what matters is that EVERY kill sits between the lift and
+        // the re-arm. A kill outside that window happens against a sustained
+        // channel and silently does nothing (held keys would keep sounding).
+        let lifted = idx(Call::Cc(LEAD_CH, CC_DAMPER, 0)).expect("damper lifted");
+        let rearmed = idx(Call::Cc(LEAD_CH, CC_DAMPER, 127)).expect("held pedal re-armed");
+        assert!(!offs.is_empty(), "stop silenced the lead channel");
+        assert!(
+            offs.iter().all(|i| *i > lifted && *i < rearmed),
+            "every lead kill must sit between lift and re-arm: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn voice_switch_lifts_the_damper_before_reprogramming_the_channel() {
+        let mut h = Harness::new();
+        h.send(Event::Sustain { down: true });
+        h.tick(1);
+        h.calls();
+        h.send(Event::SelectVoice {
+            voice: ActiveVoice::Program(4),
+        });
+        h.tick(1);
+        let calls = h.calls();
+        let lead: Vec<Call> = calls
+            .into_iter()
+            .filter(|c| match c {
+                Call::Cc(ch, _, _) | Call::NotesOff(ch) | Call::Prog(ch, _) => *ch == LEAD_CH,
+                _ => false,
+            })
+            .collect();
+        assert_eq!(
+            lead,
+            vec![
+                Call::Cc(LEAD_CH, CC_DAMPER, 0),
+                Call::NotesOff(LEAD_CH),
+                Call::Cc(LEAD_CH, CC_DAMPER, 127),
+                Call::Prog(LEAD_CH, 4),
+            ],
+            "held notes die with the damper lifted, THEN the new program lands"
+        );
+    }
+
+    #[test]
+    fn pedal_presses_are_not_recorded_into_takes() {
+        // Ruling (backlog item 20): sustain frames the notes; it is not part of
+        // them. `RecordedEvent` has no CC variant, so this asserts the shape we
+        // chose rather than leaving it implicit.
+        let mut h = Harness::new();
+        h.send(Event::StartRecording);
+        h.send(Event::Sustain { down: true });
+        h.send(Event::NoteOn {
+            chan: LEAD_CH,
+            key: 60,
+            vel: 90,
+        });
+        h.tick(2);
+        h.send(Event::Sustain { down: false });
+        h.send(Event::NoteOff {
+            chan: LEAD_CH,
+            key: 60,
+        });
+        h.send(Event::Stop);
+        h.tick(1);
+        let take = h.takes_rx.try_recv().expect("stop finalized a take");
+        assert_eq!(
+            take.events.len(),
+            2,
+            "note-on + note-off only, no pedal events: {:?}",
+            take.events
+        );
     }
 }

@@ -655,3 +655,79 @@ fn mapping_json_old_files_still_parse_without_mode_ccs() {
     assert_eq!(m.mode_daw_cc, 113);
     assert_eq!(m.mode_preset_cc, 112);
 }
+
+// ---- sustain pedal: measured CC64 on the keys channel (session 16e) ----
+
+fn cc_ev(channel: u8, control: u8, value: u8) -> Event {
+    Event::ControlChange {
+        channel,
+        control,
+        value,
+    }
+}
+
+#[test]
+fn sustain_pedal_maps_from_the_measured_bytes() {
+    let mut m = std_mapper();
+    // The capture: `B0 40 7F` down, `B0 40 00` up — ch0 (keys channel 1), CC64.
+    assert_eq!(
+        map(&mut m, cc_ev(0, 64, 127)),
+        vec![Action::Sustain { down: true }]
+    );
+    assert_eq!(
+        map(&mut m, cc_ev(0, 64, 0)),
+        vec![Action::Sustain { down: false }]
+    );
+    // Half-pedal threshold per the MIDI spec, even though this unit only ever
+    // sends 0/127 (measured: binary, no intermediates).
+    assert_eq!(
+        map(&mut m, cc_ev(0, 64, 64)),
+        vec![Action::Sustain { down: true }]
+    );
+    assert_eq!(
+        map(&mut m, cc_ev(0, 64, 63)),
+        vec![Action::Sustain { down: false }]
+    );
+}
+
+#[test]
+fn sustain_is_a_keys_channel_control() {
+    let mut m = std_mapper();
+    // Knobs/faders sit on control channel 13; a CC64 from there is not a foot.
+    assert!(map(&mut m, cc_ev(12, 64, 127)).is_empty());
+}
+
+#[test]
+fn sustain_cc_is_reassignable() {
+    let mut mapping = default_mapping();
+    mapping.sustain_cc = 66;
+    let mut m = Mapper::new(mapping);
+    assert_eq!(
+        map(&mut m, cc_ev(0, 66, 127)),
+        vec![Action::Sustain { down: true }]
+    );
+    assert!(
+        map(&mut m, cc_ev(0, 64, 127)).is_empty(),
+        "the old number is not still claimed"
+    );
+}
+
+#[test]
+fn mapping_json_old_files_still_parse_without_sustain_cc() {
+    let mut v: serde_json::Value =
+        serde_json::from_str(&default_mapping().to_json_string()).unwrap();
+    v.as_object_mut().unwrap().remove("sustain_cc");
+    let m = Mapping::from_json_str(&v.to_string()).unwrap();
+    assert_eq!(m.sustain_cc, 64, "measured factory value is the default");
+}
+
+#[test]
+fn mapping_rejects_out_of_range_sustain_cc() {
+    let mut m = default_mapping();
+    m.sustain_cc = 0;
+    assert!(m.validate().is_err());
+    m.sustain_cc = 120;
+    assert!(m.validate().is_err());
+    m.sustain_cc = 64;
+    assert!(m.validate().is_ok());
+}

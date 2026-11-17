@@ -34,6 +34,10 @@ pub enum Action {
     Knob { index: u8, value: u8 },
     /// Mod wheel (keys channel).
     ModWheel(u8),
+    /// Damper pedal, keys channel (`sustain_cc`, measured CC64 — session 16e).
+    /// `down` uses the standard ≥64 threshold; the unit sends clean 127/0
+    /// pairs with no repeats while held, so this is edge-free by construction.
+    Sustain { down: bool },
     /// Pitch lever, centered at 0 (−8192..=8191).
     PitchBend(i16),
     /// ▶ — from HUI note 94 (or system Start on the music port).
@@ -239,8 +243,12 @@ impl Mapper {
                 return;
             }
         }
-        if Self::on_channel(channel, self.m.keys_channel) && control == self.m.mod_wheel_cc {
-            out.push(Action::ModWheel(value));
+        if Self::on_channel(channel, self.m.keys_channel) {
+            if control == self.m.mod_wheel_cc {
+                out.push(Action::ModWheel(value));
+            } else if control == self.m.sustain_cc {
+                out.push(Action::Sustain { down: value >= 64 });
+            }
         }
     }
 
