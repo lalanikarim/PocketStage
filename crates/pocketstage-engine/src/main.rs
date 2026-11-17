@@ -29,7 +29,7 @@ mod transport;
 
 use alsa::pcm::{Access, Format, Frames, PCM};
 use alsa::{Direction, ValueOr};
-use pocketstage_midi::{PumpMessage, spawn_pump};
+use pocketstage_midi::{Event as MidiEvent, PumpMessage, spawn_pump};
 use pocketstage_model::{
     ActiveVoice, Clip, Pattern, ProjectFile, SCHEMA_VERSION, STEPS_PER_BAR, StepNote, Take,
 };
@@ -542,6 +542,27 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>, keymap: Arc<Ke
                 } else {
                     KeymapPort::Music
                 };
+                // D36 knob lane: keymap `knobs[]` rows are matched against
+                // the RAW CC (space + number + port), before and above the
+                // built-in mappers — a claimed CC resolves to exactly one
+                // Event::KnobParam, works in both unit modes with no overlay
+                // gate (mapping is data), and silences the legacy MIX knob
+                // path for that same CC (suppression below; Q4 precedent:
+                // the map wins, the old binding goes inert).
+                let mut knob_hit = false;
+                if let MidiEvent::ControlChange { control, value, .. } = &m.event
+                    && let Some(b) = km.knob_for(KeymapSource::cc_on(*control, kport), kport)
+                {
+                    knob_hit = true;
+                    send_event(
+                        &tx,
+                        m.received,
+                        Event::KnobParam {
+                            target: b.target,
+                            value: *value,
+                        },
+                    );
+                }
                 let mut out = Vec::new();
                 if m.port.ends_with(",1") {
                     hui.map(&m.event, &mut out);
@@ -737,7 +758,11 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>, keymap: Arc<Ke
                             send_event(&tx, m.received, Event::MixFader { index, value })
                         }
                         Action::Knob { index, value } => {
-                            send_event(&tx, m.received, Event::MixKnob { index, value })
+                            // Suppressed when a keymap knob row claimed this
+                            // CC — the ParamMove already went out (D36).
+                            if !knob_hit {
+                                send_event(&tx, m.received, Event::MixKnob { index, value })
+                            }
                         }
                         Action::FaderButton {
                             index,

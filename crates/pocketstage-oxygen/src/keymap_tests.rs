@@ -1,7 +1,7 @@
 //! Phase-1 tests for the DAW keymap (specs/daw-keymap.md "Test-first notes").
 
 use crate::keymap::*;
-use pocketstage_model::ActiveVoice;
+use pocketstage_model::{ActiveVoice, MAX_TRACKS};
 
 fn v(note: u8, program: u8) -> VoiceBinding {
     VoiceBinding {
@@ -277,4 +277,184 @@ fn lookups_are_port_aware() {
 fn schema_stamp_exists() {
     // Q-V3: no version field in the file; code carries the stamp.
     assert_eq!(KEYMAP_SCHEMA, 1);
+}
+
+// ---- knob targets (D36) ----------------------------------------------------
+
+fn target(kind: KnobKind, step: f64, param: KnobParam) -> KnobTarget {
+    KnobTarget { kind, step, param }
+}
+
+const PAN2: KnobParam = KnobParam::Track(TrackTarget {
+    index: 2,
+    field: TrackField::Pan,
+});
+
+#[test]
+fn knob_relative_row_round_trip_and_step_default() {
+    let json = r#"{
+        "knobs": [
+            { "source": {"cc": 16, "port": "hui"},
+              "target": {"kind": "relative", "param": {"track": {"index": 2, "field": "pan"}}} }
+        ]
+    }"#;
+    let k = DawKeymap::from_json_str(json).expect("knob row parses");
+    assert_eq!(k.knobs.len(), 1);
+    let b = &k.knobs[0];
+    assert_eq!(b.source, Source::cc_on(16, Port::Hui));
+    assert_eq!(b.target.kind, KnobKind::Relative);
+    assert_eq!(b.target.step, default_step(), "step defaults to 0.02");
+    assert_eq!(b.target.param, PAN2);
+    k.validate().expect("knob row validates");
+    let back = DawKeymap::from_json_str(&k.to_json_string()).expect("re-parse");
+    assert_eq!(k, back);
+}
+
+#[test]
+fn knob_absolute_global_row_round_trip() {
+    let json = r#"{
+        "knobs": [
+            { "source": {"cc": 71},
+              "target": {"kind": "absolute", "param": {"global": "master_gain"}} }
+        ]
+    }"#;
+    let k = DawKeymap::from_json_str(json).expect("absolute global row parses");
+    assert_eq!(
+        k.knobs[0].target.param,
+        KnobParam::Global(GlobalParam::MasterGain)
+    );
+    k.validate().expect("validates");
+    assert_eq!(DawKeymap::from_json_str(&k.to_json_string()).unwrap(), k);
+}
+
+#[test]
+fn knob_row_requires_target() {
+    // Pre-D36 source-only rows are rejected (they were never consumed; the
+    // loader's never-fail-open rule turns such a file into warn + defaults).
+    let json = r#"{"knobs": [{"source": {"cc": 16}}]}"#;
+    assert!(DawKeymap::from_json_str(json).is_err());
+}
+
+#[test]
+fn knob_param_vocabulary_is_closed() {
+    for bad in [
+        r#"{"kind":"relative","param":{"track":{"index":2,"field":"filter"}}}"#,
+        r#"{"kind":"relative","param":{"global":"tempo"}}"#,
+        r#"{"kind":"slide","param":{"global":"master_gain"}}"#,
+        r#"{"kind":"absolute","param":{"track":{"index":2}}}"#, // field required
+    ] {
+        let json = format!(r#"{{"knobs":[{{"source":{{"cc":16}},"target":{bad}}}]}}"#);
+        assert!(
+            DawKeymap::from_json_str(&json).is_err(),
+            "must reject: {bad}"
+        );
+    }
+}
+
+#[test]
+fn knob_target_validation_ranges() {
+    let row = |param: KnobParam, step: f64| DawKeymap {
+        knobs: vec![KnobBinding {
+            source: Source::cc_on(16, Port::Hui),
+            target: target(KnobKind::Relative, step, param),
+        }],
+        ..Default::default()
+    };
+    assert!(row(PAN2, 0.02).validate().is_ok());
+    let too_low = KnobParam::Track(TrackTarget {
+        index: 0,
+        field: TrackField::Gain,
+    });
+    assert!(
+        row(too_low, 0.02)
+            .validate()
+            .unwrap_err()
+            .contains("index 0")
+    );
+    let too_high = KnobParam::Track(TrackTarget {
+        index: MAX_TRACKS as u8 + 1,
+        field: TrackField::Gain,
+    });
+    assert!(
+        row(too_high, 0.02)
+            .validate()
+            .unwrap_err()
+            .contains("index")
+    );
+    assert!(row(PAN2, 0.0).validate().unwrap_err_text().contains("step"));
+    assert!(row(PAN2, 1.5).validate().unwrap_err_text().contains("step"));
+}
+
+trait ErrText {
+    fn unwrap_err_text(self) -> String;
+}
+impl ErrText for Result<(), String> {
+    fn unwrap_err_text(self) -> String {
+        self.expect_err("expected a validation error")
+    }
+}
+
+#[test]
+fn knob_ticks_use_measured_direction_constants() {
+    let rel = target(KnobKind::Relative, 0.25, PAN2);
+    assert_eq!(rel.apply(RELATIVE_CW, 0.5), Some(0.75)); // CW = +step
+    assert_eq!(rel.apply(RELATIVE_CCW, 0.5), Some(0.25)); // CCW = -step
+    assert_eq!(rel.apply(40, 0.5), None); // unmeasured value: ignored
+    let abs = target(KnobKind::Absolute, 0.02, PAN2);
+    assert_eq!(abs.apply(0, 0.9), Some(0.0));
+    assert_eq!(abs.apply(127, 0.9), Some(1.0));
+    assert_eq!(abs.apply(64, 0.9), Some(64.0 / 127.0));
+}
+
+#[test]
+fn knob_sources_join_duplicate_detection() {
+    let mut k = DawKeymap::default();
+    let row = |cc: u8| KnobBinding {
+        source: Source::cc_on(cc, Port::Hui),
+        target: target(KnobKind::Relative, 0.02, PAN2),
+    };
+    k.knobs.push(row(16));
+    k.knobs.push(row(16));
+    assert!(k.validate().unwrap_err_text().contains("duplicate"));
+    // Notes and CCs stay disjoint spaces: a cc-16 knob + note-16 command coexist.
+    k.knobs.pop();
+    k.commands.push(CommandBinding {
+        source: Source::note_on(16, Port::Hui),
+        command: Command::MixToggle,
+    });
+    k.validate()
+        .expect("cc 16 and note 16 are different spaces");
+    // ...but a CC claimed by BOTH a knob and a command is a collision.
+    k.commands.last_mut().unwrap().source = Source::cc_on(16, Port::Hui);
+    assert!(k.validate().unwrap_err_text().contains("duplicate"));
+}
+
+#[test]
+fn knob_for_lookup_is_port_aware() {
+    let mut k = DawKeymap::default();
+    k.knobs.push(KnobBinding {
+        source: Source::cc_on(16, Port::Hui),
+        target: target(KnobKind::Relative, 0.02, PAN2),
+    });
+    k.knobs.push(KnobBinding {
+        source: Source::cc(71),
+        target: target(KnobKind::Absolute, 0.02, PAN2),
+    });
+    assert!(
+        k.knob_for(Source::cc_on(16, Port::Hui), Port::Hui)
+            .is_some()
+    );
+    assert!(
+        k.knob_for(Source::cc_on(16, Port::Music), Port::Music)
+            .is_none()
+    );
+    // Unqualified row matches any port; notes never match a cc-space lookup.
+    assert!(
+        k.knob_for(Source::cc_on(71, Port::Music), Port::Music)
+            .is_some()
+    );
+    assert!(
+        k.knob_for(Source::note_on(71, Port::Music), Port::Music)
+            .is_none()
+    );
 }

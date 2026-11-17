@@ -30,8 +30,9 @@ mod mapper;
 mod mapping;
 
 pub use keymap::{
-    Command, DawKeymap, FaderButtonBinding, KEYMAP_SCHEMA, KnobBinding, LABEL_MAX, Port, Source,
-    Space, VoiceBinding,
+    Command, DawKeymap, FaderButtonBinding, GlobalParam, KEYMAP_SCHEMA, KnobBinding, KnobKind,
+    KnobParam, KnobTarget, LABEL_MAX, Port, RELATIVE_CCW, RELATIVE_CW, Source, Space, TrackField,
+    TrackTarget, VoiceBinding, default_step,
 };
 pub use mapper::{Action, Mapper, Mode};
 pub use mapping::{Mapping, TransportNotes, default_mapping, hui_mapping};

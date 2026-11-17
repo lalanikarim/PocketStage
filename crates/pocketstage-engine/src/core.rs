@@ -21,6 +21,7 @@ use pocketstage_model::{
     ActiveVoice, Clip, Pattern, Project, ProjectFile, Quantize, RecordedEvent, SCHEMA_VERSION,
     STEPS_PER_BAR, StepNote, Take, Track,
 };
+use pocketstage_oxygen::KnobTarget;
 use pocketstage_server::{EngineCommand, LiveStatus, OverlayTarget, VOICE_DRUMS};
 
 use crate::clock;
@@ -38,6 +39,12 @@ pub const WRITE_THROUGH_QUIET_SAMPLES: u64 = RATE as u64 / 2;
 
 /// Keys play track 1's voice (D3: track N → internal channel N).
 pub const LEAD_CH: i32 = 0;
+/// D36: normalized starting point for a RELATIVE knob move onto a field that
+/// is `None` (soundfont-default). Sends/FX have no readable current value,
+/// so the first tick begins from mid-scale — documented, deterministic, and
+/// neither silence nor full blast. Gains start at unity instead (their `None`
+/// IS defined: 1.0).
+pub const REL_NEUTRAL_SEND: f64 = 0.5;
 /// MIDI damper ("sustain") CC — measured on the Oxygen pedal, session 16e
 /// (`B0 40 7F` / `B0 40 00`). FluidSynth implements the damper per channel
 /// itself (threshold ≥64), so the engine only ever forwards it.
@@ -282,6 +289,16 @@ pub enum Event {
     /// current window on the selected track of the active scene.
     SeqStep {
         step: u8,
+    },
+    /// D36: a raw CC matched by a keymap `knobs[]` row. `target` carries the
+    /// param + value mode; `value` is the raw wire value (relative ticks
+    /// CW=1/CCW=65 or absolute 0..=127 — resolved in the core, which owns
+    /// the current project values). Always live: mapping is data, so no
+    /// mode/overlay gate; the ride writes the project and rides the D24
+    /// write-through lane exactly like a MIX move.
+    KnobParam {
+        target: pocketstage_oxygen::KnobTarget,
+        value: u8,
     },
     /// Damper pedal (measured CC64, session 16e). Forwarded to the live lead
     /// channel only — pattern tracks keep playing unaffected, and in the drums
@@ -1101,6 +1118,7 @@ impl EngineCore {
                     }
                 }
             }
+            Event::KnobParam { target, value } => self.knob_param(synth, target, value),
             Event::SelectTrack { index } => {
                 // Fader buttons are channel selectors, never scene triggers
                 // (D14). Press again clears the detail page. Only live inside
@@ -1239,32 +1257,115 @@ impl EngineCore {
         field: MixField,
         value: u8,
     ) {
+        self.mix_set_norm(synth, track, field, value as f64 / 127.0);
+    }
+
+    /// Wire CC math for a normalized (0..=1) mix value, shared by the MIX
+    /// overlay page and D36 knob bindings: one formula, so a hardware ride,
+    /// a knob binding and a web PUT can never diverge.
+    fn mix_set_norm<S: SynthBackend>(
+        &mut self,
+        synth: &mut S,
+        track: usize,
+        field: MixField,
+        v: f64,
+    ) {
         let Some(t) = self.project.tracks.get_mut(track) else {
             return;
         };
-        let v = value as f64 / 127.0;
+        let raw = (v * 127.0).round() as i32;
         let (cc, cc_val) = match field {
             // Mute wins over the ride (CC7=0), same rule as apply_track_voice.
             MixField::Gain => {
                 t.gain = Some(v);
-                (7, if t.mute { 0 } else { value as i32 })
+                (7, if t.mute { 0 } else { raw })
             }
             MixField::Pan => {
                 t.pan = Some(v * 2.0 - 1.0);
-                (10, value as i32)
+                (10, raw)
             }
             MixField::Reverb => {
                 t.reverb = Some(v);
-                (91, value as i32)
+                (91, raw)
             }
             MixField::Chorus => {
                 t.chorus = Some(v);
-                (93, value as i32)
+                (93, raw)
             }
         };
         let chan = self.project.track_channel(track) as i32;
         synth.cc(chan, cc, cc_val);
         self.mark_project_edit();
+    }
+
+    /// D36: apply one keymap knob message. Everything lives in the
+    /// normalized 0..=1 domain; track fields reuse `mix_set_norm` (identical
+    /// CC + model conversion), globals go through the same boot/swap synth
+    /// calls (`set_master_gain` / `set_global_fx`, other field left `None`
+    /// = touch nothing — the session-10 fx-space rule). Relative moves read
+    /// the CURRENT project value, starting from the field's documented
+    /// neutral when `None` (gains 1.0, pan center, sends [`REL_NEUTRAL_SEND`]).
+    /// Hostile input resolves to nothing: an absent track or index 0 (never
+    /// trust cross-lane data, D20) returns before any synth call.
+    fn knob_param<S: SynthBackend>(&mut self, synth: &mut S, target: KnobTarget, value: u8) {
+        use pocketstage_oxygen::{GlobalParam, KnobParam as Param, TrackField};
+        match target.param {
+            Param::Track(tt) => {
+                // Keymap validation says index >= 1; the render loop does
+                // not believe it (D20) — guard before subtracting.
+                if tt.index == 0 {
+                    return;
+                }
+                let track = (tt.index - 1) as usize;
+                let cur = match self.project.tracks.get(track) {
+                    Some(t) => match tt.field {
+                        TrackField::Gain => t.gain.unwrap_or(1.0),
+                        TrackField::Pan => (t.pan.unwrap_or(0.0) + 1.0) / 2.0,
+                        TrackField::Reverb => t.reverb.unwrap_or(REL_NEUTRAL_SEND),
+                        TrackField::Chorus => t.chorus.unwrap_or(REL_NEUTRAL_SEND),
+                    },
+                    None => return,
+                }
+                .clamp(0.0, 1.0);
+                let Some(next) = target.apply(value, cur) else {
+                    return;
+                };
+                let field = match tt.field {
+                    TrackField::Gain => MixField::Gain,
+                    TrackField::Pan => MixField::Pan,
+                    TrackField::Reverb => MixField::Reverb,
+                    TrackField::Chorus => MixField::Chorus,
+                };
+                self.mix_set_norm(synth, track, field, next.clamp(0.0, 1.0));
+            }
+            Param::Global(gp) => {
+                let cur = match gp {
+                    GlobalParam::MasterGain => self.project.master_gain.unwrap_or(1.0),
+                    GlobalParam::FxReverb => self.project.fx_reverb.unwrap_or(REL_NEUTRAL_SEND),
+                    GlobalParam::FxChorus => self.project.fx_chorus.unwrap_or(REL_NEUTRAL_SEND),
+                }
+                .clamp(0.0, 1.0);
+                let Some(next) = target.apply(value, cur) else {
+                    return;
+                };
+                let next = next.clamp(0.0, 1.0);
+                match gp {
+                    GlobalParam::MasterGain => {
+                        self.project.master_gain = Some(next);
+                        synth.set_master_gain(Some(next));
+                    }
+                    GlobalParam::FxReverb => {
+                        self.project.fx_reverb = Some(next);
+                        synth.set_global_fx(Some(next), None);
+                    }
+                    GlobalParam::FxChorus => {
+                        self.project.fx_chorus = Some(next);
+                        synth.set_global_fx(None, Some(next));
+                    }
+                }
+                self.mark_project_edit();
+            }
+        }
     }
 
     /// Flat (channel, key) index for the chatter table. Out-of-range
@@ -3004,6 +3105,165 @@ mod harness_tests {
         h.tick(QUIET_PERIODS);
         let pf = h.edit_rx.try_recv().expect("mix edit persisted");
         assert_eq!(pf.project.tracks[0].gain, Some(33.0 / 127.0));
+    }
+
+    // ---- knob bindings (D36) -------------------------------------------------
+
+    use pocketstage_oxygen::{GlobalParam, KnobKind, KnobParam as KParam, TrackField, TrackTarget};
+
+    fn track_param(index: u8, field: TrackField) -> KParam {
+        KParam::Track(TrackTarget { index, field })
+    }
+
+    fn knob(kind: KnobKind, step: f64, param: KParam, value: u8) -> Event {
+        Event::KnobParam {
+            target: KnobTarget { kind, step, param },
+            value,
+        }
+    }
+
+    #[test]
+    fn knob_absolute_writes_field_cc_and_write_through() {
+        let mut h = Harness::new();
+        let chan = h.core.project.track_channel(0) as i32;
+        h.send(knob(
+            KnobKind::Absolute,
+            0.02,
+            track_param(1, TrackField::Gain),
+            64,
+        ));
+        h.tick(1);
+        assert_eq!(h.core.project.tracks[0].gain, Some(64.0 / 127.0));
+        assert!(h.has(Call::Cc(chan, 7, 64)), "CC7 rides with the field");
+        h.tick(QUIET_PERIODS);
+        let pf = h.edit_rx.try_recv().expect("knob edit persisted");
+        assert_eq!(pf.project.tracks[0].gain, Some(64.0 / 127.0));
+    }
+
+    #[test]
+    fn knob_absolute_mute_wins_over_the_ride() {
+        let mut h = Harness::new();
+        h.core.project.tracks[0].mute = true;
+        let chan = h.core.project.track_channel(0) as i32;
+        h.send(knob(
+            KnobKind::Absolute,
+            0.02,
+            track_param(1, TrackField::Gain),
+            127,
+        ));
+        h.tick(1);
+        // Field takes the real value; the wire stays silenced (mix_set rule).
+        assert_eq!(h.core.project.tracks[0].gain, Some(1.0));
+        assert!(h.has(Call::Cc(chan, 7, 0)));
+    }
+
+    #[test]
+    fn knob_relative_pan_starts_center_and_clamps() {
+        let mut h = Harness::new();
+        let chan = h.core.project.track_channel(0) as i32;
+        let cw = knob(
+            KnobKind::Relative,
+            0.6,
+            track_param(1, TrackField::Pan),
+            pocketstage_oxygen::RELATIVE_CW,
+        );
+        let ccw = knob(
+            KnobKind::Relative,
+            0.6,
+            track_param(1, TrackField::Pan),
+            pocketstage_oxygen::RELATIVE_CCW,
+        );
+        // None → documented neutral (center = normalized 0.5); +0.6 clamps to 1.
+        h.send(cw);
+        h.tick(1);
+        assert_eq!(h.core.project.tracks[0].pan, Some(1.0));
+        assert!(h.has(Call::Cc(chan, 10, 127)));
+        // One step back reads the CLAMPED value: 1.0 − 0.6 = 0.4 → pan −0.2.
+        h.send(ccw);
+        h.tick(1);
+        assert!((h.core.project.tracks[0].pan.unwrap() + 0.2).abs() < 1e-9);
+        // And down here it bottoms out at hard left, never wrapping.
+        h.send(ccw);
+        h.send(ccw);
+        h.tick(1);
+        assert_eq!(h.core.project.tracks[0].pan, Some(-1.0));
+        assert!(h.has(Call::Cc(chan, 10, 0)));
+    }
+
+    #[test]
+    fn knob_relative_ignores_unmeasured_wire_values() {
+        let mut h = Harness::new();
+        h.send(knob(
+            KnobKind::Relative,
+            0.1,
+            track_param(1, TrackField::Gain),
+            40, // neither CW(1) nor CCW(65)
+        ));
+        h.tick(1);
+        assert!(h.calls().is_empty(), "ignored tick makes no synth call");
+        assert_eq!(h.core.project.tracks[0].gain, None);
+        h.tick(QUIET_PERIODS);
+        assert!(
+            h.edit_rx.try_recv().is_err(),
+            "an ignored tick never marks the write-through lane"
+        );
+    }
+
+    #[test]
+    fn knob_absent_track_resolves_to_nothing() {
+        let mut h = Harness::new();
+        // Index 7 passes keymap validation (≤ MAX_TRACKS) but this project
+        // has 4 tracks — hostile/stale data must be inert, never a panic.
+        h.send(knob(
+            KnobKind::Absolute,
+            0.02,
+            track_param(7, TrackField::Gain),
+            100,
+        ));
+        // Also index 0: validation rejects it; the core must not subtract.
+        h.send(knob(
+            KnobKind::Absolute,
+            0.02,
+            track_param(0, TrackField::Gain),
+            100,
+        ));
+        h.tick(QUIET_PERIODS);
+        assert!(h.calls().is_empty());
+        assert!(h.edit_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn knob_global_master_gain_absolute() {
+        let mut h = Harness::new();
+        h.send(knob(
+            KnobKind::Absolute,
+            0.02,
+            KParam::Global(GlobalParam::MasterGain),
+            32,
+        ));
+        h.tick(1);
+        assert!(h.has(Call::Gain(Some(32.0 / 127.0))));
+        assert_eq!(h.core.project.master_gain, Some(32.0 / 127.0));
+    }
+
+    #[test]
+    fn knob_global_fx_reverb_relative_starts_mid_and_persists() {
+        let mut h = Harness::new();
+        let cw = pocketstage_oxygen::RELATIVE_CW;
+        h.send(knob(
+            KnobKind::Relative,
+            0.1,
+            KParam::Global(GlobalParam::FxReverb),
+            cw,
+        ));
+        h.tick(1);
+        // None → mid-scale start, then +step; the chorus slot stays None
+        // (session-10 rule: never push params for the untouched effect).
+        assert!(h.has(Call::Fx(Some(0.6), None)));
+        assert_eq!(h.core.project.fx_reverb, Some(0.6));
+        h.tick(QUIET_PERIODS);
+        let pf = h.edit_rx.try_recv().expect("fx knob persisted");
+        assert_eq!(pf.project.fx_reverb, Some(0.6));
     }
 
     // ---- SEQ overlay (D23) --------------------------------------------------

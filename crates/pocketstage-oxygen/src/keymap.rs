@@ -14,11 +14,12 @@
 //!   ("can't remap preset" by construction).
 //! - `Default` reproduces the engine's hardcoded table exactly (regression
 //!   lock; see `defaults_match_engine_hardcoded_table`).
-//! - `knobs` is section-shaped but ships empty: knob *target* semantics are
-//!   a deliberate later amendment (T7 + D22 MIX-as-data), source-side needs
-//!   no change.
+//! - `knobs` ships empty, but its target semantics are now ruled (D36):
+//!   each row carries a [`KnobTarget`] (relative/absolute value mode + a
+//!   closed `param` leaf). The frozen SOURCE object is untouched — that is
+//!   exactly what freezing it bought us.
 
-use pocketstage_model::ActiveVoice;
+use pocketstage_model::{ActiveVoice, MAX_TRACKS};
 use serde::{Deserialize, Serialize};
 
 /// Internal schema stamp (Q-V3: no version *field* until the first real
@@ -235,13 +236,110 @@ pub struct FaderButtonBinding {
     pub command: Command,
 }
 
-/// Knob row: **section-shaped, ships empty.** Target (`param`) semantics are
-/// a deliberate unfrozen amendment — adding an optional field later is
-/// additive under `deny_unknown_fields`.
+// --- knob targets (D36) ---------------------------------------------------
+
+/// Measured relative-rotor tick constants (T7 take 2, device map): clockwise
+/// emits value 1, counter-clockwise emits value 65. One message per tick,
+/// never position data. Any other value on a bound CC is ignored.
+pub const RELATIVE_CW: u8 = 1;
+pub const RELATIVE_CCW: u8 = 65;
+
+/// How a knob's wire values map onto the target param's normalized range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnobKind {
+    /// Each message is one tick: [`RELATIVE_CW`]/[`RELATIVE_CCW`] move the
+    /// param by `step`; other values are dropped (defensive — measured units
+    /// only ever emit the two constants).
+    Relative,
+    /// CC value 0..=127 maps linearly onto the param's normalized 0..=1 range.
+    Absolute,
+}
+
+/// Per-track mixer field, the same four the MIX overlay rides (D22) — the
+/// "MIX becomes data" endgame shares this namespace on purpose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackField {
+    Gain,
+    Pan,
+    Reverb,
+    Chorus,
+}
+
+/// Project-level params reachable by a knob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GlobalParam {
+    MasterGain,
+    FxReverb,
+    FxChorus,
+}
+
+/// One track field target: 1-based `index` (same convention as fader/knob
+/// control indices), field within it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackTarget {
+    pub index: u8,
+    pub field: TrackField,
+}
+
+/// The param leaf — **closed vocabulary v1** (D36). JSON:
+/// `{"track":{"index":2,"field":"pan"}}` or `{"global":"master_gain"}`.
+/// Adding a variant is additive; item-19 patch refs will extend the *voice*
+/// field (Addition A), not this leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum KnobParam {
+    Track(TrackTarget),
+    Global(GlobalParam),
+}
+
+/// Default relative step: 0.02 normalized units per tick (50 per sweep).
+pub fn default_step() -> f64 {
+    0.02
+}
+
+/// A knob target: value mode + step + param. All params live in a normalized
+/// 0..=1 domain; the engine converts to model ranges (pan bipolar, CC math)
+/// with the exact same math as the MIX overlay, so a knob ride and a web
+/// PUT cannot diverge.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct KnobTarget {
+    pub kind: KnobKind,
+    /// Normalized units per relative tick. Ignored by `absolute`. Range
+    /// (0.0..=1.0]; default 0.02 (50 ticks full-scale).
+    #[serde(default = "default_step")]
+    pub step: f64,
+    pub param: KnobParam,
+}
+
+impl KnobTarget {
+    /// One wire message + the param's current normalized value → next
+    /// normalized value (`None` = an ignored relative value). Pure; clamping
+    /// to 0..=1 is the caller that owns the domain.
+    pub fn apply(&self, value: u8, current: f64) -> Option<f64> {
+        match self.kind {
+            KnobKind::Absolute => Some((value as f64 / 127.0).clamp(0.0, 1.0)),
+            KnobKind::Relative => match value {
+                RELATIVE_CW => Some(current + self.step),
+                RELATIVE_CCW => Some(current - self.step),
+                _ => None,
+            },
+        }
+    }
+}
+
+/// Knob row: source (frozen v0.1) + target (D36). Ships empty by default —
+/// guessed defaults are how silent misroutes happen, and the built-in MIX
+/// knob page stays the behavior for unbound CCs.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KnobBinding {
     pub source: Source,
+    pub target: KnobTarget,
 }
 
 // --- the keymap ------------------------------------------------------------
@@ -312,7 +410,7 @@ fn default_commands() -> Vec<CommandBinding> {
 /// The frozen v0.1 keymap document. Each section defaults independently, so
 /// a JSON file may override just one section; `{}` (or an empty file via
 /// [`DawKeymap::from_json_str`]) yields the built-in defaults.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct DawKeymap {
     #[serde(default = "default_voices")]
@@ -364,7 +462,9 @@ impl DawKeymap {
             check_source(&b.source, &format!("fader_buttons[{i}]"))?;
         }
         for (i, b) in self.knobs.iter().enumerate() {
-            check_source(&b.source, &format!("knobs[{i}]"))?;
+            let what = format!("knobs[{i}]");
+            check_source(&b.source, &what)?;
+            check_knob_target(&b.target, &what)?;
         }
         let dups = self.duplicates();
         if !dups.is_empty() {
@@ -418,6 +518,18 @@ impl DawKeymap {
         })
     }
 
+    /// Knob row claiming a CC arriving on `incoming` (None = unbound).
+    /// Matching is raw-CC level — space + number + port qualifier, same
+    /// collision rules as every other section (D36: the feeder consumes
+    /// these before the built-in MIX knob page gets them).
+    pub fn knob_for(&self, source: Source, incoming: Port) -> Option<&KnobBinding> {
+        self.knobs.iter().find(|b| {
+            b.source.space() == source.space()
+                && b.source.number() == source.number()
+                && b.source.matches_port(incoming)
+        })
+    }
+
     /// Command bound to a source arriving on `incoming`, checking `commands`
     /// first, then `fader_buttons` (None = unbound). Validation guarantees
     /// no cross-section collisions, so lookup order never matters in
@@ -458,6 +570,26 @@ fn p_suffix(p: Option<Port>) -> String {
         Some(Port::Music) => " (port music)".into(),
         Some(Port::Hui) => " (port hui)".into(),
     }
+}
+
+fn check_knob_target(t: &KnobTarget, what: &str) -> Result<(), String> {
+    if let KnobParam::Track(tt) = t.param
+        && !(1..=MAX_TRACKS as u8).contains(&tt.index)
+    {
+        return Err(format!(
+            "{what} track index {} out of range 1..={MAX_TRACKS}",
+            tt.index
+        ));
+    }
+    // Step is validated for both kinds: an absolute row with a nonsense step
+    // parses today and would surprise whoever flips it to relative tomorrow.
+    if !t.step.is_finite() || t.step <= 0.0 || t.step > 1.0 {
+        return Err(format!(
+            "{what} step {} out of range (0 exclusive ..= 1.0)",
+            t.step
+        ));
+    }
+    Ok(())
 }
 
 fn check_source(src: &Source, what: &str) -> Result<(), String> {

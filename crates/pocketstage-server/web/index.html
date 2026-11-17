@@ -1231,7 +1231,17 @@ function renderKm() {
   cmdGroup(kmData.commands, "commands — momentary, both modes (Q4)", "commands");
   cmdGroup(kmData.fader_buttons, "fader buttons", "fader_buttons");
   if (kmData.knobs.length) {
-    head(`knobs (${kmData.knobs.length}) — not editable in this UI yet (the param target leaf awaits its ruling; wire facts are settled: relative rotors, CW=1/CCW=65)`);
+    head(`knobs (${kmData.knobs.length}) — live; edit rows via raw JSON (table editing is a follow-up). target: {kind:"relative"|"absolute", step?, param:{track:{index,field}|global}} — see specs/daw-keymap.md (D36)`);
+    kmData.knobs.forEach((b) => {
+      const row = rowShell(() => b.source);
+      const t = b.target || {};
+      const p = t.param || {};
+      const desc = p.global ? String(p.global)
+        : p.track ? `trk${p.track.index} ${p.track.field}` : "?";
+      row.append(Object.assign(document.createElement("span"), {
+        textContent: `${t.kind || "?"}${t.kind === "relative" ? " ±" + (t.step ?? 0.02) : ""} → ${desc}`,
+      }));
+    });
   }
   flagDups(rows);
 }

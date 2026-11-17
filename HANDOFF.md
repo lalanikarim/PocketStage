@@ -517,11 +517,22 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     paging + feeder wiring for BankPrev/BankNext with shipped defaults
     ‹/› = HUI notes 46/47~~ — **task (a) CANCELLED by D30 (s15): ‹/› emit
     nothing in PRESET mode, so they can never page the MIX overlay; commands
-    stay in the vocabulary, unbound.** Remaining: (b) knob param-leaf ruling,
-    then knob consumption (amendment drafted). **Phase 5 ruled to SHIP (D29,
+    stay in the vocabulary, unbound.** ~~Remaining: (b) knob param-leaf
+    ruling, then knob consumption~~ **(b) DONE (session 17, D36)** ✅ —
+    `knobs[]` rows are `{source, target}` with `target = {kind:
+    relative|absolute, step?, param}`; closed param leaf v1
+    (`{"track":{"index", "field":gain|pan|reverb|chorus}}` |
+    `{"global":master_gain|fx_reverb|fx_chorus}`, normalized 0..=1); the
+    feeder matches raw CCs (port-aware), a claimed CC suppresses the
+    built-in MIX knob path (map wins, Q4 precedent), and the core applies
+    rides through `mix_set_norm` + globals via the boot/swap synth calls,
+    writing the project and riding the D24 lane. Defaults stay empty; 8
+    oxygen + 7 engine tests; ear-check owed (relative feel, step size).
+    **Phase 5 ruled to SHIP (D29,
     s14c)** — device Mapping exposed via GET/PUT; honors the spec's
     phase-5 preconditions (mapper-state-on-swap ruling first; loader
-    mirrors keymap never-fail-open).**
+    mirrors keymap never-fail-open). Implementation is now the next
+    software item in this thread.
 18. **Voice picker on the web — DONE** (`POST /api/voice` accepting the
     model's `ActiveVoice` serde form (`"drums"` | `{"program": N}`, >127 →
     400); `EngineCommand::SelectVoice` runs as the ordinary
@@ -615,6 +626,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D32 | **Live-apply web mixer edits = debounced whole-document PUT; no PATCH endpoint** (session 16, backlog item 15). Mixer/take-mute controls schedule the existing `PUT /api/project` on a leading-edge + rate-capped + trailing flush throttle (`LIVE_GAP_MS` 500 ms ≈ the engine's own write-through quiet window). Rejected alternatives: (a) per-field PATCH endpoint — a second write path means a second validator, a second persistence path and a second adoption story for fields the model already owns; the whole-document PUT is already validated, atomic and adopted at ≤8 tracks with no measurable cost (12-way concurrent burst: all 204, swaps cheap, xruns 0); (b) patching the edit into a *saved* snapshot rather than the live document — it would silently revert the user's other unsaved edits on the next refresh. So: one write path, one authority (server validation), and "the fader saved the document" is honest because `Save ●` clears with it. Client rules: raw-JSON editor open ⇒ explicit Save only; one PUT in flight; bounded retry tail so a rejected document can't hammer the server. **Two invariants this made load-bearing (both fixed + tested):** `ProjectStore::replace` must assign memory *inside* the path lock (else an interleaving leaves GET serving what disk isn't), and `EngineCore::apply_swap` must NOT clear the key-chatter table — it describes notes physically sounding, and a swap silences nothing; clearing it swallowed held-key releases and pending note-offs (stuck voice until Stop). Tests: `concurrent_replaces_keep_disk_and_memory_in_step`, `put_burst_forwards_every_accepted_swap_to_engine`, `held_note_releases_across_a_project_swap`, `pending_release_survives_a_project_swap` | ✅ ruled (s16); implemented; **amended by D34** — the debounced PUT stays, but its body is now the store's current document with only this page's controls copied on top, never a page-composed document |
 | D35 | **Sustain pedal = damper pass-through on the lead channel only** (session 16e, after measuring the pedal for the first time). Ruled: forward CC64 to `LEAD_CH` and let FluidSynth's own damper do the work — no engine-side sustain state machine; **takes never record it** (`RecordedEvent` has no CC variant, and sustain frames notes rather than being one); **paths that promise silence must lift the damper before killing and re-arm it afterwards if still held**, because FluidSynth will not release a note on a sustained channel — a kill with the pedal down is a silent failure, made worse by track 1 sharing `LEAD_CH` (so Stop's per-track loop sits inside the window: lift once, up front); **scene switches stay damper-unaware** (they promise nothing; a held chord ringing into the next scene is correct); rejected routing sustain to pattern tracks or recording CCs into takes. Mapping stays data (`Mapping.sustain_cc`, serde-defaulted for old JSON) and the feeder gates it to the music port — HUI-port CC64 is not a foot | ✅ ruled + implemented (s16e) |
 | D34 | **A live apply never PUTs a document it composed: read-modify-write + named take delete** (session 16d; user report — "I selected program 42 and then moved the volume slider, it switched back to drums"). The D32 design PUT the page's whole document, which is safe only if nothing changed out of band. Two things do: `Event::SelectVoice` (keybed knob / Mackie fader) writes `active_voice` engine-side and marks the write-through lane, so the store learns the new voice ~500 ms later while the browser still holds `drums` — the next slider nudge PUTs the stale value back; and `takes`, where whole-document swap adoption keeps only what the incoming list contains (the keep-rule protects takes finalized in the last 30 s), so riding a fader could erase a take recorded half a minute earlier. Ruled: **a flush GETs the current document, overwrites only the fields this page owns, and PUTs that.** Renderers register per-control *patchers* (closures writing one value into a target doc) under a namespace replaced whenever the renderer runs, guarded on index+name so a track renamed/deleted server-side is skipped rather than scribbled on; explicit Save does the same merge through a `UI_OWNED` field list (`takes`/`active_voice` excluded by design; the raw-JSON editor stays verbatim — that's its job). Take deletion gets the endpoint its sibling already had: `POST /api/takes/delete {name}` — store-first, then engine command; the engine drops it from **both** `takes` and `mine`, because a name left in `mine` is resurrected by the keep-rule at the next swap; 404 unknown. UI ✕ and "clear takes" now name each take instead of PUTting a list without it. Accepted: solo flips every mute flag it can see, so a take recorded while the page sits open isn't in the solo set until a refresh; and an explicit Save of clip edits can still revert another tab's clip edit — that's optimistic concurrency (rev / If-Match / 409), not worth it for one user. Verified live: hardware voice reaches the store (`program 42`), a new-style flush keeps it *and* applies gain 0.42; replaying the old whole-doc PUT as a control experiment reproduces the revert. `scripts/live-merge-check.mjs` extracts the merge block between sentinels and asserts voice-survives-save, take-recorded-after-load-survives, unrendered future fields survive, patchers skip renamed tracks, take patchers address by name, namespace re-registration drops stale controls, malformed docs tolerated — plus a parse check of the whole inline script (now a CI step). | ✅ ruled + implemented (s16d) |
+| D36 | **Knob param leaf ruled + knob consumption** (session 17; item 17b, implements the s14b amendment). Schema: `knobs[]` = `{source, target}` (additive to frozen v0.1 — source untouched); `target = {kind: relative|absolute, step (default 0.02), param}`; **closed param vocabulary v1** in a normalized 0..=1 domain: `{"track":{"index":1..=MAX_TRACKS,"field":"gain|pan|reverb|chorus"}}` (the D22 MIX fields — same namespace on purpose) or `{"global":"master_gain|fx_reverb|fx_chorus"}`; item-19 patch refs will extend the *voice* field, never this leaf. Wire: relative = measured tick constants CW=1/CCW=65 (other values ignored), absolute = value/127. Consumption: feeder matches every raw CC (space+number+port — channel is not in the frozen source object) → exactly one `Event::KnobParam`; a claimed CC **suppresses** the built-in MIX knob page (map wins, Q4 precedent); live in both modes, no overlay gate (mapping is data). Core: track fields ride `mix_set_norm` (CC math shared with MIX + PUT — cannot diverge), globals via `set_master_gain`/`set_global_fx` pushing ONLY the ridden field (session-10 space rule); every move writes the project + marks the D24 lane. Relative starts from the field's documented neutral when `None`: gains 1.0, pan center, sends/FX 0.5 (`REL_NEUTRAL_SEND`, deterministic mid-scale — soundfont defaults are unreadable). Defaults stay EMPTY (guessed defaults = silent misroutes); pre-D36 source-only rows now fail → loader warn + defaults. Rejected: per-channel boost past normalized 1.0 (D33 stands), recording knobs into takes, an overlay gate. 8 oxygen + 7 engine tests; **ear-check owed**: relative feel + step size on the unit | ✅ ruled + implemented (s17) |
 | D30 | **Bank commands ship unbound + defaults music-port qualified** (session 15; kills backlog task "MIX bank paging + BankPrev/BankNext wiring + ‹/› defaults"). Two measured reasons: (1) `‹`/`›` are **mode-conditional** — guide v1.2 §10 + our preset-mode table agree they emit NOTHING in PRESET mode (device-local preset scroll), while the T7 numbers (HUI notes 46/47) are DAW-mode Mackie controls; MIX lives inside PRESET (D21) and its faders/knobs are the PRESET CC map, so a ‹/›→MIX-page binding would be silent exactly when it is needed and live only where MIX has no consumable inputs. Mackie-style track-bank scroll is also meaningless at 4 tracks on one page. `bank_prev`/`bank_next` stay in the frozen vocabulary — hand-bindable but with **no engine consumer** (no paging `Event` exists; the feeder arm is empty by ruling), and **no defaults**. (2) Built-in voice/command defaults were claiming their notes on *every* port, which made any HUI-qualified default fail `DawKeymap::validate()` (`voices[6] (Nylon Guitar) … claim note 47`); defaults now say `"port":"music"` — byte-identical routing (keys/pads are port :0 in both modes), whole HUI note space freed for future DAW-mode bindings | ✅ ruled (s15); implemented |
 
 ---
@@ -684,11 +696,11 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 
 ## 9. How to resume (suggested prompt for next session)
 
-> Read HANDOFF.md (§6 backlog, §7 decisions through **D35**) and AGENTS.md.
-> **NEXT SESSION STARTS HERE → knob param-leaf ruling, then knob consumption**
-> (item 17's remaining (b): the relative-knob amendment is drafted in
-> `specs/daw-keymap.md`, direction measured CW=1/CCW=65; rule the param-target
-> leaf, then wire it). Software-only until the ear-check.
+> Read HANDOFF.md (§6 backlog, §7 decisions through **D36**) and AGENTS.md.
+> **NEXT SESSION STARTS HERE → Phase 5: Mapping GET/PUT per D29** (ruled to
+> ship s14c — rule mapper-state-on-swap first, mirror the keymap loader's
+> never-fail-open discipline), then item 19 phase B (patch catalog). The
+> knob param leaf (item 17b) is DONE — see D36 and session 17.
 > **Still owed by ears** (nothing automated can cover them): stuck-note check —
 > hold keys, move a mixer slider mid-hold, release → instant silence; take
 > mute/unmute while the loop plays; drag feel + `LIVE_GAP_MS` on the Pi. The
@@ -724,8 +736,8 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 > the web reads the cap from `/api/health`. Next work, pure software, in the
 > order agreed with the user after the s15 doc audit:
 > ~~(a) §6 item 15 — live-apply web mixer edits~~ **DONE (s16, D32)**;
-> (b) knob param-leaf ruling, then knob consumption (amendment drafted,
-> direction CW=1/CCW=65); (c) Phase 5 Mapping PUT per **D29 (ruled s14c:
+> ~~(b) knob param-leaf ruling, then knob consumption~~ **DONE (s17, D36)**;
+> (c) Phase 5 Mapping PUT per **D29 (ruled s14c:
 > ships)** — rule mapper-state-on-swap first, mirror the keymap loader; then
 > item 19 phase B (patch catalog — its phase E feeds the keymap voice field via
 > Addition A). New candidate
@@ -1288,6 +1300,31 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
       coverage at all; this is the first gate that can fail on an `index.html`
       syntax error). 215 Rust tests + node checks green, clippy/fmt clean.
 
+- **Session 17 (knob param leaf ruled + knobs consumed — D36, item 17b)**:
+  executed the resume pointer: ruled the open `param` leaf of the keymap
+  knob amendment and wired knob consumption end to end. Schema (`keymap.rs`,
+  additive to frozen v0.1): `KnobBinding {source, target}` — `target.kind`
+  relative/absolute, `step` (default 0.02 normalized/tick), closed param
+  enum (track gain/pan/reverb/chorus by 1-based index; globals
+  master_gain/fx_reverb/fx_chorus); validation covers index range,
+  step range/finiteness, and the section already joined duplicate-source
+  detection. Feeder (`main.rs`): raw-CC match **before** the mappers —
+  a claimed CC sends exactly one `Event::KnobParam` and suppresses the
+  legacy `MixKnob` action for that event (Q4 precedent: the map wins, the
+  old binding goes inert); works in both unit modes with no overlay gate.
+  Core (`knob_param` + `mix_set_norm` refactor): relative moves read the
+  current project value (clamped, never wrapping), starting from the
+  documented neutral when `None` (gains 1.0, pan center, sends/FX
+  `REL_NEUTRAL_SEND` = 0.5); track fields share the MIX CC math so a knob
+  ride, the MIX page and a web PUT cannot diverge; globals push only the
+  ridden field through the boot/swap synth calls; every accepted move marks
+  the D24 write-through lane (verified: an ignored tick marks nothing).
+  Hostile data inert: index 0 / absent track return before any synth call.
+  Web keymap card now renders knob rows read-only (raw JSON stays the edit
+  path, Q5-style). Docs: `specs/daw-keymap.md` amendment DRAFT → RULED.
+  8 oxygen + 7 engine tests; all five CI gates green. Owed: hardware
+  ear-check (bind HUI CC16–23 relative rotors, judge step size), and the
+  D31 sharp edge (channels 5–8 knob-page rows) still awaits its own ruling.
 - **Session 16e (hotplug proven + first sustain-pedal measurement)**: the user
       attached a sustain pedal and the keyboard dropped off USB entirely (absent
       from `lsusb`, no ALSA card) — engine kept serving audio and HTTP, which is

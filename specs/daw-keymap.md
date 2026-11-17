@@ -4,15 +4,15 @@
 remap loop validated live on the unit (hot reload, command toggles,
 reset, corrupt-file boot — see HANDOFF §10 s14b). Q4 PRESET-mode check
 PASSED (s14c). Schema v0.1 FROZEN; T7 takes 1–2 decoded — knob semantics
-AMENDMENT DRAFTED below (direction RESOLVED CW=1/CCW=65; bank ‹/› = HUI
-notes 46/47; buttons 1–8 = HUI notes 0–7). **D28 ruled (s14c): NC1 is
+AMENDMENT RULED + IMPLEMENTED (D36, s17; drafted s14b; direction RESOLVED
+CW=1/CCW=65; bank ‹/› = HUI notes 46/47; buttons 1–8 = HUI notes 0–7). **D28 ruled (s14c): NC1 is
 the pinned personality** — the only one this unit exposes; its messages
 are plain MIDI with Mackie-style numbering, so take-2 numbers ship as
 defaults. **Phase 5 ruled to SHIP (D29, s14c)** — Mapping GET/PUT
 implementation owed, honoring the phase-5 preconditions.
 **D30 (s15): bank commands ship UNBOUND (‹/› are DAW-mode-only — silent in
 PRESET, where MIX lives) and built-in defaults are music-port qualified.**
-Decisions D26 + D28 + D29 + D30 in scratchpad R14 + HANDOFF §7.**
+Decisions D26 + D28 + D29 + D30 + D36 in scratchpad R14 + HANDOFF §7.**
 Requested session 12: "configure DAW mode key and button mappings so we can
 manage it in a json file … what we don't want to allow remapping is Preset
 mode." All seven open questions answered (rulings at each Q below).
@@ -150,7 +150,7 @@ submode state; N3 pad semantics (conflict with D25 unified note rule).
 **Executed: takes 1–2 fully decoded (s14b/c, raw logs + answers in the
 device map); take 3 cancelled per D28 — see pinning section above.**
 
-## Knob semantics amendment — DRAFT (session 14b, pending ruling)
+## Knob semantics amendment — RULED (D36, session 17; drafted s14b)
 
 T7 take 1 measured the wire truth (specs/device-maps/oxygen-49-mkv.md):
 in HUI-family personalities the knobs are **relative rotors** emitting
@@ -162,30 +162,58 @@ carry a value MODE, not assume positions:
 ```json
 "knobs": [
   { "source": {"cc": 16, "port": "hui"},
-    "target": { "kind": "relative", "step": 2, "param": {} } },
+    "target": { "kind": "relative", "step": 0.02,
+                "param": { "track": { "index": 1, "field": "pan" } } } },
   { "source": {"cc": 71},
-    "target": { "kind": "absolute", "param": {} } }
+    "target": { "kind": "absolute",
+                "param": { "global": "master_gain" } } }
 ]
 ```
 
-Proposed rulings (additive to frozen v0.1 — the SOURCE object is
-untouched, which is exactly what freezing it bought us):
+Rulings (additive to frozen v0.1 — the SOURCE object is untouched, which is
+exactly what freezing it bought us). Implemented session 17: schema in
+`keymap.rs` (`KnobTarget`/`KnobKind`/`KnobParam`), consumption in the feeder +
+`EngineCore::knob_param`, harness tests `knob_*`:
 
 1. `knobs[]` entry = `{source, target}`, `deny_unknown_fields`.
 2. `target.kind` ∈ `relative | absolute`. Relative: each CC message is a
-   tick; param moves `step` units per tick (default 1). Absolute: CC
-   value 0..=127 maps linearly onto the param range.
+   tick; param moves `step` normalized units per tick (default 0.02 —
+   ruled with the leaf, 50 ticks per sweep). Absolute: CC value 0..=127
+   maps linearly onto the param's normalized range.
 3. ~~Relative DIRECTION encoding is NOT measured yet~~ **RESOLVED take 2
    (s14c): clockwise = value 1, counter-clockwise = value 65** — tick
    constants, one message per tick, no position data ever. Knob-group
    selectors (PAN/DEVICE/SENDS) verified wire-neutral: knobs stay CC16–23
    ch0 regardless of group.
-4. The `param` leaf stays OPEN (shared namespace with the D22 MIX-
-   becomes-data endgame and item-19 patch refs): first real consumer
-   rules it; knobs stay shaped-but-unconsumed until then.
+4. ~~The `param` leaf stays OPEN~~ **RULED (D36): closed vocabulary v1,**
+   normalized 0..=1 domain for every param:
+   `{"track":{"index":N,"field":"gain|pan|reverb|chorus"}}` (1-based index,
+   ≤ `MAX_TRACKS`) or `{"global":"master_gain|fx_reverb|fx_chorus"}`. The
+   track fields are exactly the D22 MIX fields on purpose — this is the
+   MIX-becomes-data endgame's namespace. Item-19 patch refs extend the
+   *voice* field (Addition A), never this leaf. Model conversion reuses
+   `mix_set_norm` (pan bipolar ±1, CC7/10/91/93 math shared with the MIX
+   page and PUT adoption — a knob ride and a web save cannot diverge).
+   Globals: `master_gain` → `set_master_gain`; `fx_*` → `set_global_fx`
+   pushing ONLY the ridden field (session-10 space-param rule). Rides write
+   the project and ride the D24 write-through lane.
 5. **Defaults stay EMPTY.** Without per-personality knob CCs + direction
    data, any default is a guess — and guessed defaults are how silent
    misroutes happen (Q7).
+6. **Consumption (D36).** The feeder matches every raw CC against `knobs[]`
+   (space + number + port; channel is not in the frozen source object) and
+   sends exactly one `Event::KnobParam`. A claimed CC **suppresses** the
+   built-in MIX knob page for that same event — the map wins, the old
+   binding goes inert (Q4 precedent). Live in both unit modes with no
+   overlay gate: mapping is data. Relative moves read the CURRENT project
+   value; when the field is `None` they start from its documented neutral
+   (gains 1.0 — that is what `None` means; pan center; sends/FX mid-scale
+   0.5, since soundfont defaults are unreadable — deterministic and neither
+   silence nor full blast). Absolute tops out at normalized 1.0 (master
+   boost past 1.0 stays a raw-JSON/PUT concern). Rows missing `target` are
+   rejected — pre-D36 source-only rows were never consumed, and the
+   keymap loader's never-fail-open rule turns such a file into warn +
+   defaults.
 
 (Fader-button defaults were gated on T7 take 2 for a while; that gate is long
 closed — buttons measured as HUI notes 0–7, and the section still ships empty,
