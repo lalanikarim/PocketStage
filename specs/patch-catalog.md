@@ -1,11 +1,12 @@
 # Patch catalog — soundfont sets, patch references, voice picker (plan)
 
-**Status: IN PROGRESS — phases A + B SHIPPED (sessions 13, 18), phases C–F
-planned.**
+**Status: IN PROGRESS — phases A–C SHIPPED (sessions 13, 18, 18b), phases
+D–F planned.**
 Decisions from session 12 chat folded in; D27 ruled + recorded (phase B, s18).
 Backlog items: 18 (voice picker) ✅ closed by phase A, 19 (soundfont sets)
-open until phases C–D. Residual open questions Q-R1/Q-R2 remain non-blocking
-(Q-R3 answered in phase B). Next up: phase C — resumes here per HANDOFF §9.
+open until phase D. Residual open question Q-R1 (preview gate) stays
+non-blocking (Q-R2/Q-R3 answered in phases C/B). Next up: phase D — the
+patch browser UI; resumes here per HANDOFF §9.
 
 ## Goal
 
@@ -110,7 +111,7 @@ back to) with a message that names the exact expected path.
 |---|---|---|
 | **A** ✅ (s13) | Voice picker UI + `POST /api/voice` (GM-only) | item 18 shipped. Shipped BETTER than planned: instead of the intended "full 128-name table", labels come from the loaded font — boot-time `Synth::preset_list` FFI iteration (main thread, pre-audio; symbols `fluid_preset_get_num`/`_get_banknum`) → immutable catalog on AppState → `GET /api/presets`. A hand-typed GM table was tried first and mislabelled most programs (session-13 post-mortem) — do not reintroduce static name tables. Phase B inherits: preset-iteration FFI already exists. |
 | **B** ✅ (s18) | Catalog core: FFI additions, scan dir + eager load, preset iteration, `GET /api/patches`, `has_percussion` flags | Shipped as planned. Pure logic lives in `pocketstage-model/src/catalog.rs` (`Catalog`/`PatchInfo`/`FontInfo`/`Resolution` + `plan_font_loads` budget planner; 8 unit tests: dedup keeps first, bank>128/program>127 dropped, every fallback rung, kit chain, budget skip-with-reason). FFI gained only `fluid_sfont_get_name`. **Finding:** on FluidSynth 2.3.4 the internal sfont name IS the load-path (`/usr/share/sounds/sf2/FluidR3_GM.sf2`), so Q-R3 collisions are near-impossible for distinct files — the last-load-wins warning stays as belt-and-braces. Scan dir `POCKETSTAGE_SFONT_DIR` (default `~/.pocketstage/soundfonts`), budget `POCKETSTAGE_SFONT_BUDGET_MB`, default font exempt + path-overridable via `POCKETSTAGE_SOUNDFONT`; corrupt file → visible skipped entry, boot never dies (device-smoke proven: corrupt skip + 141 MB second font loaded). Catalog lives outside the project format — `SCHEMA_VERSION` untouched. |
-| **C** | Patch references: `PatchRef` in model (+variants above), boot/swap/select via `program_select_by_sfont_name`, full fallback chain + `/ws` warning badge | resolution logic as a pure function over `Catalog` — table-driven CI tests incl. every fallback rung |
+| **C** ✅ (s18b) | Patch references: `PatchRef` in model (+variants above), boot/swap/select via `program_select_by_sfont_name`, full fallback chain + `/ws` warning badge | Shipped as planned. `PatchRef` = type alias over catalog's `PatchRequest` (one vocabulary); `ActiveVoice::Preset` (externally tagged `{"preset":{…}}`), `Project.drum_kit_patch`, `InstrumentSlot.bank` — all serde-defaulted, old files bit-identical. Resolution runs through the phase-B pure `Catalog` resolvers at boot/swap/scene-launch/voice-select; badges publish to `LiveStatus::patch_notes` (cap 8) and ride every `/ws` frame as `patch_notes`; voice mirror gains `VOICE_PATCH` sentinel. Kit = one `select_patch` per pad channel 8–15, `None` = zero synth calls (today's boot kit). Active-preset unresolved keeps the lead's previous sound + badge (silence would lie). Q-R2 PINNED by test: unresolved track still gets its full CC block. 4 model + 8 engine + 1 server test; live smoke: POST preset → 202, `voice=patch badges=0`, write-through persisted the ref; ghost font → badge; bank 200 → 400. Side effect: `ActiveVoice` lost `Copy` (boxed variant) — `Event` is Clone-only now, lanes are mpsc anyway. |
 | **D** | Patch browser UI: grouped/searchable list, **audition on ch 7** (`POST /api/preview`), voice picker fed from catalog; track instrument pickers | item 19 closes |
 | **E** | `POST /api/soundfonts/rescan` (diff by name; removed fonts STAY loaded until reboot — safe rule) + keymap `voices[]` → patch refs (this patch-catalog phase feeds the D26 keymap's `voice` field via Addition A's externally-tagged enum) | rescan during playback = add-only semantics |
 | **F** | Soundfont upload endpoint (multipart → scan dir → rescan) | size cap ~512 MB, `.sf2/.sf3` only; LAN-trust unchanged |
@@ -120,9 +121,9 @@ back to) with a message that names the exact expected path.
 - **Q-R1**: preview gate length — fixed 0.5 s note-off timer on the
   engine side vs explicit `/api/preview/stop`? Lean: fixed + stop endpoint
   later if it annoys.
-- **Q-R2**: when a track's patch is unresolved, does MIX overlay still
-  work on its channel? (It should — CCs are font-independent; confirm in
-  phase C tests.)
+- **Q-R2** (answered, phase C): YES — pinned by
+  `unresolved_track_patch_falls_back_to_gm_and_keeps_its_ccs`: resolution
+  only touches the program line; the CC block is font-independent.
 - **Q-R3** (answered in phase B): on FluidSynth 2.3.4 the internal sfont
   name IS the load-time file path, so distinct files cannot collide; the
   catalog keeps that name and boot still warns if a name repeats (a font

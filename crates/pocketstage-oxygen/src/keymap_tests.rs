@@ -27,7 +27,7 @@ fn defaults_match_engine_hardcoded_table() {
     let d = DawKeymap::default();
     let notes: Vec<u8> = d.voices.iter().map(|b| b.source.number()).collect();
     assert_eq!(notes, [36, 38, 40, 41, 43, 45, 47, 48, 50, 52, 53, 55]);
-    let programs: Vec<ActiveVoice> = d.voices.iter().map(|b| b.voice).collect();
+    let programs: Vec<ActiveVoice> = d.voices.iter().map(|b| b.voice.clone()).collect();
     assert_eq!(programs[0], ActiveVoice::Drums);
     for (i, p) in [0u8, 4, 6, 11, 19, 24, 29, 32, 38, 48, 65]
         .iter()

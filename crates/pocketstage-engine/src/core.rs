@@ -17,12 +17,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Instant;
 
+use pocketstage_model::catalog::{Catalog, PatchRequest, Resolution};
 use pocketstage_model::{
-    ActiveVoice, Clip, Pattern, Project, ProjectFile, Quantize, RecordedEvent, SCHEMA_VERSION,
-    STEPS_PER_BAR, StepNote, Take, Track,
+    ActiveVoice, Clip, InstrumentSlot, Pattern, Project, ProjectFile, Quantize, RecordedEvent,
+    SCHEMA_VERSION, STEPS_PER_BAR, StepNote, Take, Track,
 };
 use pocketstage_oxygen::KnobTarget;
-use pocketstage_server::{EngineCommand, LiveStatus, OverlayTarget, VOICE_DRUMS};
+use pocketstage_server::{EngineCommand, LiveStatus, OverlayTarget, VOICE_DRUMS, VOICE_PATCH};
 
 use crate::clock;
 use crate::transport::Transport;
@@ -176,6 +177,12 @@ pub trait SynthBackend {
     /// held notes "stack" (user report); examples/fx_bench.rs has proof.
     /// Chorus `Some(0.0)` explicitly switches the effect off.
     fn set_global_fx(&mut self, reverb: Option<f64>, chorus: Option<f64>);
+    /// Select a catalog patch by soundfont NAME on `chan` (D27 phase C —
+    /// the `program_select_by_sfont_name` primitive). Callers resolve
+    /// against the catalog FIRST; this is only ever invoked with names the
+    /// catalog vouched for, so a false return means synth-vs-catalog drift
+    /// (logged at the backend, never fatal).
+    fn select_patch(&mut self, chan: i32, sfont: &str, bank: i32, program: i32);
 }
 
 /// Real backend: borrowed handle to the one FluidSynth instance (owned and
@@ -221,11 +228,19 @@ impl SynthBackend for FluidBackend<'_> {
     fn set_global_fx(&mut self, reverb: Option<f64>, chorus: Option<f64>) {
         self.0.set_global_fx(reverb, chorus)
     }
+    #[inline]
+    fn select_patch(&mut self, chan: i32, sfont: &str, bank: i32, program: i32) {
+        if !self.0.select_patch(chan, sfont, bank, program) {
+            eprintln!("[patch] synth rejected resolved patch '{sfont}' {bank}:{program} — drift?");
+        }
+    }
 }
 
 // ------------------------------------------------------------------- events
 
-#[derive(Debug, Clone, Copy)]
+// NOTE: deliberately NOT `Copy` since D27 — `SelectVoice` may carry a boxed
+// catalog patch ref. Events move by clone; the lanes are mpsc anyway.
+#[derive(Debug, Clone)]
 pub enum Event {
     NoteOn {
         chan: i32,
@@ -411,8 +426,59 @@ fn to_cc(scale: f64) -> i32 {
 /// it to go (D33; FluidSynth 2.3.4 has no per-channel float gain — checked:
 /// no `fluid_synth_set_channel_gain` symbol). Boost belongs to
 /// `Project::master_gain`, which drives the synth's real output stage.
-pub fn apply_track_voice<S: SynthBackend>(synth: &mut S, chan: i32, track: &Track) {
-    synth.program_change(chan, track.instrument.gm_program as i32);
+/// Resolve a track's instrument against the catalog (D27 phase C). The
+/// patch reference exists only when `soundfont` names one — otherwise the
+/// track is plain GM and this returns None (legacy path, untouched).
+pub fn track_patch_request(inst: &InstrumentSlot) -> Option<PatchRequest> {
+    inst.soundfont.as_ref().map(|sfont| PatchRequest {
+        sfont: sfont.clone(),
+        bank: inst.bank.unwrap_or(0),
+        program: inst.gm_program,
+    })
+}
+
+/// Apply a track's program selection (GM or catalog patch, D27) to `chan`;
+/// fallback notes are appended to `notes` (capped by the caller). Split out
+/// so boot, swap and scene-launch all select through ONE code path.
+fn apply_track_program<S: SynthBackend>(
+    synth: &mut S,
+    chan: i32,
+    track: &Track,
+    cat: &Catalog,
+    default_font: &str,
+    notes: &mut Vec<String>,
+) {
+    let outcome = track_patch_request(&track.instrument).map(|req| cat.resolve(req, default_font));
+    match outcome {
+        Some(Resolution::Resolved(p)) => {
+            synth.select_patch(chan, &p.sfont, p.bank as i32, p.program as i32)
+        }
+        Some(Resolution::FellBack { used, note, .. }) => {
+            notes.push(note);
+            synth.select_patch(chan, &used.sfont, used.bank as i32, used.program as i32);
+        }
+        Some(Resolution::Unresolved(req)) => {
+            // No font has bank:program — fall back to the plain GM program
+            // (which is what this field always meant pre-D27) + badge.
+            notes.push(format!(
+                "patch '{}' {}:{} unresolved — fell back to GM program {}",
+                req.sfont, req.bank, req.program, req.program
+            ));
+            synth.program_change(chan, req.program as i32);
+        }
+        None => synth.program_change(chan, track.instrument.gm_program as i32),
+    }
+}
+
+pub fn apply_track_voice<S: SynthBackend>(
+    synth: &mut S,
+    chan: i32,
+    track: &Track,
+    cat: &Catalog,
+    default_font: &str,
+    notes: &mut Vec<String>,
+) {
+    apply_track_program(synth, chan, track, cat, default_font, notes);
     let gain = if track.mute {
         0.0
     } else {
@@ -438,6 +504,7 @@ pub fn apply_track_voice<S: SynthBackend>(synth: &mut S, chan: i32, track: &Trac
 pub fn voice_code(project: &Project) -> u32 {
     match project.active_voice {
         Some(ActiveVoice::Drums) => VOICE_DRUMS,
+        Some(ActiveVoice::Preset(_)) => VOICE_PATCH,
         Some(ActiveVoice::Program(p)) => p as u32,
         None => project
             .tracks
@@ -454,12 +521,19 @@ pub fn voice_code(project: &Project) -> u32 {
 /// letting a foot-held chord ring through into the next scene is the musical
 /// answer. The paths that DO promise silence (Stop, voice switch) handle the
 /// damper explicitly — see `EngineCore::lift_damper`.
-pub fn apply_scene_voice<S: SynthBackend>(synth: &mut S, project: &Project, scene: usize) {
+pub fn apply_scene_voice<S: SynthBackend>(
+    synth: &mut S,
+    project: &Project,
+    scene: usize,
+    cat: &Catalog,
+    default_font: &str,
+    notes: &mut Vec<String>,
+) {
     for (t, track) in project.tracks.iter().enumerate() {
         let chan = project.track_channel(t) as i32;
         synth.all_notes_off(chan);
         if track.clips.get(scene).is_some_and(|c| c.is_some()) {
-            synth.program_change(chan, track.instrument.gm_program as i32);
+            apply_track_program(synth, chan, track, cat, default_font, notes);
         }
     }
 }
@@ -522,6 +596,13 @@ pub struct EngineCore {
     pub playing_since: Option<u64>, // sample index where Play fired
     pub cycles: u64,
     pub live: Arc<LiveStatus>,
+    /// D27 phase C: the loaded patch catalog. Immutable after boot (phase E
+    /// replaces the whole Arc), read-only in resolution passes — an `Arc`
+    /// pointer read adds no lock, so the single-writer rule (R5) stands.
+    pub catalog: Arc<Catalog>,
+    /// Internal name of the DEFAULT font: the middle rung of every D27
+    /// fallback chain. Set once at boot from the loaded synth.
+    pub default_font: String,
     pub stats: Arc<Stats>,
     /// Finalized takes flow back to the HTTP layer (recordings survive
     /// reboot); tests keep the receiving end.
@@ -553,6 +634,8 @@ impl EngineCore {
         stats: Arc<Stats>,
         take_feed: Sender<Take>,
         edit_feed: Sender<ProjectFile>,
+        catalog: Arc<Catalog>,
+        default_font: String,
     ) -> Self {
         // Takes persisted in the project (earlier sessions) are live from t=0.
         let takes = std::mem::take(&mut project.takes);
@@ -583,6 +666,8 @@ impl EngineCore {
             playing_since: None,
             cycles: 0,
             live,
+            catalog,
+            default_font,
             stats,
             take_feed,
             edit_feed,
@@ -598,12 +683,87 @@ impl EngineCore {
     /// Boot-time: apply every track's program + mixer to its channel,
     /// plus the global FX amounts.
     pub fn apply_all_voices<S: SynthBackend>(&self, synth: &mut S) {
+        let mut notes = Vec::new();
         for (t, track) in self.project.tracks.iter().enumerate() {
             let chan = self.project.track_channel(t) as i32;
-            apply_track_voice(synth, chan, track);
+            apply_track_voice(
+                synth,
+                chan,
+                track,
+                &self.catalog,
+                &self.default_font,
+                &mut notes,
+            );
         }
-        self.apply_voice_override(synth);
+        self.apply_drum_kit(synth, &mut notes);
+        self.apply_voice_override(synth, &mut notes);
+        self.publish_patch_notes(notes);
         self.apply_global_fx(synth);
+    }
+
+    /// D27 phase C: the drum kit as a catalog patch. `None` = do NOTHING —
+    /// boot already parked channels 8..=15 on the default font's GM kit.
+    /// Otherwise resolve through the kit chain and re-select on every pad
+    /// channel (kit NOTE mapping stays GM 35–81 inside, documented).
+    fn apply_drum_kit<S: SynthBackend>(&self, synth: &mut S, notes: &mut Vec<String>) {
+        let Some(kit) = self.project.drum_kit_patch.as_ref() else {
+            return;
+        };
+        let used = match self
+            .catalog
+            .resolve_kit(Some(&kit.sfont), &self.default_font)
+        {
+            Resolution::Resolved(p) => p,
+            Resolution::FellBack { used, note, .. } => {
+                notes.push(note);
+                used
+            }
+            Resolution::Unresolved(_) => {
+                notes.push(format!(
+                    "drum kit '{sfont}' unresolved — staying on the boot GM kit",
+                    sfont = kit.sfont
+                ));
+                return;
+            }
+        };
+        for ch in TICK_CH..=15 {
+            synth.select_patch(
+                ch,
+                &used.sfont,
+                pocketstage_model::catalog::PERCUSSION_BANK as i32,
+                used.program as i32,
+            );
+        }
+    }
+
+    /// Scene launch re-programming with catalog resolution; the pass's
+    /// badges replace the previous ones (this is a full resolution pass over
+    /// the column, same semantics as boot/swap).
+    fn apply_scene_voice_patched<S: SynthBackend>(&self, synth: &mut S, scene: usize) {
+        let mut notes = Vec::new();
+        apply_scene_voice(
+            synth,
+            &self.project,
+            scene,
+            &self.catalog,
+            &self.default_font,
+            &mut notes,
+        );
+        self.publish_patch_notes(notes);
+    }
+
+    /// Publish this pass's fallback badges for /ws (cap 8 — a project with
+    /// more unresolved refs needs its fonts fixed, not a longer list).
+    /// Poison-safe by construction: the render loop never panics on this.
+    fn publish_patch_notes(&self, notes: Vec<String>) {
+        let mut notes = notes;
+        notes.truncate(8);
+        let mut slot = self
+            .live
+            .patch_notes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = notes;
     }
 
     /// D25: the selected voice overrides track 1's program on the lead
@@ -612,9 +772,52 @@ impl EngineCore {
     /// and routes notes to the kit. Boot AND swap must layer this: a swap
     /// re-programs channel 0 to track 1's patch, so without it the voice
     /// is silently dropped while /ws still reports it (review P1-1).
-    fn apply_voice_override<S: SynthBackend>(&self, synth: &mut S) {
-        if let Some(ActiveVoice::Program(p)) = self.project.active_voice {
-            synth.program_change(LEAD_CH, p as i32);
+    fn apply_voice_override<S: SynthBackend>(&self, synth: &mut S, notes: &mut Vec<String>) {
+        if let Some(voice) = self.project.active_voice.as_ref() {
+            self.apply_voice_value(synth, voice, notes);
+        }
+    }
+
+    /// Sound a specific voice on the lead channel (D25 layering + D27 patch
+    /// refs). Shared by boot/swap (`apply_voice_override`) and the live
+    /// SelectVoice event so resolution semantics cannot diverge between them.
+    fn apply_voice_value<S: SynthBackend>(
+        &self,
+        synth: &mut S,
+        voice: &ActiveVoice,
+        notes: &mut Vec<String>,
+    ) {
+        match voice {
+            ActiveVoice::Program(p) => synth.program_change(LEAD_CH, *p as i32),
+            ActiveVoice::Drums => {}
+            ActiveVoice::Preset(req) => {
+                match self
+                    .catalog
+                    .resolve(req.as_ref().clone(), &self.default_font)
+                {
+                    Resolution::Resolved(p) => {
+                        synth.select_patch(LEAD_CH, &p.sfont, p.bank as i32, p.program as i32)
+                    }
+                    Resolution::FellBack { used, note, .. } => {
+                        notes.push(note);
+                        synth.select_patch(
+                            LEAD_CH,
+                            &used.sfont,
+                            used.bank as i32,
+                            used.program as i32,
+                        );
+                    }
+                    Resolution::Unresolved(r) => {
+                        // Lead keeps whatever it currently plays (boot track 1
+                        // or the previous voice) — silence would be worse, and
+                        // the badge says exactly what did not happen.
+                        notes.push(format!(
+                            "voice patch '{}' {}:{} unresolved — lead keeps its previous sound",
+                            r.sfont, r.bank, r.program
+                        ));
+                    }
+                }
+            }
         }
     }
 
@@ -772,9 +975,17 @@ impl EngineCore {
         }
         self.takes = adopted;
         self.bpm = new.bpm;
+        let mut patch_notes = Vec::new();
         for (t, track) in new.tracks.iter().enumerate() {
             let chan = new.track_channel(t) as i32;
-            apply_track_voice(synth, chan, track);
+            apply_track_voice(
+                synth,
+                chan,
+                track,
+                &self.catalog,
+                &self.default_font,
+                &mut patch_notes,
+            );
         }
         // A PUT may shrink the scene list; drop any dangling active/pending
         // launch before it becomes the project's truth.
@@ -785,7 +996,7 @@ impl EngineCore {
         // Tracks are on their channels — re-layer the D25 voice override so
         // the swap cannot silently drop it (review P1-1). Reads the NEW
         // project, hence after the assignment.
-        self.apply_voice_override(synth);
+        self.apply_voice_override(synth, &mut patch_notes);
         // The chatter table deliberately SURVIVES a swap: it describes notes
         // that are physically sounding on the live lane, and a swap silences
         // nothing. Clearing it (as this used to do) lost both a held key's
@@ -805,6 +1016,9 @@ impl EngineCore {
         // A swap can change the voice (web PUT edited active_voice).
         let code = voice_code(&self.project);
         self.live.active_voice.store(code, Ordering::Relaxed);
+        // Kit may change on a swap too (web edited drum_kit_patch).
+        self.apply_drum_kit(synth, &mut patch_notes);
+        self.publish_patch_notes(patch_notes);
         self.apply_global_fx(synth);
         self.stats
             .project_updates
@@ -990,7 +1204,8 @@ impl EngineCore {
             Event::SelectVoice { voice } => {
                 // D25: THE active voice — persisted (write-through), mirrored
                 // for the feeder/WS, and sounded: programs re-program the
-                // lead channel, Drums answers with a kick (voice-confirm).
+                // lead channel, Drums answers with a kick (voice-confirm),
+                // catalog patches select by name (D27 phase C).
                 self.project.active_voice = Some(voice);
                 let code = voice_code(&self.project);
                 self.live.active_voice.store(code, Ordering::Relaxed);
@@ -998,9 +1213,22 @@ impl EngineCore {
                 // feeder re-routes releases by the NEW voice (Drums drops or
                 // redirects them), so anything still down would sustain.
                 self.kill_lead(synth);
-                match voice {
-                    ActiveVoice::Program(p) => synth.program_change(LEAD_CH, p as i32),
-                    ActiveVoice::Drums => self.confirm(synth, CONFIRM_KICK),
+                let mut notes = Vec::new();
+                match &self.project.active_voice {
+                    Some(ActiveVoice::Drums) => self.confirm(synth, CONFIRM_KICK),
+                    Some(v) => self.apply_voice_value(synth, v, &mut notes),
+                    None => {}
+                }
+                if !notes.is_empty() {
+                    // One-off selections APPEND to the last full pass's
+                    // badges (boot/swap/scene passes replace them wholesale).
+                    let mut all = self
+                        .live
+                        .patch_notes
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    all.append(&mut notes);
+                    all.truncate(8);
                 }
                 self.mark_project_edit();
             }
@@ -1148,13 +1376,13 @@ impl EngineCore {
                         self.live
                             .active_scene
                             .store(scene as u8 + 1, Ordering::Relaxed);
-                        apply_scene_voice(synth, &self.project, scene);
+                        self.apply_scene_voice_patched(synth, scene);
                     }
                     crate::transport::Effect::Switch { scene } => {
                         self.live
                             .active_scene
                             .store(scene as u8 + 1, Ordering::Relaxed);
-                        apply_scene_voice(synth, &self.project, scene);
+                        self.apply_scene_voice_patched(synth, scene);
                     }
                     crate::transport::Effect::Queued | crate::transport::Effect::Ignore => {}
                 }
@@ -1477,7 +1705,7 @@ impl EngineCore {
             // Apply a pending scene launch at its quantized boundary.
             if let Some(i) = self.transport.tick(p) {
                 self.live.active_scene.store(i as u8 + 1, Ordering::Relaxed);
-                apply_scene_voice(synth, &self.project, i);
+                self.apply_scene_voice_patched(synth, i);
             }
             // Metronome (D16): fires ONLY while recording — never during
             // plain playback, never captured.
@@ -1585,11 +1813,13 @@ mod harness_tests {
 
     // ---- fake backend ----------------------------------------------------
 
-    #[derive(Debug, PartialEq, Clone, Copy)]
+    #[derive(Debug, PartialEq, Clone)]
     enum Call {
         On(i32, i32, i32),
         Off(i32, i32),
         Prog(i32, i32),
+        /// D27: by-name catalog patch selection (chan, sfont, bank, program).
+        SelectPatch(i32, String, i32, i32),
         Cc(i32, i32, i32),
         NotesOff(i32),
         SoundsOff(i32),
@@ -1631,6 +1861,10 @@ mod harness_tests {
         fn set_global_fx(&mut self, reverb: Option<f64>, chorus: Option<f64>) {
             self.calls.push(Call::Fx(reverb, chorus));
         }
+        fn select_patch(&mut self, c: i32, sfont: &str, bank: i32, program: i32) {
+            self.calls
+                .push(Call::SelectPatch(c, sfont.to_string(), bank, program));
+        }
     }
 
     // ---- harness ----------------------------------------------------------
@@ -1665,7 +1899,19 @@ mod harness_tests {
             let (tx_ev, rx_ev) = channel();
             let (tx_cmd, rx_cmd) = channel();
             Self {
-                core: EngineCore::new(project, live, stats, tx_feed, tx_edit),
+                core: EngineCore::new(
+                    project,
+                    live,
+                    stats,
+                    tx_feed,
+                    tx_edit,
+                    // Empty catalog by default: every patch ref resolves to
+                    // "unresolved", so GM fallback behavior is what existing
+                    // tests keep asserting. Patch-aware tests install their
+                    // own via `h.set_catalog(...)`.
+                    Arc::new(Catalog::default()),
+                    "DefaultFont".into(),
+                ),
                 fake: Fake::default(),
                 tx_ev,
                 rx_ev,
@@ -1674,6 +1920,12 @@ mod harness_tests {
                 takes_rx,
                 edit_rx,
             }
+        }
+
+        /// Swap in a catalog for patch-resolution tests (boot-time stand-in:
+        /// the real engine builds it before the core exists).
+        fn set_catalog(&mut self, cat: Catalog) {
+            self.core.catalog = Arc::new(cat);
         }
 
         fn send(&self, event: Event) {
@@ -3179,11 +3431,11 @@ mod harness_tests {
         assert_eq!(h.core.project.tracks[0].pan, Some(1.0));
         assert!(h.has(Call::Cc(chan, 10, 127)));
         // One step back reads the CLAMPED value: 1.0 − 0.6 = 0.4 → pan −0.2.
-        h.send(ccw);
+        h.send(ccw.clone());
         h.tick(1);
         assert!((h.core.project.tracks[0].pan.unwrap() + 0.2).abs() < 1e-9);
         // And down here it bottoms out at hard left, never wrapping.
-        h.send(ccw);
+        h.send(ccw.clone());
         h.send(ccw);
         h.tick(1);
         assert_eq!(h.core.project.tracks[0].pan, Some(-1.0));
@@ -3623,5 +3875,205 @@ mod harness_tests {
             "note-on + note-off only, no pedal events: {:?}",
             take.events
         );
+    }
+
+    // ============================================ D27 phase C: patch refs
+
+    /// Three-font test catalog. "DefaultFont" matches the harness core's
+    /// `default_font`, so default-rung fallbacks resolve in tests exactly as
+    /// they would against the boot font.
+    fn patch_catalog() -> Catalog {
+        Catalog::build(vec![
+            (
+                "DefaultFont".into(),
+                "/f/d.sf2".into(),
+                vec![(0, 1, "Piano".into()), (128, 0, "GM Kit".into())],
+            ),
+            (
+                "Melodic".into(),
+                "/f/m.sf2".into(),
+                vec![(8, 33, "Bass Finger".into())],
+            ),
+            (
+                "KitFont".into(),
+                "/f/k.sf2".into(),
+                vec![(128, 0, "Tight Kit".into())],
+            ),
+        ])
+    }
+
+    fn patch_notes(h: &Harness) -> Vec<String> {
+        h.core
+            .live
+            .patch_notes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[test]
+    fn track_with_soundfont_selects_by_name_not_program_change() {
+        let mut h = Harness::new();
+        h.set_catalog(patch_catalog());
+        let t = &mut h.core.project.tracks[0];
+        t.instrument.soundfont = Some("Melodic".into());
+        t.instrument.bank = Some(8);
+        t.instrument.gm_program = 33;
+        h.core.apply_all_voices(&mut h.fake);
+        // Snapshot ONCE — `h.has()` drains the log (destructive by design).
+        let calls = h.calls();
+        assert!(calls.contains(&Call::SelectPatch(0, "Melodic".into(), 8, 33)));
+        // The legacy GM program_change must be GONE for this channel — both
+        // firing would silently re-select on the default font afterwards.
+        assert!(
+            !calls.iter().any(|c| matches!(c, Call::Prog(0, _))),
+            "got {calls:?}"
+        );
+        assert!(patch_notes(&h).is_empty(), "exact hit leaves no badge");
+    }
+
+    #[test]
+    fn track_patch_falls_back_to_default_font_with_visible_note() {
+        let mut h = Harness::new();
+        h.set_catalog(patch_catalog());
+        let t = &mut h.core.project.tracks[0];
+        t.instrument.soundfont = Some("Nope".into());
+        t.instrument.gm_program = 1; // exists on DefaultFont bank 0
+        h.core.apply_all_voices(&mut h.fake);
+        let calls = h.calls();
+        assert!(calls.contains(&Call::SelectPatch(0, "DefaultFont".into(), 0, 1)));
+        let notes = patch_notes(&h);
+        assert_eq!(notes.len(), 1, "got {notes:?}");
+        assert!(notes[0].contains("default font"), "got {}", notes[0]);
+    }
+
+    #[test]
+    fn unresolved_track_patch_falls_back_to_gm_and_keeps_its_ccs() {
+        // Q-R2 pinned: MIX overlay on an unresolved channel still works —
+        // CCs are font-independent, resolution only touches the program.
+        let mut h = Harness::new();
+        h.set_catalog(patch_catalog());
+        let t = &mut h.core.project.tracks[0];
+        t.instrument.soundfont = Some("Ghost".into());
+        t.instrument.bank = Some(7);
+        t.instrument.gm_program = 77; // nowhere in the catalog
+        h.core.apply_all_voices(&mut h.fake);
+        let calls = h.calls();
+        assert!(calls.contains(&Call::Prog(0, 77)), "got {calls:?}");
+        assert!(!calls.iter().any(|c| matches!(c, Call::SelectPatch(..))));
+        // ...and the whole mixer block still lands (CC7 gain is applied by
+        // apply_track_voice right after the program line).
+        assert!(calls.contains(&Call::Cc(0, 7, 127)), "got {calls:?}");
+        let notes = patch_notes(&h);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("unresolved"), "got {}", notes[0]);
+    }
+
+    #[test]
+    fn select_voice_preset_selects_by_name_and_mirrors_ws_code() {
+        let mut h = Harness::new();
+        h.set_catalog(patch_catalog());
+        h.send(Event::SelectVoice {
+            voice: ActiveVoice::Preset(Box::new(pocketstage_model::PatchRef {
+                sfont: "Melodic".into(),
+                bank: 8,
+                program: 33,
+            })),
+        });
+        h.tick(1);
+        let calls = h.calls();
+        assert!(calls.contains(&Call::SelectPatch(LEAD_CH, "Melodic".into(), 8, 33)));
+        assert_eq!(
+            h.core.live.active_voice.load(Ordering::Relaxed),
+            VOICE_PATCH
+        );
+        assert!(matches!(
+            h.core.project.active_voice,
+            Some(ActiveVoice::Preset(_))
+        ));
+        assert!(patch_notes(&h).is_empty());
+    }
+
+    #[test]
+    fn select_voice_preset_unresolved_keeps_previous_sound_and_badges() {
+        let mut h = Harness::new();
+        h.set_catalog(patch_catalog());
+        h.send(Event::SelectVoice {
+            voice: ActiveVoice::Preset(Box::new(pocketstage_model::PatchRef {
+                sfont: "Ghost".into(),
+                bank: 7,
+                program: 77,
+            })),
+        });
+        h.tick(1);
+        let calls = h.calls();
+        // Kill happens (P2-4), but NOTHING re-programs the lead channel:
+        // it keeps playing what it played before — plus a loud badge.
+        assert!(calls.contains(&Call::NotesOff(LEAD_CH)));
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, Call::SelectPatch(..) | Call::Prog(0, _)))
+        );
+        let notes = patch_notes(&h);
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0].contains("keeps its previous sound"),
+            "got {notes:?}"
+        );
+    }
+
+    #[test]
+    fn drum_kit_patch_reselects_every_pad_channel() {
+        let mut h = Harness::new();
+        h.set_catalog(patch_catalog());
+        h.core.project.drum_kit_patch = Some(pocketstage_model::PatchRef {
+            sfont: "KitFont".into(),
+            bank: 128,
+            program: 0,
+        });
+        h.core.apply_all_voices(&mut h.fake);
+        let calls = h.calls();
+        for ch in 8..=15 {
+            assert!(
+                calls.contains(&Call::SelectPatch(ch, "KitFont".into(), 128, 0)),
+                "pad channel {ch} missed the kit: {calls:?}"
+            );
+        }
+        assert!(patch_notes(&h).is_empty());
+    }
+
+    #[test]
+    fn drum_kit_fallback_walks_to_default_font_kit() {
+        let mut h = Harness::new();
+        h.set_catalog(patch_catalog());
+        h.core.project.drum_kit_patch = Some(pocketstage_model::PatchRef {
+            sfont: "Melodic".into(), // loaded, but has NO percussion
+            bank: 128,
+            program: 0,
+        });
+        h.core.apply_all_voices(&mut h.fake);
+        let calls = h.calls();
+        assert!(calls.contains(&Call::SelectPatch(8, "DefaultFont".into(), 128, 0)));
+        let notes = patch_notes(&h);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("no percussion"), "got {notes:?}");
+    }
+
+    #[test]
+    fn drum_kit_unresolved_stays_on_boot_gm_kit() {
+        let mut h = Harness::new();
+        // Empty catalog: nothing is loaded, no kit exists anywhere.
+        h.core.project.drum_kit_patch = Some(pocketstage_model::PatchRef {
+            sfont: "Ghost".into(),
+            bank: 128,
+            program: 0,
+        });
+        h.core.apply_all_voices(&mut h.fake);
+        let calls = h.calls();
+        assert!(!calls.iter().any(|c| matches!(c, Call::SelectPatch(..))));
+        let notes = patch_notes(&h);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("boot GM kit"), "got {notes:?}");
     }
 }

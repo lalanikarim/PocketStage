@@ -268,7 +268,7 @@ fn d25_fields_round_trip_and_default_to_none() {
 
     for voice in [ActiveVoice::Drums, ActiveVoice::Program(42)] {
         let mut p = Project::default_project();
-        p.active_voice = Some(voice);
+        p.active_voice = Some(voice.clone());
         p.validate().unwrap();
         let json = ProjectFile {
             version: SCHEMA_VERSION,
@@ -298,6 +298,101 @@ fn d25_fields_round_trip_and_default_to_none() {
         p.validate(),
         Err(ValidationError::DrumNoteOutOfRange { note: 99 })
     );
+}
+
+// ------------------------------------------------- D27 phase C: patch refs
+
+#[test]
+fn preset_voice_round_trips_in_its_documented_wire_shape() {
+    let v = ActiveVoice::Preset(Box::new(PatchRef {
+        sfont: "StudioDrums".into(),
+        bank: 128,
+        program: 0,
+    }));
+    let wire = serde_json::to_string(&v).unwrap();
+    assert_eq!(
+        wire,
+        r#"{"preset":{"sfont":"StudioDrums","bank":128,"program":0}}"#
+    );
+    let back: ActiveVoice = serde_json::from_str(&wire).unwrap();
+    assert_eq!(back, v);
+    // Old variants keep their exact old wire — additive only.
+    assert_eq!(
+        serde_json::to_string(&ActiveVoice::Drums).unwrap(),
+        r#""drums""#
+    );
+    assert_eq!(
+        serde_json::to_string(&ActiveVoice::Program(9)).unwrap(),
+        r#"{"program":9}"#
+    );
+}
+
+#[test]
+fn old_project_files_still_load_with_new_defaults_none() {
+    // A pre-D27 document: no drum_kit_patch, no bank on instruments.
+    let mut p = Project::default_project();
+    p.active_voice = Some(ActiveVoice::Program(11));
+    let json = ProjectFile {
+        version: SCHEMA_VERSION,
+        project: p,
+    }
+    .to_json_pretty()
+    .unwrap();
+    let stripped = json.replace("\"drum_kit_patch\": null,", "");
+    let back = ProjectFile::from_json_str(&stripped).unwrap();
+    assert_eq!(back.project.drum_kit_patch, None);
+    assert!(
+        back.project
+            .tracks
+            .iter()
+            .all(|t| t.instrument.bank.is_none())
+    );
+}
+
+#[test]
+fn drum_kit_patch_and_track_bank_round_trip() {
+    let mut p = Project::default_project();
+    p.drum_kit_patch = Some(PatchRef {
+        sfont: "KitFont".into(),
+        bank: 128,
+        program: 0,
+    });
+    p.tracks[0].instrument.soundfont = Some("Melodic".into());
+    p.tracks[0].instrument.bank = Some(8);
+    p.validate().unwrap();
+    let json = ProjectFile {
+        version: SCHEMA_VERSION,
+        project: p.clone(),
+    }
+    .to_json_pretty()
+    .unwrap();
+    let back = ProjectFile::from_json_str(&json).unwrap();
+    assert_eq!(back.project, p);
+}
+
+#[test]
+fn out_of_range_patch_refs_are_rejected() {
+    let bad = |bank, program| PatchRef {
+        sfont: "X".into(),
+        bank,
+        program,
+    };
+    let mut p = Project::default_project();
+    p.drum_kit_patch = Some(bad(200, 0));
+    assert!(matches!(
+        p.validate(),
+        Err(ValidationError::PatchOutOfRange { .. })
+    ));
+    let mut p = Project::default_project();
+    p.active_voice = Some(ActiveVoice::Preset(Box::new(bad(0, 200))));
+    assert!(matches!(
+        p.validate(),
+        Err(ValidationError::PatchOutOfRange { .. })
+    ));
+    // Edge-valid: bank 128 (percussion) / program 127.
+    let mut p = Project::default_project();
+    p.drum_kit_patch = Some(bad(128, 127));
+    p.validate().unwrap();
 }
 
 // --------------------------------------------------- slice A: record prep

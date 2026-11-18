@@ -2,6 +2,7 @@
 //! tests run the router in-process (oneshot) — no ports, CI-safe.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -569,7 +570,7 @@ async fn patches_route_serves_full_catalog() {
     )]);
     cat.push_skipped("broken".into(), "/f/broken.sf2".into(), "corrupt".into());
     let (_, body) = call(
-        router(test_state(&path).with_patches(cat)),
+        router(test_state(&path).with_patches(Arc::new(cat))),
         Request::builder()
             .uri("/api/patches")
             .body(Body::empty())
@@ -649,6 +650,61 @@ async fn voice_route_forwards_select_voice() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(!body.is_empty());
+    assert!(rx.try_recv().is_err());
+    cleanup(&path);
+}
+
+#[tokio::test]
+async fn voice_route_accepts_preset_refs_and_gates_ranges() {
+    let path = temp_path("voice-preset");
+    cleanup(&path);
+    let (tx, rx) = std::sync::mpsc::channel::<EngineCommand>();
+    let (_ptx, prx) = std::sync::mpsc::channel::<pocketstage_model::Take>();
+    let (_etx, erx) = std::sync::mpsc::channel::<ProjectFile>();
+    let app = router(AppState::embedded(
+        std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap()),
+        tx,
+        std::sync::Arc::new(crate::LiveStatus::default()),
+        prx,
+        erx,
+    ));
+
+    // D27 wire shape: externally tagged "preset" — forwarded untouched.
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .header("content-type", "application/json")
+            .uri("/api/voice")
+            .body(Body::from(
+                r#"{"preset":{"sfont":"KitFont","bank":128,"program":0}}"#,
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    match rx.try_recv() {
+        Ok(EngineCommand::SelectVoice(pocketstage_model::ActiveVoice::Preset(p))) => {
+            assert_eq!((p.sfont.as_str(), p.bank, p.program), ("KitFont", 128, 0));
+        }
+        other => panic!("expected SelectVoice(Preset), got {other:?}"),
+    }
+
+    // Out-of-range bank → 400 BEFORE the engine lane (store never sees it).
+    let (status, body) = call(
+        app,
+        Request::builder()
+            .method("POST")
+            .header("content-type", "application/json")
+            .uri("/api/voice")
+            .body(Body::from(
+                r#"{"preset":{"sfont":"KitFont","bank":200,"program":0}}"#,
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("bank"), "got {body}");
     assert!(rx.try_recv().is_err());
     cleanup(&path);
 }

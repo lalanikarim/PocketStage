@@ -55,6 +55,15 @@ unsafe extern "C" {
     pub fn fluid_synth_cc(synth: *mut fluid_synth_t, chan: c_int, ctrl: c_int, val: c_int)
     -> c_int;
     pub fn fluid_synth_bank_select(synth: *mut fluid_synth_t, chan: c_int, bank: c_int) -> c_int;
+    // THE cross-sfont selection primitive (D27): pick a preset by STABLE
+    // NAME — no sfont-id bookkeeping, works on percussion-typed channels.
+    pub fn fluid_synth_program_select_by_sfont_name(
+        synth: *mut fluid_synth_t,
+        chan: c_int,
+        sfont_name: *const c_char,
+        bank: c_int,
+        prenum: c_int,
+    ) -> c_int;
     // --- preset catalog (read-only; boot-time only, see Synth::preset_list) ---
     pub fn fluid_synth_get_sfont_by_id(
         synth: *mut fluid_synth_t,
@@ -242,6 +251,19 @@ impl Synth {
     #[inline]
     pub fn program_change(&self, chan: i32, program: i32) {
         unsafe { fluid_synth_program_change(self.0, chan, program) };
+    }
+
+    /// Select a patch by soundfont NAME (D27). Returns false if FluidSynth
+    /// has no such font/preset — callers resolve against the catalog first,
+    /// so false here means "catalog and synth disagree" (logged, never fatal).
+    pub fn select_patch(&self, chan: i32, sfont: &str, bank: i32, program: i32) -> bool {
+        let Ok(name) = CString::new(sfont) else {
+            return false; // interior NUL — catalog can't produce one
+        };
+        unsafe {
+            fluid_synth_program_select_by_sfont_name(self.0, chan, name.as_ptr(), bank, program)
+                == 0
+        }
     }
 
     /// Silences every voice on one channel (used when a scene switch stops a

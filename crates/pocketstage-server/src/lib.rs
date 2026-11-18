@@ -411,15 +411,29 @@ pub struct LiveStatus {
     /// Software overlay inside PRESET (D21): 0 = none, 1 = MIX, 2 = SEQ.
     /// Written by the audio thread on pad 9/10 toggles; read by WS/stats.
     pub overlay: AtomicU8,
-    /// D25 single active voice: GM program 0..=127, or [`VOICE_DRUMS`].
+    /// D25 single active voice: GM program 0..=127, [`VOICE_DRUMS`], or
+    /// [`VOICE_PATCH`] (a catalog patch — details live in the project).
     /// Written by the audio thread (boot / swap / SelectVoice); read by the
     /// MIDI feeder for routing and by WS for display.
     pub active_voice: AtomicU32,
+    /// D27 phase C fallback badges: human-readable notes from the most
+    /// recent patch-resolution pass ("'X' 8:33 not loaded — using …").
+    /// Written ONLY at user-paced points (boot, project swap, voice select,
+    /// scene launch) — never in the render cycle itself; read by the WS
+    /// pusher each tick. Capped by the writer.
+    pub patch_notes: Mutex<Vec<String>>,
 }
 
 /// Sentinel value of [`LiveStatus::active_voice`] meaning "the kit".
 /// Real programs are 0..=127, so this can never alias.
 pub const VOICE_DRUMS: u32 = u32::MAX;
+
+/// Sentinel of [`LiveStatus::active_voice`] meaning "a catalog patch"
+/// (D27 phase C). The feeder treats anything non-`VOICE_DRUMS` as keys→
+/// lead, so this flows through its routing untouched; only the display
+/// distinguishes it. The concrete `{sfont,bank,program}` lives in the
+/// project's `active_voice`, which is the single source of truth.
+pub const VOICE_PATCH: u32 = u32::MAX - 1;
 
 /// One preset of a loaded soundfont, as served by `GET /api/presets`.
 /// Names come from the font itself — the web dropdown must never ship a
@@ -511,10 +525,11 @@ impl AppState {
         self
     }
 
-    /// Attach the full multi-font patch catalog (D27 phase B; engine calls
-    /// this once at boot, after loading every soundfont).
-    pub fn with_patches(mut self, catalog: pocketstage_model::Catalog) -> Self {
-        self.patches = Arc::new(catalog);
+    /// Attach the full multi-font patch catalog (D27; engine calls this
+    /// once at boot after loading every soundfont, sharing the SAME Arc the
+    /// engine core resolves against).
+    pub fn with_patches(mut self, catalog: Arc<pocketstage_model::Catalog>) -> Self {
+        self.patches = catalog;
         self
     }
 
@@ -785,12 +800,22 @@ async fn ws_pump(mut socket: WebSocket, state: AppState) {
             "scene": status.scene,
             "mode": status.mode,
             "overlay": status.overlay,
-            // D25: current performance voice — GM program number or "drums".
+            // D25: current performance voice — GM program number, "drums",
+            // or "patch" (D27 catalog ref; exact patch lives in the project).
             "voice": if voice == VOICE_DRUMS {
                 serde_json::json!("drums")
+            } else if voice == VOICE_PATCH {
+                serde_json::json!("patch")
             } else {
                 serde_json::json!(voice)
             },
+            // D27: visible patch-fallback badges (empty = all resolved).
+            "patch_notes": state
+                .live
+                .patch_notes
+                .lock()
+                .map(|n| n.clone())
+                .unwrap_or_default(),
             "takes": takes,
         });
         let text = match serde_json::to_string(&frame) {
@@ -864,6 +889,16 @@ async fn set_voice(
     // validation never sees this body, so gate it here.
     if matches!(voice, ActiveVoice::Program(p) if p > 127) {
         return Err((StatusCode::BAD_REQUEST, "program must be 0..=127".into()));
+    }
+    // Same range gate for catalog refs (the model validates on load; this
+    // body bypasses the store, so mirror it here).
+    if let ActiveVoice::Preset(p) = &voice
+        && (p.bank > 128 || p.program > 127)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "patch bank must be 0..=128, program 0..=127".into(),
+        ));
     }
     send_ctrl(&state, EngineCommand::SelectVoice(voice))
 }

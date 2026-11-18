@@ -74,6 +74,12 @@ pub enum ValidationError {
     EventChannelOutOfRange(u8),
     #[error("gm_program {0} out of range 0..=127")]
     ProgramOutOfRange(u8),
+    #[error("patch '{sfont}' {bank}:{program}: bank must be 0..=128, program 0..=127")]
+    PatchOutOfRange {
+        sfont: String,
+        bank: u8,
+        program: u8,
+    },
     #[error("track '{track}' channel override {channel} out of range 0..=15")]
     ChannelOutOfRange { track: String, channel: u8 },
     #[error(
@@ -212,6 +218,15 @@ pub struct Project {
     /// the DAW-mode white-key browser; persisted so reboot resumes it.
     #[serde(default)]
     pub active_voice: Option<ActiveVoice>,
+    /// Drum kit as a catalog patch (D27 phase C): pads/metronome channels
+    /// get `program_select_by_sfont_name` on this font's bank-128 preset,
+    /// so the kit may live in a DIFFERENT soundfont than melodic content.
+    /// `None` = GM kit from the default font (bit-for-bit today's behavior).
+    /// Only the `sfont` name guides resolution (kits are one-per-font);
+    /// fallback chain: requested → default font's kit → any loaded kit →
+    /// stay on the boot GM kit, each rung with a visible badge.
+    #[serde(default)]
+    pub drum_kit_patch: Option<PatchRef>,
     /// Master output gain — live-adjustable scale on the synth's final mix
     /// (the `synth.gain` setting, applied via `fluid_synth_set_gain`).
     /// `None` = leave whatever the engine booted with (0.3 since session
@@ -266,6 +281,7 @@ impl Project {
                     color: *color,
                     instrument: InstrumentSlot {
                         soundfont: None,
+                        bank: None,
                         gm_program: *program,
                     },
                     clips: clips[i].clone(),
@@ -285,6 +301,7 @@ impl Project {
             drum_kit: None,
             drum_kit_2: None,
             active_voice: None,
+            drum_kit_patch: None,
             master_gain: None,
         }
     }
@@ -356,6 +373,25 @@ impl Project {
             && p > 127
         {
             return Err(ValidationError::ProgramOutOfRange(p));
+        }
+        // Patch refs (D27 phase C): the catalog only ever carries bank
+        // 0..=128 / program 0..=127 — reject out-of-range references at the
+        // door so resolution never has to guess what 200:255 was meant to be.
+        let check_patch = |p: &PatchRef| -> Result<(), ValidationError> {
+            if p.bank > 128 || p.program > 127 {
+                return Err(ValidationError::PatchOutOfRange {
+                    sfont: p.sfont.clone(),
+                    bank: p.bank,
+                    program: p.program,
+                });
+            }
+            Ok(())
+        };
+        if let Some(p) = &self.drum_kit_patch {
+            check_patch(p)?;
+        }
+        if let Some(ActiveVoice::Preset(p)) = &self.active_voice {
+            check_patch(p)?;
         }
         for track in &self.tracks {
             if track.clips.len() != self.scenes.len() {
@@ -548,12 +584,20 @@ fn default_color() -> [u8; 3] {
 /// Instrument binding for a track (R8 patch layer, simplified to its core).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstrumentSlot {
-    /// Soundfont file name. Resolved against the box's `sounds/` directory;
-    /// `None` = engine default soundfont.
+    /// Catalog soundfont NAME (D27 phase C): set = resolve `{name, bank,
+    /// gm_program}` against the loaded catalog via `program_select_by_sfont_
+    /// name`. `None` = plain GM program_change on the default font (today's
+    /// behavior, unchanged).
     #[serde(default)]
     pub soundfont: Option<String>,
+    /// Bank for the catalog lookup; only meaningful with `soundfont` set.
+    /// `None` = bank 0. FluidSynth's combined convention, 0..=128.
+    #[serde(default)]
+    pub bank: Option<u8>,
     /// General MIDI program number 0..=127 (drums: track on channel 9 uses the
-    /// GM kit and ignores this — scratchpad D3).
+    /// GM kit and ignores this — scratchpad D3). Doubles as the patch program
+    /// when `soundfont` is set, and as the fallback selection when a catalog
+    /// reference cannot be resolved.
     #[serde(default)]
     pub gm_program: u8,
 }
@@ -567,9 +611,16 @@ pub struct Scene {
     pub quantize: Option<Quantize>,
 }
 
+/// Named patch reference into the runtime catalog (D27 phase C): resolved
+/// at boot/swap/select against the loaded fonts, never a stale id. Lives in
+/// the catalog module as `PatchRequest` — same shape, one vocabulary.
+pub type PatchRef = catalog::PatchRequest;
+
 /// The single active performance voice (D25). Externally tagged serde:
-/// `"drums"` or `{"program": 42}`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `"drums"`, `{"program": 42}` or `{"preset": {"sfont": ..., "bank": 0,
+/// "program": 5}}` (D27 phase C — files USING the preset variant stop
+/// loading on pre-D27 builds; everything else round-trips unchanged).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActiveVoice {
     /// GM program on the lead channel (keys play it; pads are keys too,
@@ -578,6 +629,10 @@ pub enum ActiveVoice {
     /// The kit: pads 1–16 hit `drum_kit` + `drum_kit_2` (D17 retrigger per
     /// channel, bank 2 mirroring bank 1's channels); the keybed is silent.
     Drums,
+    /// A catalog patch by stable name on the lead channel (D27). Resolution
+    /// walks the standard fallback chain; unresolved = lead keeps its
+    /// previous sound + a visible badge (never silence-with-no-explanation).
+    Preset(Box<PatchRef>),
 }
 
 /// When a scene-launch request actually starts playing (D5).

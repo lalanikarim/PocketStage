@@ -38,7 +38,7 @@ use pocketstage_oxygen::{
     Source as KeymapSource,
 };
 use pocketstage_server::{
-    AppState, EngineCommand, KeymapSlot, LiveStatus, ProjectStore, VOICE_DRUMS,
+    AppState, EngineCommand, KeymapSlot, LiveStatus, ProjectStore, VOICE_DRUMS, VOICE_PATCH,
 };
 
 use std::sync::Arc;
@@ -75,7 +75,7 @@ fn route_daw_note(km: &DawKeymap, note: u8, port: KeymapPort) -> DawRoute {
     // lookups cannot disagree.
     if let Some(b) = km.voice_for(note, port) {
         return DawRoute::Voice {
-            voice: b.voice,
+            voice: b.voice.clone(),
             label: b.label.clone(),
         };
     }
@@ -255,6 +255,10 @@ fn main() {
             },
         );
     }
+    // One Arc feeds BOTH the HTTP plane (GET /api/patches) and the engine
+    // core's resolution passes (D27 phase C). Immutable from here on —
+    // phase E's rescan will replace the whole Arc, never its contents.
+    let catalog = std::sync::Arc::new(catalog);
     // Pads + metronome live on channels 8..=15; make them percussion. Note:
     // set_channel_type alone does NOT re-resolve the channel's preset — the
     // bank_select + program_change pair is what actually lands them on the
@@ -390,7 +394,7 @@ fn main() {
     let http_state =
         AppState::embedded(Arc::clone(&store), ctx, Arc::clone(&live), take_rx, edit_rx)
             .with_presets(presets)
-            .with_patches(catalog)
+            .with_patches(Arc::clone(&catalog))
             .with_keymap(Arc::clone(&keymap))
             .with_mapping_slot(Arc::clone(&mapping));
     match pocketstage_server::spawn_engine_server(http_state, ([0, 0, 0, 0], port).into()) {
@@ -400,6 +404,8 @@ fn main() {
 
     // ---- audio thread -------------------------------------------------------
     let a_stats = Arc::clone(&stats);
+    let a_catalog = Arc::clone(&catalog);
+    let a_default_font = default_font_name.clone();
     let audio_thread = thread::Builder::new()
         .name("ps-audio".into())
         .spawn(move || {
@@ -426,6 +432,8 @@ fn main() {
                 Arc::clone(&a_stats),
                 take_feed,
                 edit_feed,
+                a_catalog,
+                a_default_font,
             );
             let mut backend = FluidBackend(&synth);
             // Track programs + mixer (D3: track N → internal channel N).
@@ -521,14 +529,26 @@ fn main() {
                 let voice = s_stats.live.active_voice.load(Ordering::Relaxed);
                 let voice_str = if voice == VOICE_DRUMS {
                     "drums".to_string()
+                } else if voice == VOICE_PATCH {
+                    // D27: catalog patch — the exact {sfont,bank,program}
+                    // lives in the project; /api/patches + GET project show it.
+                    "patch".to_string()
                 } else {
                     format!("gm{voice}")
                 };
+                // D27: unresolved-patch badges from the last resolution pass.
+                let badges = s_stats
+                    .live
+                    .patch_notes
+                    .lock()
+                    .map(|n| n.len())
+                    .unwrap_or(0);
                 println!(
                     "[stats] cycles={cycles:5} busy={busy_pct:4.2}% ({:.1} us/{} us period) \
                      events={events:3} queue avg/max={q_avg:6.1}/{q_max:6} us \
                      feeder_jitter_max={feed_max:5} us xruns={xruns} out_queue~{:.1} ms \
-                     transport={} pos={bar}.{beat} scene={} takes={} swaps={} overlay={} voice={}",
+                     transport={} pos={bar}.{beat} scene={} takes={} swaps={} overlay={} \
+                     voice={} badges={}",
                     if cycles > 0 {
                         busy_ns as f64 / cycles as f64 / 1000.0
                     } else {
@@ -548,6 +568,7 @@ fn main() {
                     s_stats.project_updates.load(Ordering::Relaxed),
                     overlay,
                     voice_str,
+                    badges,
                 );
             }
         })
@@ -767,7 +788,9 @@ fn run_live_midi(
                                             send_event(
                                                 &tx,
                                                 m.received,
-                                                Event::SelectVoice { voice },
+                                                Event::SelectVoice {
+                                                    voice: voice.clone(),
+                                                },
                                             );
                                         }
                                         if voice != ActiveVoice::Drums {

@@ -559,8 +559,8 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     17's keymap schema sees no new slot-mapping surface. Follow-up
     candidate: the DAW-mode curated VOICES labels in main.rs could reuse
     the catalog.
-19. **Patch catalog / soundfont sets — phase B SHIPPED (session 18), C–F
-    planned** (D27): runtime catalog built via FluidSynth FFI (preset
+19. **Patch catalog / soundfont sets — phases B + C SHIPPED (sessions 18,
+    18b), D–F planned** (D27): runtime catalog built via FluidSynth FFI (preset
     iteration, no sf2 parser), patches referenced by `{sfont, bank,
     program}` names, drums from a separate font supported, always-available
     default font + GM kit with full fallback chain (missing → default →
@@ -576,9 +576,19 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
       exempt), serves `GET /api/patches` (fonts incl. visible skipped
       entries + all patches). Device smoke proven: corrupt file → loud
       warning + skip; 141 MB second font loads alongside FluidR3.
-    - **Next: C** — `PatchRef` in model, `program_select_by_sfont_name`
-      application, fallback badge on `/ws` (full plan:
-      `specs/patch-catalog.md`).
+    - **C ✅ (s18b)**: patch references end to end — `PatchRef` (alias of
+      catalog's `PatchRequest`), `ActiveVoice::Preset`, `Project.drum_kit_
+      patch`, `InstrumentSlot.bank` (all serde-defaulted, old files bit-
+      identical); boot/swap/scene/voice-select resolve through the pure
+      Catalog resolvers and apply via `program_select_by_sfont_name`; kit
+      re-selects pad channels 8–15 (`None` = zero synth calls); fallback
+      badges publish on `/ws` as `patch_notes` (cap 8), voice mirror gains
+      `VOICE_PATCH`. Live smoke: preset POST → `voice=patch badges=0` +
+      persisted ref; ghost font → badge; bank 200 → 400. (`ActiveVoice`
+      lost `Copy`; `Event` is Clone-only — mpsc lanes anyway.)
+    - **Next: D** — patch browser UI (grouped/searchable list from
+      `/api/patches`, audition on ch 7 via `POST /api/preview`, track
+      instrument pickers) → closes item 19.
     Plan: `specs/patch-catalog.md`.
 
 20. **Sustain pedal — CC64 passed through to the synth — DONE (session 16e,
@@ -648,7 +658,7 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 | D34 | **A live apply never PUTs a document it composed: read-modify-write + named take delete** (session 16d; user report — "I selected program 42 and then moved the volume slider, it switched back to drums"). The D32 design PUT the page's whole document, which is safe only if nothing changed out of band. Two things do: `Event::SelectVoice` (keybed knob / Mackie fader) writes `active_voice` engine-side and marks the write-through lane, so the store learns the new voice ~500 ms later while the browser still holds `drums` — the next slider nudge PUTs the stale value back; and `takes`, where whole-document swap adoption keeps only what the incoming list contains (the keep-rule protects takes finalized in the last 30 s), so riding a fader could erase a take recorded half a minute earlier. Ruled: **a flush GETs the current document, overwrites only the fields this page owns, and PUTs that.** Renderers register per-control *patchers* (closures writing one value into a target doc) under a namespace replaced whenever the renderer runs, guarded on index+name so a track renamed/deleted server-side is skipped rather than scribbled on; explicit Save does the same merge through a `UI_OWNED` field list (`takes`/`active_voice` excluded by design; the raw-JSON editor stays verbatim — that's its job). Take deletion gets the endpoint its sibling already had: `POST /api/takes/delete {name}` — store-first, then engine command; the engine drops it from **both** `takes` and `mine`, because a name left in `mine` is resurrected by the keep-rule at the next swap; 404 unknown. UI ✕ and "clear takes" now name each take instead of PUTting a list without it. Accepted: solo flips every mute flag it can see, so a take recorded while the page sits open isn't in the solo set until a refresh; and an explicit Save of clip edits can still revert another tab's clip edit — that's optimistic concurrency (rev / If-Match / 409), not worth it for one user. Verified live: hardware voice reaches the store (`program 42`), a new-style flush keeps it *and* applies gain 0.42; replaying the old whole-doc PUT as a control experiment reproduces the revert. `scripts/live-merge-check.mjs` extracts the merge block between sentinels and asserts voice-survives-save, take-recorded-after-load-survives, unrendered future fields survive, patchers skip renamed tracks, take patchers address by name, namespace re-registration drops stale controls, malformed docs tolerated — plus a parse check of the whole inline script (now a CI step). | ✅ ruled + implemented (s16d) |
 | D37 | **Phase 5 ships: device `Mapping` via GET/PUT + hot-reloading mappers** (session 17b; executes D29). File: ONE document, two sections — oxygen `MappingPair {music, hui}`, sections optional (absent = that port's factory default), `POCKETSTAGE_MAPPING` env override > `~/.pocketstage/mapping.json`, never-fail-open loader (missing/corrupt/invalid → measured factory defaults + loud `[mapping] WARNING`), exact mirror of the keymap loader. `MappingSlot` mirrors `KeymapSlot` but holds its lock across validate→write(tmp+rename)→publish, so memory and disk can never interleave — the D32 lesson applied before it could bite. **Mapper-state-on-swap ruling:** the spec's feared state audit turned out tiny — `Mapper`'s only cross-message state is the shared-button tap detector (`pending_tap: Option<u8>`); fader positions live in engine mix state, mode latching in the feeder. New pure `Mapper::flush_pending()` emits a held 127 as a real Fader action (exactly what the next non-tap event would have done); the feeder checks the slot per MIDI message (main thread, Arc-pointer compare — unchanged pointer costs one lock + clone) and on change flushes both mappers, rebuilds them + `pad_base`, logs `[mapping] hot-reloaded`. Rejected: transport-stopped gating (mapping edits are rare user-paced device geometry; a remapped pad window mid-hold can orphan one note-off — same accepted risk class as keymap remap; Stop + chatter guard bound it) and restart-only (D29 already ruled hot-reload). GET now serves `editable:true` + factory defaults for diffing; UI gains a raw-JSON "Device map" card (advanced surface, no table editor); PUT/reset share the slot's validation. 3 oxygen + 4 server tests; ear/hardware check owed: confirm the round-trip live (edit control_channel from the web while playing) | ✅ ruled + implemented (s17b) |
 | D36 | **Knob param leaf ruled + knob consumption** (session 17; item 17b, implements the s14b amendment). Schema: `knobs[]` = `{source, target}` (additive to frozen v0.1 — source untouched); `target = {kind: relative|absolute, step (default 0.02), param}`; **closed param vocabulary v1** in a normalized 0..=1 domain: `{"track":{"index":1..=MAX_TRACKS,"field":"gain|pan|reverb|chorus"}}` (the D22 MIX fields — same namespace on purpose) or `{"global":"master_gain|fx_reverb|fx_chorus"}`; item-19 patch refs will extend the *voice* field, never this leaf. Wire: relative = measured tick constants CW=1/CCW=65 (other values ignored), absolute = value/127. Consumption: feeder matches every raw CC (space+number+port — channel is not in the frozen source object) → exactly one `Event::KnobParam`; a claimed CC **suppresses** the built-in MIX knob page (map wins, Q4 precedent); live in both modes, no overlay gate (mapping is data). Core: track fields ride `mix_set_norm` (CC math shared with MIX + PUT — cannot diverge), globals via `set_master_gain`/`set_global_fx` pushing ONLY the ridden field (session-10 space rule); every move writes the project + marks the D24 lane. Relative starts from the field's documented neutral when `None`: gains 1.0, pan center, sends/FX 0.5 (`REL_NEUTRAL_SEND`, deterministic mid-scale — soundfont defaults are unreadable). Defaults stay EMPTY (guessed defaults = silent misroutes); pre-D36 source-only rows now fail → loader warn + defaults. Rejected: per-channel boost past normalized 1.0 (D33 stands), recording knobs into takes, an overlay gate. 8 oxygen + 7 engine tests; **ear-check owed**: relative feel + step size on the unit | ✅ ruled + implemented (s17) |
-| D27 | **Patch catalog / soundfont sets** (slot reserved s12; ruled in discuss-phase, phase B implemented s18). Runtime catalog built by asking FluidSynth via FFI walk — no sf2 parser, ever; patches keyed `{sfont, bank, program}` with font-provided names (hand-typed tables banned since s13). Scan dir `POCKETSTAGE_SFONT_DIR` (default `~/.pocketstage/soundfonts`) eager-loads `*.sf2/*.sf3` sorted at boot (canonical-path dedupe vs the default; RAM cap `POCKETSTAGE_SFONT_BUDGET_MB` — default font + GM kit exempt on every tier). Default font (`POCKETSTAGE_SOUNDFONT` > FluidR3 path) loads before project/keymap and stays the ONLY boot-abort. Fallback chain always VISIBLE, never a silent swap: exact → default font → any font with that bank:program → silence + badge; kits (bank 128) walk their own chain. Catalog lives outside the project format (`SCHEMA_VERSION` untouched), served verbatim by `GET /api/patches`. Lazy activation deferred to real Pi RAM numbers. Phase B finding: on 2.3.4 the internal sfont name IS the load path — Q-R3 collisions near-impossible, last-load-wins warning kept as belt-and-braces | ✅ ruled + implemented through phase B (s18) |
+| D27 | **Patch catalog / soundfont sets** (slot reserved s12; ruled in discuss-phase, phase B implemented s18). Runtime catalog built by asking FluidSynth via FFI walk — no sf2 parser, ever; patches keyed `{sfont, bank, program}` with font-provided names (hand-typed tables banned since s13). Scan dir `POCKETSTAGE_SFONT_DIR` (default `~/.pocketstage/soundfonts`) eager-loads `*.sf2/*.sf3` sorted at boot (canonical-path dedupe vs the default; RAM cap `POCKETSTAGE_SFONT_BUDGET_MB` — default font + GM kit exempt on every tier). Default font (`POCKETSTAGE_SOUNDFONT` > FluidR3 path) loads before project/keymap and stays the ONLY boot-abort. Fallback chain always VISIBLE, never a silent swap: exact → default font → any font with that bank:program → silence + badge; kits (bank 128) walk their own chain. Catalog lives outside the project format (`SCHEMA_VERSION` untouched), served verbatim by `GET /api/patches`. Lazy activation deferred to real Pi RAM numbers. Phase B finding: on 2.3.4 the internal sfont name IS the load path — Q-R3 collisions near-impossible, last-load-wins warning kept as belt-and-braces. Phase C (s18b): refs in model (`ActiveVoice::Preset`, `drum_kit_patch`, `InstrumentSlot.bank`), selection via `program_select_by_sfont_name` at boot/swap/scene/voice-select, kit re-pick on pad channels, badges on `/ws` | ✅ ruled + implemented through phase C (s18b) |
 | D30 | **Bank commands ship unbound + defaults music-port qualified** (session 15; kills backlog task "MIX bank paging + BankPrev/BankNext wiring + ‹/› defaults"). Two measured reasons: (1) `‹`/`›` are **mode-conditional** — guide v1.2 §10 + our preset-mode table agree they emit NOTHING in PRESET mode (device-local preset scroll), while the T7 numbers (HUI notes 46/47) are DAW-mode Mackie controls; MIX lives inside PRESET (D21) and its faders/knobs are the PRESET CC map, so a ‹/›→MIX-page binding would be silent exactly when it is needed and live only where MIX has no consumable inputs. Mackie-style track-bank scroll is also meaningless at 4 tracks on one page. `bank_prev`/`bank_next` stay in the frozen vocabulary — hand-bindable but with **no engine consumer** (no paging `Event` exists; the feeder arm is empty by ruling), and **no defaults**. (2) Built-in voice/command defaults were claiming their notes on *every* port, which made any HUI-qualified default fail `DawKeymap::validate()` (`voices[6] (Nylon Guitar) … claim note 47`); defaults now say `"port":"music"` — byte-identical routing (keys/pads are port :0 in both modes), whole HUI note space freed for future DAW-mode bindings | ✅ ruled (s15); implemented |
 
 ---
@@ -718,14 +728,15 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 
 ## 9. How to resume (suggested prompt for next session)
 
-> Read HANDOFF.md (§6 backlog, §7 decisions through **D37** — D27 was
-> filled in session 18) and AGENTS.md.
-> **NEXT SESSION STARTS HERE → item 19 phase C: patch references**
-> (`specs/patch-catalog.md` — `PatchRef` in model + resolution via
-> `program_select_by_sfont_name` + `/ws` fallback badge; phase E later
-> feeds the keymap voice field via Addition A). Phase B (catalog core,
-> scan dir, budget, `GET /api/patches`) shipped s18. The whole DAW-keymap
-> thread is CLOSED — phases 0–5 + knob targets (D36) + Mapping PUT (D37).
+> Read HANDOFF.md (§6 backlog, §7 decisions through **D37** — D27 filled
+> s18, extended through phase C s18b) and AGENTS.md.
+> **NEXT SESSION STARTS HERE → item 19 phase D: patch browser UI**
+> (`specs/patch-catalog.md` — grouped/searchable list from `/api/patches`,
+> audition on ch 7 via `POST /api/preview` (Q-R1: fixed gate), voice +
+> track pickers fed by the catalog; rendering the `/ws` `patch_notes`
+> badges lands here too. Phase E later feeds the keymap voice field via
+> Addition A). Phases B + C shipped s18/s18b. The whole DAW-keymap thread
+> is CLOSED — phases 0–5 + knob targets (D36) + Mapping PUT (D37).
 > Hardware
 > ear-checks owed from s17: knob relative feel/step size, and the live
 > mapping round-trip (edit a channel from the web while playing).
@@ -1328,6 +1339,25 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
       coverage at all; this is the first gate that can fail on an `index.html`
       syntax error). 215 Rust tests + node checks green, clippy/fmt clean.
 
+- **Session 18b (patch references live — item 19 phase C)**: executed the
+  resume pointer. Model (all additive, old files bit-identical): `PatchRef`
+  as a type alias over the catalog's `PatchRequest` (one vocabulary),
+  `ActiveVoice::Preset(Box<_>)` externally tagged, `Project.drum_kit_patch`,
+  `InstrumentSlot.bank` + validation (`PatchOutOfRange`). The boxed variant
+  cost `ActiveVoice` its `Copy` → `Event` is Clone-only now (mpsc lanes,
+  zero practical cost; three `.clone()`s). Engine: one resolution path for
+  boot/swap/scene-launch (`apply_track_program` — scene switch cannot
+  silently drop a font) and one shared by override/SelectVoice
+  (`apply_voice_value`), all through the pure phase-B resolvers; kit =
+  `select_patch` on channels 8–15, `None` = zero synth calls. Badges: new
+  `LiveStatus::patch_notes` (Mutex<Vec>, written ONLY at user-paced apply
+  points, cap 8, poison-safe) → every `/ws` frame carries them; stats line
+  shows `voice=… badges=N`; voice mirror gains `VOICE_PATCH`. Unresolved
+  active preset = lead keeps its previous sound + badge (silence would
+  lie). Q-R2 pinned by test. 4 model + 8 engine + 1 server tests added;
+  live smoke on the box: POST preset(cs.sf2) → 202, `voice=patch badges=0`,
+  write-through persisted `{"preset":…}`; ghost font → badge; bank 200 →
+  400. All five gates green. Next: phase D — the patch browser UI.
 - **Session 18 (patch catalog core — D27 filled, item 19 phase B)**: executed
   the resume pointer. The whole testable half of phase B now lives in the
   model crate as pure data: `catalog.rs` (`Catalog`/`FontInfo`/`PatchInfo`/
