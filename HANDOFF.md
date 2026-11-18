@@ -559,9 +559,9 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
     17's keymap schema sees no new slot-mapping surface. Follow-up
     candidate: the DAW-mode curated VOICES labels in main.rs could reuse
     the catalog.
-19. **Patch catalog / soundfont sets — phases B + C SHIPPED (sessions 18,
-    18b), D–F planned** (D27): runtime catalog built via FluidSynth FFI (preset
-    iteration, no sf2 parser), patches referenced by `{sfont, bank,
+19. **Patch catalog / soundfont sets — CLOSED by phase D; phases B–D SHIPPED
+    (sessions 18, 18b, 18c), E–F planned** (D27): runtime catalog built via
+    FluidSynth FFI (preset iteration, no sf2 parser), patches referenced by `{sfont, bank,
     program}` names, drums from a separate font supported, always-available
     default font + GM kit with full fallback chain (missing → default →
     any-with-bank → silence + badge, never a failed boot), preview channel
@@ -586,9 +586,20 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
       `VOICE_PATCH`. Live smoke: preset POST → `voice=patch badges=0` +
       persisted ref; ghost font → badge; bank 200 → 400. (`ActiveVoice`
       lost `Copy`; `Event` is Clone-only — mpsc lanes anyway.)
-    - **Next: D** — patch browser UI (grouped/searchable list from
-      `/api/patches`, audition on ch 7 via `POST /api/preview`, track
-      instrument pickers) → closes item 19.
+    - **D ✅ (s18c)**: patch browser UI — grouped/searchable list from
+      `/api/patches` (search caps render, skipped fonts stay visible with
+      their reason), `POST /api/preview` auditions on ch 7 with a fixed
+      0.5 s engine-side gate (Q-R1; latest-wins cut, exact-match-only at
+      both HTTP and core, project never touched), voice dropdown gains one
+      optgroup per non-default font (`/api/health` publishes
+      `default_font` so GM duplicates are skipped), track rows gain a
+      catalog-patch box fed by one shared datalist (empty = plain GM, same
+      as before), `/ws` `patch_notes` fallback badges render in the live
+      card. Live smoke: 183 fonts / 9951 patches served; preview → 202 with
+      the tone captured end-to-end (440 Hz band burst ≈ gate length);
+      ghost font → 404; program 200 → 400; xruns=0.
+    - **Next: E** — `POST /api/soundfonts/rescan` (add-only) + keymap
+      `voices[]` → patch refs (Addition A); then F (upload).
     Plan: `specs/patch-catalog.md`.
 
 20. **Sustain pedal — CC64 passed through to the synth — DONE (session 16e,
@@ -729,14 +740,14 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
 ## 9. How to resume (suggested prompt for next session)
 
 > Read HANDOFF.md (§6 backlog, §7 decisions through **D37** — D27 filled
-> s18, extended through phase C s18b) and AGENTS.md.
-> **NEXT SESSION STARTS HERE → item 19 phase D: patch browser UI**
-> (`specs/patch-catalog.md` — grouped/searchable list from `/api/patches`,
-> audition on ch 7 via `POST /api/preview` (Q-R1: fixed gate), voice +
-> track pickers fed by the catalog; rendering the `/ws` `patch_notes`
-> badges lands here too. Phase E later feeds the keymap voice field via
-> Addition A). Phases B + C shipped s18/s18b. The whole DAW-keymap thread
-> is CLOSED — phases 0–5 + knob targets (D36) + Mapping PUT (D37).
+> s18, extended through phase D s18c) and AGENTS.md.
+> **NEXT SESSION STARTS HERE → item 19 phase E** (`specs/patch-catalog.md`:
+> `POST /api/soundfonts/rescan`, add-only semantics — removed fonts stay
+> loaded until reboot; + keymap `voices[]` → patch refs via Addition A's
+> externally-tagged enum). Phase D (patch browser UI) shipped s18c and
+> CLOSED item 19's core; phase F (upload endpoint) follows E. The whole
+> DAW-keymap thread is CLOSED — phases 0–5 + knob targets (D36) + Mapping
+> PUT (D37).
 > Hardware
 > ear-checks owed from s17: knob relative feel/step size, and the live
 > mapping round-trip (edit a channel from the web while playing).
@@ -1458,3 +1469,25 @@ FluidSynth in Rust on Linux — before writing any UI/format/mapping code.
       rawmidi read is exclusive — `aseqdump -p <c>:0` fails EAGAIN and `amidi`
       says "Device or resource busy" while it runs, so any keybed snoop requires
       stopping the engine.
+- **Session 18c (patch browser UI — item 19 CLOSED, phase D)**: shipped the
+    front end of the catalog. Engine: `Event/EngineCommand::PreviewPatch` →
+    exact-match-only strike on `PREVIEW_CH` (7) with a fixed 0.5 s gate
+    (Q-R1), latest-wins cut, zero project state — 3 harness tests (gate
+    timing to the period, unknown-patch silence + no write-through, cut
+    ordering). Server: `POST /api/preview` (404 unknown ref / 400 range,
+    defaults note 60 vel 100), `/api/health` publishes `default_font`. Web:
+    Patches card (grouped/searchable, skipped fonts visible with reasons),
+    ▶ audition / ★ set-voice / 🥁 set-kit row buttons, voice dropdown
+    optgroups per non-default font (GM duplicates skipped via
+    `default_font`), per-track catalog-patch box on one shared `<datalist>`
+    (empty = plain GM — old behavior unchanged), and the `/ws`
+    `patch_notes` fallback badges render in the live card (a badge forces a
+    dropdown re-sync so the picker never lies). Two seams found mid-build:
+    `fillInstrumentList()` was called but never defined (catalog load threw)
+    and `DEFAULT_FONT` had no source — hence the `default_font` health
+    field. Live smoke: 183 fonts / 9951 patches served; audition tone
+    captured end-to-end from the sink monitor through a 440 Hz bandpass
+    (burst ≈ gate length) because a speech-dispatcher stream made overall
+    RMS useless — spectral isolation is the trick to reuse; ghost → 404,
+    range → 400, xruns=0. All five gates green. Ear-check owed: audition
+    feel + patch-browser browsing on the Pi.
