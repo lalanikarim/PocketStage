@@ -1597,7 +1597,14 @@ use crate::MappingSlot;
 use pocketstage_oxygen::{MappingPair, default_mapping};
 
 fn map_temp(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("ps-server-test-{name}-{}.json", std::process::id()))
+    // Own namespace: this helper originally reused temp_path's exact format,
+    // so map_temp("http") and temp_path("http") were the SAME file — two
+    // parallel tests stomping one project store + mapping file (flaky 500s
+    // and a mapping file containing project JSON). Keep prefixes distinct.
+    std::env::temp_dir().join(format!(
+        "ps-mapping-test-{name}-{}.json",
+        std::process::id()
+    ))
 }
 
 #[test]
