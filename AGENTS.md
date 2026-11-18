@@ -129,6 +129,18 @@ Rules that keep this architecture intact:
   uniformly, so don't assume. Read the exact lines before editing, and check
   `git diff` after every edit call; fix mis-indents immediately rather than
   stacking more edits on top.
+- **Local-LLM tool calls corrupt `\uXXXX` escapes**: when the agent runs on a
+  small local GGUF model (llama.cpp/llama-server), echoing source code into
+  JSON tool-call arguments can mangle literal `\uXXXX` escapes and emoji —
+  emitting a lone-surrogate escape that llama-server rejects with a fatal
+  `500: Failed to parse tool call arguments as JSON ... surrogate
+  U+DC00..U+DFFF`. Not a code bug; retrying usually works. Prevention:
+  write literal Unicode chars in source, never `\uXXXX` escapes (except
+  semantically-needed ones like the `\u0000` key separators in
+  `web/index.html`); keep `oldText`/`newText` chunks small and don't span
+  lines containing escapes or non-BMP emoji. The same corruption can also
+  *land* silently — grep new edits for U+FFFD (`\xef\xbf\xbd`) after
+  sessions on a local model.
 - **`pkill -f <pattern>` self-matches**: the pattern also appears in the
   command line of the very shell running it (and of prior wrapper shells), so
   pkill kills its own process (exit 143) and may take unrelated wrappers down
