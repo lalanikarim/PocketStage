@@ -233,3 +233,49 @@ impl Mapping {
         serde_json::to_string_pretty(self).expect("mapping always serializes")
     }
 }
+
+/// The device-layer document served and accepted by `/api/mapping`
+/// (phase 5, D29; ruling D37): **one file, two sections** — the music-port
+/// and HUI-port maps boot together, so they live and die together. Each
+/// section is optional: an absent section means that port's measured factory
+/// default, so `{"music": {...}}` overrides only the music mapper.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MappingPair {
+    #[serde(default = "default_mapping")]
+    pub music: Mapping,
+    #[serde(default = "hui_mapping")]
+    pub hui: Mapping,
+}
+
+impl Default for MappingPair {
+    fn default() -> Self {
+        Self {
+            music: default_mapping(),
+            hui: hui_mapping(),
+        }
+    }
+}
+
+impl MappingPair {
+    /// Section-prefixed human validation (`"music: ..."` / `"hui: ..."`).
+    pub fn validate(&self) -> Result<(), String> {
+        self.music.validate().map_err(|e| format!("music: {e}"))?;
+        self.hui.validate().map_err(|e| format!("hui: {e}"))?;
+        Ok(())
+    }
+
+    /// A blank/whitespace-only file means defaults (same convention as the
+    /// keymap: empty is *defined* as default, corrupt is the loader's
+    /// never-fail-open problem).
+    pub fn from_json_str(s: &str) -> Result<Self, serde_json::Error> {
+        if s.trim().is_empty() {
+            return Ok(Self::default());
+        }
+        serde_json::from_str(s)
+    }
+
+    pub fn to_json_string(&self) -> String {
+        serde_json::to_string_pretty(self).expect("mapping pair always serializes")
+    }
+}

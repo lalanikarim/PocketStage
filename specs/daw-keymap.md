@@ -8,11 +8,11 @@ AMENDMENT RULED + IMPLEMENTED (D36, s17; drafted s14b; direction RESOLVED
 CW=1/CCW=65; bank ‹/› = HUI notes 46/47; buttons 1–8 = HUI notes 0–7). **D28 ruled (s14c): NC1 is
 the pinned personality** — the only one this unit exposes; its messages
 are plain MIDI with Mackie-style numbering, so take-2 numbers ship as
-defaults. **Phase 5 ruled to SHIP (D29, s14c)** — Mapping GET/PUT
-implementation owed, honoring the phase-5 preconditions.
+defaults. **Phase 5 ruled to SHIP (D29, s14c) — IMPLEMENTED (D37, s17b):**
+MappingSlot + GET/PUT/reset + hot-reloading feeder mappers + Device map card.
 **D30 (s15): bank commands ship UNBOUND (‹/› are DAW-mode-only — silent in
 PRESET, where MIX lives) and built-in defaults are music-port qualified.**
-Decisions D26 + D28 + D29 + D30 + D36 in scratchpad R14 + HANDOFF §7.**
+Decisions D26 + D28 + D29 + D30 + D36 + D37 in scratchpad R14 + HANDOFF §7.**
 Requested session 12: "configure DAW mode key and button mappings so we can
 manage it in a json file … what we don't want to allow remapping is Preset
 mode." All seven open questions answered (rulings at each Q below).
@@ -321,7 +321,7 @@ live s14b)
 - Reset-to-defaults button; import/export raw JSON (textarea) as escape hatch.
 - Acceptance: full remap loop with zero file-handling by the user.
 
-### Phase 5 — device-layer `Mapping` exposure — RULED TO SHIP (D29, s14c)
+### Phase 5 — device-layer `Mapping` exposure — IMPLEMENTED (D37, session 17b)
 
 - `GET/PUT /api/mapping` for oxygen `Mapping` (pad base, fader CCs…) with
   its existing `validate()`; UI advanced tab. Separate ship decision (Q7).
@@ -329,6 +329,32 @@ live s14b)
   two live boot mappings (music + HUI) with `"editable": false`; pure
   observation for debugging/T7. PUT owed per D29; the two open rulings
 below bind it.
+- **SHIPPED (session 17b, D37):** `MappingSlot` (exact `KeymapSlot`
+  mirror) + `GET/PUT /api/mapping` + `POST /api/mapping/reset`; web UI
+  "Device map" card (raw JSON — advanced surface by design). The two
+  rulings below landed as follows:
+  - **Loader:** one file, two sections — `MappingPair {music, hui}` in
+    oxygen (sections optional; absent = that port's factory default),
+    `POCKETSTAGE_MAPPING` env override, `~/.pocketstage/mapping.json`,
+    never-fail-open (missing/corrupt/invalid → factory defaults + loud
+    `[mapping] WARNING`). `MappingSlot::replace` holds its lock across
+    validate→write→rename→publish, so memory and disk can never
+    interleave (the D32 lesson applied from day one).
+  - **Mapper state on swap: apply-at-read + flush, no transport gate.**
+    Inspection showed the spec feared more state than exists: `Mapper`'s
+    ONLY cross-message state is the shared-button tap detector
+    (`pending_tap: Option<u8>`) — fader positions live in the engine's
+    mix state, mode latching lives in the feeder. New pure
+    `Mapper::flush_pending()` emits the held 127 as a real Fader action
+    (exactly what the next non-tap event would have done); the feeder
+    calls it on both mappers before rebuilding them on an Arc-pointer
+    change. A remapped pad window mid-hold can orphan one note-off —
+    accepted + documented, same risk class keymap hot-reload already
+    lives with (Stop and the chatter guard bound the damage).
+    Transport-stopped gating rejected: mapping edits are rare, user-paced
+    device geometry, and lazy application on the next MIDI message keeps
+    the audio thread untouched (R5).
+  Gate 3 (T7) was satisfied long ago — takes 1–2 + D28 pinned NC1.
 - **Open design rulings required before any PUT ships** (this is the part
   that made Phase 5 different from phases 1–4 — say so in the spec):
   1. **Loader**: mirror the keymap (`POCKETSTAGE_MAPPING` env override,

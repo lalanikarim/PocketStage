@@ -24,7 +24,8 @@
 //! - `GET  /api/projects`, `POST /api/projects/{save_as,load,delete}`,
 //!   `GET /api/projects/raw` — project library
 //! - `GET/PUT /api/keymap` + `POST /api/keymap/reset` — D26 keymap file
-//! - `GET  /api/mapping` — read-only device mapper view (D29: PUT owed)
+//! - `GET/PUT /api/mapping` + `POST /api/mapping/reset` — D29/D37 device
+//!   mapping file (measured ground truth, editable with loud warnings)
 
 use axum::extract::Path as PathParam;
 use axum::extract::State;
@@ -43,7 +44,7 @@ use std::time::Duration;
 use pocketstage_model::{ActiveVoice, Project, ProjectFile, SCHEMA_VERSION, Take};
 // Re-exported so embedders (engine) and handlers share one DawKeymap type;
 // the schema stamp is logged at boot next to the keymap path.
-pub use pocketstage_oxygen::{DawKeymap, KEYMAP_SCHEMA, Mapping};
+pub use pocketstage_oxygen::{DawKeymap, KEYMAP_SCHEMA, Mapping, MappingPair};
 
 // ----------------------------------------------------------------- commands
 
@@ -460,11 +461,11 @@ pub struct AppState {
     /// layer validates + persists into it, the engine's MIDI feeder reads
     /// it. Never touched by the audio thread.
     keymap: Option<Arc<KeymapSlot>>,
-    /// Device-layer control maps as constructed at boot (music port + HUI
-    /// port). READ-ONLY exposure (phase 5 prep, Q7): GET /api/mapping lets
-    /// probes and debugging see what the feeder actually interprets —
-    /// editing measured ground truth stays a separate ship decision.
-    device_mappings: Option<Box<(Mapping, Mapping)>>,
+    /// Device-layer control maps (music + HUI sections, D29 phase 5). The
+    /// slot is shared with the engine's feeder: HTTP validates + persists +
+    /// publishes, the feeder hot-reloads by Arc pointer. `None` in
+    /// standalone mode (no feeder to reconfigure).
+    mapping: Option<Arc<MappingSlot>>,
 }
 
 impl AppState {
@@ -478,7 +479,7 @@ impl AppState {
             take_feed: None,
             edit_feed: None,
             keymap: None,
-            device_mappings: None,
+            mapping: None,
         }
     }
 
@@ -489,10 +490,10 @@ impl AppState {
         self
     }
 
-    /// Publish the device-layer mappings the feeder built at boot (the same
-    /// `Mapping` values passed to the Oxygen mappers) for GET /api/mapping.
-    pub fn with_device_mappings(mut self, music: Mapping, hui: Mapping) -> Self {
-        self.device_mappings = Some(Box::new((music, hui)));
+    /// Attach the shared device-mapping slot (engine calls this once at
+    /// boot; the same Arc is handed to the MIDI feeder).
+    pub fn with_mapping_slot(mut self, slot: Arc<MappingSlot>) -> Self {
+        self.mapping = Some(slot);
         self
     }
 
@@ -522,7 +523,7 @@ impl AppState {
             take_feed: Some(Arc::new(Mutex::new(take_feed))),
             edit_feed: Some(Arc::new(Mutex::new(edit_feed))),
             keymap: None,
-            device_mappings: None,
+            mapping: None,
         }
     }
 
@@ -646,7 +647,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/takes/delete", post(delete_take))
         .route("/api/keymap", get(get_keymap).put(put_keymap))
         .route("/api/keymap/reset", post(reset_keymap))
-        .route("/api/mapping", get(get_mapping))
+        .route("/api/mapping", get(get_mapping).put(put_mapping))
+        .route("/api/mapping/reset", post(reset_mapping))
         .route("/api/overlay/{target}", post(set_overlay))
         .with_state(state)
 }
@@ -1200,25 +1202,163 @@ async fn reset_keymap(State(state): State<AppState>) -> Result<StatusCode, Keyma
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Read-only view of the device-layer control maps the feeder built at
-/// boot (phase 5 prep). Q7 stands: editing measured ground truth via the
-/// UI stays a separate ship decision until the hardware probes are done —
-/// this endpoint only makes what IS live inspectable (debugging, T7).
+/// Thread-safe holder for the live [`MappingPair`] plus its file location
+/// and a change counter (phase 5, D29/D37). Exact mirror of [`KeymapSlot`]:
+/// writers are HTTP handlers only (validate → persist atomically →
+/// publish); the reader is the engine's main-thread MIDI feeder, one Arc
+/// clone per message — the audio thread never touches this (R5).
+pub struct MappingSlot {
+    path: PathBuf,
+    maps: Mutex<Arc<MappingPair>>,
+    version: AtomicU64,
+}
+
+/// Mapping file precedence: `POCKETSTAGE_MAPPING` (tests/CI) >
+/// `$HOME/.pocketstage/mapping.json` — global device config, like the
+/// keymap. One file, two sections (music + HUI boot together).
+pub fn mapping_path() -> PathBuf {
+    match std::env::var("POCKETSTAGE_MAPPING") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            PathBuf::from(home)
+                .join(".pocketstage")
+                .join("mapping.json")
+        }
+    }
+}
+
+impl MappingSlot {
+    /// Load `path`; NEVER fails: missing file = measured factory defaults;
+    /// corrupt/invalid = defaults + loud warn (the keymap loader discipline
+    /// — a bad device file must never fail boot, and never silently do
+    /// something half-edited either).
+    pub fn open(path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref().to_path_buf();
+        let (pair, warn) = match std::fs::read_to_string(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (MappingPair::default(), None),
+            Err(e) => (
+                MappingPair::default(),
+                Some(format!("cannot read {}: {e}", path.display())),
+            ),
+            Ok(text) => match MappingPair::from_json_str(&text) {
+                Err(e) => (
+                    MappingPair::default(),
+                    Some(format!(
+                        "corrupt mapping {}: invalid JSON: {e} — using factory defaults",
+                        path.display()
+                    )),
+                ),
+                Ok(p) => match p.validate() {
+                    Ok(()) => (p, None),
+                    Err(e) => (
+                        MappingPair::default(),
+                        Some(format!(
+                            "invalid mapping {}: {e} — using factory defaults",
+                            path.display()
+                        )),
+                    ),
+                },
+            },
+        };
+        if let Some(w) = warn {
+            eprintln!("[mapping] WARNING: {w}");
+        }
+        Self {
+            path,
+            maps: Mutex::new(Arc::new(pair)),
+            version: AtomicU64::new(0),
+        }
+    }
+
+    pub fn path(&self) -> PathBuf {
+        self.path.clone()
+    }
+
+    /// Current live pair (feeder calls this per MIDI event — Arc clone).
+    pub fn get(&self) -> Arc<MappingPair> {
+        self.maps.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
+    }
+
+    /// Validate → persist (tmp+rename) → publish. The whole sequence runs
+    /// under the slot lock so memory and disk can never interleave (the
+    /// D32 lesson from `ProjectStore::replace`, applied from day one);
+    /// any failure leaves both untouched.
+    pub fn replace(&self, incoming: MappingPair) -> Result<(), KeymapError> {
+        let mut guard = self.maps.lock().unwrap_or_else(|p| p.into_inner());
+        incoming
+            .validate()
+            .map_err(|e| KeymapError::Validation(e.clone()))?;
+        let json = incoming.to_json_string();
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| KeymapError::Io(e.to_string()))?;
+        }
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, &json).map_err(|e| KeymapError::Io(e.to_string()))?;
+        std::fs::rename(&tmp, &self.path).map_err(|e| KeymapError::Io(e.to_string()))?;
+        *guard = Arc::new(incoming);
+        self.version.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Restore the measured factory defaults (written like any PUT).
+    pub fn reset(&self) -> Result<(), KeymapError> {
+        self.replace(MappingPair::default())
+    }
+}
+
+fn mapping_slot(state: &AppState) -> Result<&Arc<MappingSlot>, (StatusCode, String)> {
+    state.mapping.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no device mapping slot (embedded mode only)".into(),
+    ))
+}
+
+/// Same shape as the keymap handlers: GET answers 503 without a slot,
+/// PUT/reset fold that into an Io error like `put_keymap` does.
+fn mapping_slot_err(state: &AppState) -> Result<&Arc<MappingSlot>, KeymapError> {
+    mapping_slot(state).map_err(|(s, m)| match s {
+        StatusCode::SERVICE_UNAVAILABLE => KeymapError::Io(m),
+        _ => KeymapError::Validation(m),
+    })
+}
+
+/// Current pair + factory defaults for diffing, plus the change counter.
 async fn get_mapping(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let Some((music, hui)) = state.device_mappings.as_deref() else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no device mappings published".into(),
-        ));
-    };
+    let slot = mapping_slot(&state)?;
     Ok(Json(serde_json::json!({
-        "music": music,
-        "hui": hui,
-        "editable": false,
-        "note": "device-layer map = measured ground truth (read-only); the semantic DAW bindings are at /api/keymap",
+        "version": slot.version(),
+        "path": slot.path().display().to_string(),
+        "music": &slot.get().music,
+        "hui": &slot.get().hui,
+        "defaults": MappingPair::default(),
+        "editable": true,
+        "note": "device-layer map = measured wire truth for THIS unit (see specs/device-maps/); the semantic DAW bindings are at /api/keymap. Edits hot-reload into the MIDI feeder immediately.",
     })))
+}
+
+async fn put_mapping(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<StatusCode, KeymapError> {
+    let slot = mapping_slot_err(&state)?;
+    let text = String::from_utf8_lossy(&body).into_owned();
+    let incoming = MappingPair::from_json_str(&text)
+        .map_err(|e| KeymapError::Validation(format!("invalid mapping JSON: {e}")))?;
+    slot.replace(incoming)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn reset_mapping(State(state): State<AppState>) -> Result<StatusCode, KeymapError> {
+    let slot = mapping_slot_err(&state)?;
+    slot.reset()?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Addition B: `POST /api/overlay/{mix|seq|none}` — exact overlay control

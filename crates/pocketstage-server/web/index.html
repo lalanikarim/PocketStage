@@ -128,9 +128,27 @@
     <p style="color:var(--dim);font-size:11px;margin-top:4px">
       DAW-mode bindings live in one global file (the keyboard, not the song)
       and apply instantly — no restart. A remap while a key is held can drop
-      that key's note-off. PRESET instrument routing is fixed by design;
-      knob targets ship with a later amendment. Overlay buttons above are the
-      escape hatch: they work even if every binding is gone.
+      that key's note-off. PRESET instrument routing is fixed by design.
+      Overlay buttons above are the escape hatch: they work even if every
+      binding is gone.
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>Device map <span id="dm-meta" style="font-weight:normal;color:var(--dim)"></span>
+      <button id="dm-reset" class="alt" style="float:right;font-size:11px">factory defaults</button></h2>
+    <textarea id="dm-raw" spellcheck="false" style="min-height:150px"></textarea>
+    <div style="display:flex;gap:6px;margin-top:8px;align-items:center">
+      <button id="dm-save" type="button">Save mapping</button>
+      <button id="dm-reload" class="alt" type="button">reload</button>
+      <span id="dm-msg" style="font-size:12px;min-height:15px"></span>
+    </div>
+    <p style="color:var(--dim);font-size:11px;margin-top:4px">
+      What the unit physically transmits (measured wire truth, see
+      specs/device-maps/): pad base note, knob/fader CCs, channels. Edits
+      hot-reload into the MIDI feeder immediately — wrong values misroute
+      physical controls, but factory defaults are one click away. This is
+      the device layer; semantic bindings live under “DAW keys”.
     </p>
   </section>
 
@@ -1321,6 +1339,45 @@ document.querySelectorAll(".km-overlay").forEach((b) => {
   };
 });
 loadKm();
+
+// ------------------------------------------------------ device mapping (D37)
+// One JSON document, two sections (music + HUI). Raw-JSON editing only —
+// this is advanced ground truth, not a beginner surface; the server
+// validates and the feeder hot-reloads on the next MIDI message.
+function dmMsg(text, isErr) {
+  const el = $("dm-msg");
+  el.textContent = text || "";
+  el.className = isErr ? "err" : "";
+}
+async function loadDm() {
+  try {
+    const r = await fetch("/api/mapping");
+    if (!r.ok) { $("dm-meta").textContent = `unavailable (${r.status})`; return; }
+    const j = await r.json();
+    $("dm-raw").value = JSON.stringify({ music: j.music, hui: j.hui }, null, 2);
+    $("dm-meta").textContent = `v${j.version} · ${j.path}`;
+  } catch { $("dm-meta").textContent = "offline"; }
+}
+$("dm-save").onclick = async () => {
+  try {
+    const r = await fetch("/api/mapping", {
+      method: "PUT", body: $("dm-raw").value,
+      headers: { "Content-Type": "application/json" },
+    });
+    if (r.ok) { dmMsg("saved — feeder hot-reloads ✓"); await loadDm(); }
+    else dmMsg(await r.text(), true);
+  } catch (e) { dmMsg("save failed: " + e, true); }
+};
+$("dm-reload").onclick = () => loadDm();
+$("dm-reset").onclick = async () => {
+  if (!confirm("Restore the measured factory device map? Your edits are overwritten.")) return;
+  try {
+    const r = await fetch("/api/mapping/reset", { method: "POST" });
+    if (r.ok) { dmMsg("factory defaults restored ✓"); await loadDm(); }
+    else dmMsg(await r.text(), true);
+  } catch (e) { dmMsg("reset failed: " + e, true); }
+};
+loadDm();
 
 // Remote control: transport + scene chips drive the engine over HTTP —
 // same event path the Oxygen keys take. State comes back via /ws.

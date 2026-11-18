@@ -35,7 +35,7 @@ pub use keymap::{
     TrackTarget, VoiceBinding, default_step,
 };
 pub use mapper::{Action, Mapper, Mode};
-pub use mapping::{Mapping, TransportNotes, default_mapping, hui_mapping};
+pub use mapping::{Mapping, MappingPair, TransportNotes, default_mapping, hui_mapping};
 
 #[cfg(test)]
 mod keymap_tests;

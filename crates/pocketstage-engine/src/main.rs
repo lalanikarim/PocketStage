@@ -35,7 +35,7 @@ use pocketstage_model::{
 };
 use pocketstage_oxygen::{
     Action, Command as KeymapCommand, DawKeymap, Mapper, Mode, Port as KeymapPort,
-    Source as KeymapSource, default_mapping, hui_mapping,
+    Source as KeymapSource,
 };
 use pocketstage_server::{
     AppState, EngineCommand, KeymapSlot, LiveStatus, ProjectStore, VOICE_DRUMS,
@@ -246,6 +246,23 @@ fn main() {
     let keymap = Arc::new(pocketstage_server::KeymapSlot::open(
         pocketstage_server::keymap_path(),
     ));
+    // ---- device mapping (phase 5, D29/D37): same never-fail-open loader ---
+    // Measured factory defaults on missing/corrupt file (+ loud warn). One
+    // Arc feeds BOTH the HTTP plane (GET/PUT/reset) and the MIDI feeder,
+    // which hot-reloads its mappers when the published Arc changes.
+    let mapping = Arc::new(pocketstage_server::MappingSlot::open(
+        pocketstage_server::mapping_path(),
+    ));
+    println!(
+        "[init] device mapping: {} (music ch {}, hui transport notes {})",
+        mapping.path().display(),
+        mapping.get().music.control_channel,
+        if mapping.get().hui.transport_notes.is_some() {
+            "on"
+        } else {
+            "off"
+        },
+    );
     println!(
         "[init] daw keymap: {} (schema {}, {} voice slots, {} command bindings)",
         keymap.path().display(),
@@ -257,9 +274,7 @@ fn main() {
         AppState::embedded(Arc::clone(&store), ctx, Arc::clone(&live), take_rx, edit_rx)
             .with_presets(presets)
             .with_keymap(Arc::clone(&keymap))
-            // Read-only exposure of what the feeder's mappers interpret
-            // (phase 5 prep; Q7: no PUT until probes say it is safe).
-            .with_device_mappings(default_mapping(), hui_mapping());
+            .with_mapping_slot(Arc::clone(&mapping));
     match pocketstage_server::spawn_engine_server(http_state, ([0, 0, 0, 0], port).into()) {
         Ok(()) => println!("[server] control plane on http://0.0.0.0:{port} (LAN-trusted)"),
         Err(e) => eprintln!("[server] NOT started ({e}) — audio unaffected"),
@@ -424,7 +439,12 @@ fn main() {
     if demo {
         run_demo_feeder(tx);
     } else {
-        run_live_midi(tx, Arc::clone(&stats), Arc::clone(&keymap));
+        run_live_midi(
+            tx,
+            Arc::clone(&stats),
+            Arc::clone(&keymap),
+            Arc::clone(&mapping),
+        );
     }
 }
 
@@ -500,17 +520,23 @@ fn run_demo_feeder(tx: mpsc::Sender<TimedEvent>) {
 /// audio thread stays untouched. All notes (keys AND pad-transmitted ones)
 /// flow through one router: mode + active voice decide the destination.
 /// Transport buttons drive the master clock.
-fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>, keymap: Arc<KeymapSlot>) {
-    for m in [default_mapping(), hui_mapping()] {
-        if let Err(e) = m.validate() {
-            eprintln!("internal default mapping invalid: {e}");
-            std::process::exit(1);
-        }
+fn run_live_midi(
+    tx: mpsc::Sender<TimedEvent>,
+    stats: Arc<Stats>,
+    keymap: Arc<KeymapSlot>,
+    mapping: Arc<pocketstage_server::MappingSlot>,
+) {
+    // The slot's loader already fell back to factory defaults on any bad
+    // file; this only catches a bug in the factory maps themselves.
+    let mut maps = mapping.get();
+    if let Err(e) = maps.validate() {
+        eprintln!("internal default mapping invalid: {e}");
+        std::process::exit(1);
     }
-    let mut music = Mapper::new(default_mapping());
-    let mut hui = Mapper::new(hui_mapping());
+    let mut music = Mapper::new(maps.music.clone());
+    let mut hui = Mapper::new(maps.hui.clone());
     // Pad note base: pads are reconstructed as raw notes (unified model).
-    let pad_base = music.mapping().pad_note_base;
+    let mut pad_base = music.mapping().pad_note_base;
 
     let (mtx, mrx) = mpsc::channel::<PumpMessage>();
     // Keep the handle alive for as long as we consume — dropping it shuts the
@@ -537,6 +563,30 @@ fn run_live_midi(tx: mpsc::Sender<TimedEvent>, stats: Arc<Stats>, keymap: Arc<Ke
                 // can orphan its note-off under the new map; accepted +
                 // documented risk (specs/daw-keymap.md).
                 let km = keymap.get();
+                // D37 mapping hot-reload: pointer compare per message (the
+                // mutex is main-thread only); on change, flush any
+                // half-resolved shared-button tap as real fader data — the
+                // mapper's ONLY cross-message state — then rebuild. A
+                // remapped pad window mid-hold can orphan one note-off,
+                // same accepted + documented risk class as a keymap remap.
+                let fresh = mapping.get();
+                if !Arc::ptr_eq(&fresh, &maps) {
+                    // Flush half-resolved taps as real fader data before
+                    // the old mappers are dropped (D37).
+                    for a in music.flush_pending().into_iter().chain(hui.flush_pending()) {
+                        if let Action::Fader { index, value } = a {
+                            send_event(&tx, m.received, Event::MixFader { index, value });
+                        }
+                    }
+                    maps = fresh;
+                    music = Mapper::new(maps.music.clone());
+                    hui = Mapper::new(maps.hui.clone());
+                    pad_base = maps.music.pad_note_base;
+                    println!(
+                        "[mapping] hot-reloaded (v{}) — mappers rebuilt",
+                        mapping.version()
+                    );
+                }
                 let kport = if m.port.ends_with(",1") {
                     KeymapPort::Hui
                 } else {

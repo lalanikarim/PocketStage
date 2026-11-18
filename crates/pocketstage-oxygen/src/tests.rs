@@ -731,3 +731,66 @@ fn mapping_rejects_out_of_range_sustain_cc() {
     m.sustain_cc = 64;
     assert!(m.validate().is_ok());
 }
+
+// ---- MappingPair (phase 5, D29/D37) + mapper flush ------------------------
+
+#[test]
+fn mapping_pair_round_trips_and_defaults_per_section() {
+    let d = MappingPair::default();
+    assert_eq!(d.music, default_mapping());
+    assert_eq!(d.hui, hui_mapping());
+    let back = MappingPair::from_json_str(&d.to_json_string()).expect("re-parse");
+    assert_eq!(d, back);
+    assert!(d.validate().is_ok());
+
+    // One section only: the other stays its factory default.
+    let partial = MappingPair::from_json_str(r#"{"music": {"control_channel": 14}}"#);
+    assert!(partial.is_err(), "a section needs ALL Mapping fields");
+
+    // Empty file is defined as defaults (loader convention).
+    assert_eq!(MappingPair::from_json_str("   ").unwrap(), d);
+
+    // Unknown top-level or section field rejected.
+    assert!(MappingPair::from_json_str(r#"{"musiq": {}}"#).is_err());
+    assert!(
+        MappingPair::from_json_str(r#"{"music": {"control_channel": 13, "pad_base": 36}}"#)
+            .is_err()
+    );
+}
+
+#[test]
+fn mapping_pair_validation_is_section_prefixed() {
+    let mut p = MappingPair::default();
+    p.music.control_channel = 0; // invalid: must be 1..=16
+    assert!(p.validate().unwrap_err().starts_with("music:"));
+    p.music = default_mapping();
+    p.hui.keys_channel = 99;
+    assert!(p.validate().unwrap_err().starts_with("hui:"));
+}
+
+#[test]
+fn flush_pending_releases_a_held_tap_as_fader_data() {
+    let mut m = std_mapper();
+    // Nothing pending → nothing flushed.
+    assert!(m.flush_pending().is_empty());
+    // Arm the shared-button detector (fader 9, CC41 value 127).
+    let armed = map(
+        &mut m,
+        Event::ControlChange {
+            channel: 12,
+            control: 41,
+            value: 127,
+        },
+    );
+    assert!(armed.is_empty(), "tap stays pending: no action yet");
+    // A mapping hot-reload rebuilds the mapper — flush emits the held 127
+    // exactly like the next non-tap event would have.
+    assert_eq!(
+        m.flush_pending(),
+        vec![Action::Fader {
+            index: 9,
+            value: 127
+        }]
+    );
+    assert!(m.flush_pending().is_empty(), "flush is one-shot");
+}

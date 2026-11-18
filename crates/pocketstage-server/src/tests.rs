@@ -1363,21 +1363,74 @@ async fn overlay_routes_forward_exact_targets() {
     cleanup(&path);
 }
 
-// ------------------------------------------------- device mapping (read-only)
+// ---------------------------------------------------- device mapping (D37)
+
+use crate::MappingSlot;
+use pocketstage_oxygen::{MappingPair, default_mapping};
+
+fn map_temp(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("ps-server-test-{name}-{}.json", std::process::id()))
+}
+
+#[test]
+fn mapping_slot_missing_file_is_factory_defaults() {
+    let path = map_temp("missing");
+    let _ = std::fs::remove_file(&path);
+    let slot = MappingSlot::open(&path);
+    assert_eq!(*slot.get(), MappingPair::default());
+}
+
+#[test]
+fn mapping_slot_corrupt_file_falls_back_to_defaults() {
+    let path = map_temp("corrupt");
+    std::fs::write(&path, "{ not json").unwrap();
+    let slot = MappingSlot::open(&path);
+    assert_eq!(*slot.get(), MappingPair::default());
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn mapping_slot_replace_persists_and_reloads() {
+    let path = map_temp("replace");
+    let _ = std::fs::remove_file(&path);
+    let slot = MappingSlot::open(&path);
+    let mut next = MappingPair::default();
+    next.music.control_channel = 14;
+    slot.replace(next.clone()).expect("valid replace");
+    assert_eq!(slot.get().music.control_channel, 14);
+    // Disk agrees, and a fresh open reloads it (the file is the truth).
+    let reloaded = MappingSlot::open(&path);
+    assert_eq!(*reloaded.get(), next);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn mapping_slot_invalid_replace_changes_nothing() {
+    let path = map_temp("invalid");
+    let _ = std::fs::remove_file(&path);
+    let slot = MappingSlot::open(&path);
+    let mut bad = MappingPair::default();
+    bad.music.control_channel = 0; // fails validate (1..=16)
+    assert!(slot.replace(bad).is_err());
+    assert_eq!(*slot.get(), MappingPair::default());
+    assert!(!path.exists(), "rejected replace never wrote the file");
+}
 
 #[tokio::test]
-async fn mapping_endpoint_is_read_only_view() {
-    let path = temp_path("mapping-get");
-    cleanup(&path);
-    let state = AppState::standalone(std::sync::Arc::new(
-        ProjectStore::open_or_default(&path).unwrap(),
-    ))
-    .with_device_mappings(
-        pocketstage_oxygen::default_mapping(),
-        pocketstage_oxygen::hui_mapping(),
+async fn mapping_http_round_trip_rejection_and_reset() {
+    let proj = temp_path("mapping-http-app");
+    let path = map_temp("http");
+    let _ = std::fs::remove_file(&path);
+    let app = router(
+        AppState::standalone(std::sync::Arc::new(
+            ProjectStore::open_or_default(&proj).unwrap(),
+        ))
+        .with_mapping_slot(std::sync::Arc::new(MappingSlot::open(&path))),
     );
+
+    // GET: factory ground truth + editable + defaults for diffing.
     let (status, body) = call(
-        router(state),
+        app.clone(),
         Request::builder()
             .uri("/api/mapping")
             .body(Body::empty())
@@ -1386,17 +1439,80 @@ async fn mapping_endpoint_is_read_only_view() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(v["editable"], serde_json::json!(false));
-    // The measured factory map is what comes back (T1 ground truth).
+    assert_eq!(v["editable"], serde_json::json!(true));
     assert_eq!(v["music"]["pad_note_base"], serde_json::json!(36));
     assert_eq!(v["music"]["mode_daw_cc"], serde_json::json!(113));
-    // HUI view carries the transport notes the music view lacks.
     assert!(v["music"]["transport_notes"].is_null());
     assert!(v["hui"]["transport_notes"].is_object());
+    assert!(v["defaults"]["music"].is_object());
 
-    // No mappings published → 503 (standalone default).
+    // PUT a legal edit (control channel 13 → 14) → 204, live and on disk.
+    let mut edited = MappingPair::default();
+    edited.music.control_channel = 14;
     let (status, _) = call(
-        router(test_state(&path)),
+        app.clone(),
+        Request::builder()
+            .method("PUT")
+            .uri("/api/mapping")
+            .header("content-type", "application/json")
+            .body(Body::from(edited.to_json_string()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let slot = MappingSlot::open(&path);
+    assert_eq!(slot.get().music.control_channel, 14);
+
+    // PUT garbage → 400, current state untouched.
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("PUT")
+            .uri("/api/mapping")
+            .header("content-type", "application/json")
+            .body(Body::from("{ nope"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // PUT syntactically fine but invalid semantically → 400 too.
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("PUT")
+            .uri("/api/mapping")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"music": {"control_channel": 0}}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let slot = MappingSlot::open(&path);
+    assert_eq!(
+        slot.get().music.control_channel,
+        14,
+        "rejections change nothing"
+    );
+
+    // Reset → factory defaults, written like any PUT.
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/api/mapping/reset")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(default_mapping().control_channel, 13);
+    let slot = MappingSlot::open(&path);
+    assert_eq!(*slot.get(), MappingPair::default());
+
+    // No slot (plain standalone) → 503.
+    let (status, _) = call(
+        router(test_state(&proj)),
         Request::builder()
             .uri("/api/mapping")
             .body(Body::empty())
@@ -1404,7 +1520,8 @@ async fn mapping_endpoint_is_read_only_view() {
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    cleanup(&path);
+    let _ = std::fs::remove_file(&path);
+    cleanup(&proj);
 }
 
 // ------------------------------------------------------------ take delete

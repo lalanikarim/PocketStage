@@ -87,6 +87,19 @@ impl Mapper {
         &self.m
     }
 
+    /// End any unresolved tap-detector sequence: the held 127 flushes out as
+    /// real fader data — exactly what the next non-tap event would have
+    /// done. The feeder calls this when a hot-reloaded [`Mapping`] rebuilds
+    /// a Mapper, so a half-resolved button tap can never strand a fader at
+    /// 127 under the new map (D37: the mapper's ONLY cross-message state).
+    pub fn flush_pending(&mut self) -> Vec<Action> {
+        self.pending_tap
+            .take()
+            .into_iter()
+            .map(|index| Action::Fader { index, value: 127 })
+            .collect()
+    }
+
     /// Event channel is 0-based; mapping channels are 1-based.
     fn on_channel(ev_ch0: u8, map_ch1: u8) -> bool {
         ev_ch0.saturating_add(1) == map_ch1
