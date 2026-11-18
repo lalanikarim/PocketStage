@@ -9,6 +9,8 @@
 //! are explicit. JSON on disk (human-diffable; msgpack can be an *additional*
 //! option later, per "open & hackable" differentiator).
 
+pub mod catalog;
+
 use serde::{Deserialize, Serialize};
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -694,6 +696,10 @@ pub enum RecordedEvent {
         program: u8,
     },
 }
+
+pub use catalog::{
+    Catalog, FontInfo, PERCUSSION_BANK, PatchInfo, PatchRequest, Resolution, plan_font_loads,
+};
 
 mod demo;
 

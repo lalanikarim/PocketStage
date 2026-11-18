@@ -1,11 +1,11 @@
 # Patch catalog — soundfont sets, patch references, voice picker (plan)
 
-**Status: IN PROGRESS — phase A SHIPPED (session 13), phases B–F planned.**
-Decisions from session 12 chat folded in; decision slot D27 reserved. Backlog
-items: 18 (voice picker) ✅ closed by phase A, 19 (soundfont sets) open.
-Discuss-phase done; open questions narrowed to Q-R1..Q-R3 (residuals,
-non-blocking for phase B). Not the immediate next task — §6 item 15 goes first
-(HANDOFF §9), then this resumes at phase B.
+**Status: IN PROGRESS — phases A + B SHIPPED (sessions 13, 18), phases C–F
+planned.**
+Decisions from session 12 chat folded in; D27 ruled + recorded (phase B, s18).
+Backlog items: 18 (voice picker) ✅ closed by phase A, 19 (soundfont sets)
+open until phases C–D. Residual open questions Q-R1/Q-R2 remain non-blocking
+(Q-R3 answered in phase B). Next up: phase C — resumes here per HANDOFF §9.
 
 ## Goal
 
@@ -109,7 +109,7 @@ back to) with a message that names the exact expected path.
 | Phase | Deliverable | Notes / test-first |
 |---|---|---|
 | **A** ✅ (s13) | Voice picker UI + `POST /api/voice` (GM-only) | item 18 shipped. Shipped BETTER than planned: instead of the intended "full 128-name table", labels come from the loaded font — boot-time `Synth::preset_list` FFI iteration (main thread, pre-audio; symbols `fluid_preset_get_num`/`_get_banknum`) → immutable catalog on AppState → `GET /api/presets`. A hand-typed GM table was tried first and mislabelled most programs (session-13 post-mortem) — do not reintroduce static name tables. Phase B inherits: preset-iteration FFI already exists. |
-| **B** | Catalog core: FFI additions, scan dir + eager load, preset iteration, `GET /api/patches`, `has_percussion` flags | fake-backend harness can't cover FFI — pure catalog-shape logic (dedup, naming, fallback resolution fn) unit-tested; thin FFI walk verified by device smoke |
+| **B** ✅ (s18) | Catalog core: FFI additions, scan dir + eager load, preset iteration, `GET /api/patches`, `has_percussion` flags | Shipped as planned. Pure logic lives in `pocketstage-model/src/catalog.rs` (`Catalog`/`PatchInfo`/`FontInfo`/`Resolution` + `plan_font_loads` budget planner; 8 unit tests: dedup keeps first, bank>128/program>127 dropped, every fallback rung, kit chain, budget skip-with-reason). FFI gained only `fluid_sfont_get_name`. **Finding:** on FluidSynth 2.3.4 the internal sfont name IS the load-path (`/usr/share/sounds/sf2/FluidR3_GM.sf2`), so Q-R3 collisions are near-impossible for distinct files — the last-load-wins warning stays as belt-and-braces. Scan dir `POCKETSTAGE_SFONT_DIR` (default `~/.pocketstage/soundfonts`), budget `POCKETSTAGE_SFONT_BUDGET_MB`, default font exempt + path-overridable via `POCKETSTAGE_SOUNDFONT`; corrupt file → visible skipped entry, boot never dies (device-smoke proven: corrupt skip + 141 MB second font loaded). Catalog lives outside the project format — `SCHEMA_VERSION` untouched. |
 | **C** | Patch references: `PatchRef` in model (+variants above), boot/swap/select via `program_select_by_sfont_name`, full fallback chain + `/ws` warning badge | resolution logic as a pure function over `Catalog` — table-driven CI tests incl. every fallback rung |
 | **D** | Patch browser UI: grouped/searchable list, **audition on ch 7** (`POST /api/preview`), voice picker fed from catalog; track instrument pickers | item 19 closes |
 | **E** | `POST /api/soundfonts/rescan` (diff by name; removed fonts STAY loaded until reboot — safe rule) + keymap `voices[]` → patch refs (this patch-catalog phase feeds the D26 keymap's `voice` field via Addition A's externally-tagged enum) | rescan during playback = add-only semantics |
@@ -123,10 +123,11 @@ back to) with a message that names the exact expected path.
 - **Q-R2**: when a track's patch is unresolved, does MIX overlay still
   work on its channel? (It should — CCs are font-independent; confirm in
   phase C tests.)
-- **Q-R3**: catalog name collisions — two files with the same internal
-  name? `fluid_synth_get_sfont_by_name` ambiguity: key catalog by FILE
-  path, display file stem; document that internal names must be unique or
-  last-load wins (FluidSynth semantics).
+- **Q-R3** (answered in phase B): on FluidSynth 2.3.4 the internal sfont
+  name IS the load-time file path, so distinct files cannot collide; the
+  catalog keeps that name and boot still warns if a name repeats (a font
+  loaded twice by identical path is filtered — canonical-path compare).
+  Last-load-wins remains FluidSynth's documented fallback semantics.
 
 ## Capacity model (voices ≠ soundfonts)
 

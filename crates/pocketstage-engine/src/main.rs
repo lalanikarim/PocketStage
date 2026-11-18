@@ -115,16 +115,27 @@ fn main() {
     // fx_reverb / fx_chorus knobs (levels); unset = touch nothing.
     let synth = ffi::Synth::new(&settings).expect("new_fluid_synth returned null");
 
-    let sfont_id = match synth.load_soundfont(SF2_PATH) {
+    // ---- default soundfont (D27 boot invariant): loads unconditionally
+    // BEFORE project/keymap are read. If THIS is missing, boot aborts —
+    // there is nothing sane to fall back to — naming the exact path.
+    let default_sfont_path =
+        std::env::var("POCKETSTAGE_SOUNDFONT").unwrap_or_else(|_| SF2_PATH.to_string());
+    let sfont_id = match synth.load_soundfont(&default_sfont_path) {
         Ok(id) => {
-            println!("[init] soundfont loaded (id {id}): {SF2_PATH}");
+            println!("[init] default soundfont loaded (id {id}): {default_sfont_path}");
             id
         }
         Err(e) => {
             eprintln!("[init] {e}");
+            eprintln!(
+                "[init] no default soundfont — nothing to fall back to. Expected at \x1b[1m{default_sfont_path}\x1b[0m\n       (override with POCKETSTAGE_SOUNDFONT; apt package: fluid-soundfont-gm)"
+            );
             std::process::exit(1);
         }
     };
+    let default_font_name = synth
+        .sfont_name(sfont_id)
+        .unwrap_or_else(|| "default".to_string());
     // Preset catalog for the web voice dropdown — read from the FONT, not a
     // hardcoded table. Must happen here on the main thread: FluidSynth's
     // iteration is not thread-safe and the synth moves to ps-audio next.
@@ -137,7 +148,113 @@ fn main() {
             name,
         })
         .collect();
-    println!("[init] preset catalog: {} entries", presets.len());
+    println!(
+        "[init] preset catalog: {} entries (font \"{default_font_name}\")",
+        presets.len()
+    );
+
+    // ---- soundfont scan dir (D27 phase B): eager-load extras at boot -------
+    // ~/.pocketstage/soundfonts (override POCKETSTAGE_SFONT_DIR), *.sf2/*.sf3
+    // sorted by path. Every failure is a VISIBLE catalog entry, never a dead
+    // boot (the default font already succeeded). RAM budget guard:
+    // POCKETSTAGE_SFONT_BUDGET_MB caps scan-dir fonts only — the default
+    // font + GM kit are exempt on every tier.
+    let mut catalog = pocketstage_model::Catalog::build(vec![(
+        default_font_name.clone(),
+        default_sfont_path.clone(),
+        synth.preset_list(sfont_id),
+    )]);
+    {
+        use std::path::PathBuf;
+        let scan_dir = std::env::var("POCKETSTAGE_SFONT_DIR").unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            format!("{home}/.pocketstage/soundfonts")
+        });
+        let budget_bytes: Option<u64> = std::env::var("POCKETSTAGE_SFONT_BUDGET_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|m| *m > 0)
+            .map(|m| m * 1_048_576);
+        let is_sfont = |p: &PathBuf| {
+            p.extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| ["sf2", "sf3"].contains(&x.to_ascii_lowercase().as_str()))
+        };
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&scan_dir)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_file() && is_sfont(p))
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort();
+        let default_canon = std::fs::canonicalize(&default_sfont_path).ok();
+        let mut sized: Vec<(String, u64)> = Vec::new();
+        for p in &files {
+            // Never load the default font twice (dir-drop of FluidR3 is a
+            // classic first user move).
+            if default_canon.is_some()
+                && std::fs::canonicalize(p)
+                    .ok()
+                    .is_some_and(|c| Some(c) == default_canon)
+            {
+                continue;
+            }
+            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            sized.push((p.display().to_string(), size));
+        }
+        let plan = pocketstage_model::plan_font_loads(&sized, budget_bytes);
+        let mut extra_resident = 0u64;
+        for ((path, size), (_, load, reason)) in sized.iter().zip(plan) {
+            let stem = PathBuf::from(path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("font")
+                .to_string();
+            if !load {
+                let reason = reason.clone().unwrap_or_else(|| "skipped".into());
+                println!("[init] sfont NOT loaded ({reason}): {path}");
+                catalog.push_skipped(stem, path.clone(), reason);
+                continue;
+            }
+            match synth.load_soundfont(path) {
+                Ok(id) => {
+                    let name = synth.sfont_name(id).unwrap_or_else(|| stem.clone());
+                    if catalog.has_font(&name) {
+                        // Q-R3: by-name selection resolves to the LAST
+                        // loaded font — say so instead of debugging ghosts.
+                        eprintln!(
+                            "[init] WARNING: internal sfont name \"{name}\" already loaded — FluidSynth resolves it to {path} (last load wins)"
+                        );
+                    }
+                    let n = synth.preset_list(id);
+                    println!(
+                        "[init] sfont loaded (id {id}, {} MB, {} presets): {path} as \"{name}\"",
+                        size / 1_048_576,
+                        n.len()
+                    );
+                    extra_resident += *size;
+                    catalog.add_font(name, path.clone(), n);
+                }
+                Err(e) => {
+                    eprintln!("[init] WARNING: {e} — continuing without it");
+                    catalog.push_skipped(stem, path.clone(), "load failed (corrupt?)".into());
+                }
+            }
+        }
+        println!(
+            "[init] patch catalog: {} fonts, {} patches (+{} MB over default){}",
+            catalog.fonts.iter().filter(|f| f.skipped.is_none()).count(),
+            catalog.patches.len(),
+            extra_resident / 1_048_576,
+            if files.is_empty() {
+                format!(" — scan dir empty: {scan_dir}")
+            } else {
+                String::new()
+            },
+        );
+    }
     // Pads + metronome live on channels 8..=15; make them percussion. Note:
     // set_channel_type alone does NOT re-resolve the channel's preset — the
     // bank_select + program_change pair is what actually lands them on the
@@ -273,6 +390,7 @@ fn main() {
     let http_state =
         AppState::embedded(Arc::clone(&store), ctx, Arc::clone(&live), take_rx, edit_rx)
             .with_presets(presets)
+            .with_patches(catalog)
             .with_keymap(Arc::clone(&keymap))
             .with_mapping_slot(Arc::clone(&mapping));
     match pocketstage_server::spawn_engine_server(http_state, ([0, 0, 0, 0], port).into()) {

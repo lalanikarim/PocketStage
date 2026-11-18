@@ -67,6 +67,9 @@ unsafe extern "C" {
     // `get_num`, bank is `get_banknum` — NOT the newer get_program/get_bank.
     pub fn fluid_preset_get_num(preset: *mut fluid_preset_t) -> c_int;
     pub fn fluid_preset_get_banknum(preset: *mut fluid_preset_t) -> c_int;
+    // Internal font name (D27 phase B): the handle FluidSynth uses for
+    // program_select_by_sfont_name — stable across boots, unlike sfont ids.
+    pub fn fluid_sfont_get_name(sfont: *mut fluid_sfont_t) -> *const c_char;
     pub fn fluid_synth_all_sounds_off(synth: *mut fluid_synth_t, chan: c_int) -> c_int;
     pub fn fluid_synth_set_channel_type(
         synth: *mut fluid_synth_t,
@@ -169,6 +172,24 @@ impl Synth {
         } else {
             Ok(id)
         }
+    }
+
+    /// Internal name of a loaded soundfont (None if the id is unknown).
+    /// Boot-time only, same thread-safety story as [`Self::preset_list`].
+    pub fn sfont_name(&self, sfont_id: i32) -> Option<String> {
+        let sfont = unsafe { fluid_synth_get_sfont_by_id(self.0, sfont_id) };
+        if sfont.is_null() {
+            return None;
+        }
+        let p = unsafe { fluid_sfont_get_name(sfont) };
+        if p.is_null() {
+            return None;
+        }
+        Some(
+            unsafe { std::ffi::CStr::from_ptr(p) }
+                .to_string_lossy()
+                .into_owned(),
+        )
     }
 
     /// Enumerate the presets of a loaded soundfont as `(bank, program, name)`

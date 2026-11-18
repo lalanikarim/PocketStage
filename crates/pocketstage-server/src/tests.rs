@@ -543,6 +543,51 @@ async fn presets_route_serves_catalog() {
 }
 
 #[tokio::test]
+async fn patches_route_serves_full_catalog() {
+    let path = temp_path("patches-app");
+    cleanup(&path);
+    // Standalone default: empty but well-formed catalog.
+    let (status, body) = call(
+        router(test_state(&path)),
+        Request::builder()
+            .uri("/api/patches")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v["fonts"].as_array().unwrap().is_empty());
+    assert!(v["patches"].as_array().unwrap().is_empty());
+
+    // Built catalog + a visible skipped font (D27 rule: failures are shown,
+    // never swallowed).
+    let mut cat = pocketstage_model::Catalog::build(vec![(
+        "TestFont".into(),
+        "/f/t.sf2".into(),
+        vec![(0, 1, "Piano".into()), (128, 0, "Kit".into())],
+    )]);
+    cat.push_skipped("broken".into(), "/f/broken.sf2".into(), "corrupt".into());
+    let (_, body) = call(
+        router(test_state(&path).with_patches(cat)),
+        Request::builder()
+            .uri("/api/patches")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["fonts"].as_array().unwrap().len(), 2);
+    assert_eq!(v["fonts"][0]["has_percussion"], serde_json::json!(true));
+    assert_eq!(v["fonts"][1]["skipped"], serde_json::json!("corrupt"));
+    let patches = v["patches"].as_array().unwrap();
+    assert_eq!(patches.len(), 2);
+    assert_eq!(patches[0]["sfont"], serde_json::json!("TestFont"));
+    assert_eq!(patches[1]["bank"], serde_json::json!(128));
+    cleanup(&path);
+}
+
+#[tokio::test]
 async fn voice_route_forwards_select_voice() {
     let path = temp_path("voice");
     cleanup(&path);

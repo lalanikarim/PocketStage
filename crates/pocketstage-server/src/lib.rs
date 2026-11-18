@@ -21,6 +21,7 @@
 //!   `/api/takes/rename`
 //! - `GET  /api/presets` — preset catalog read from the LOADED soundfont
 //!   (labels must never be hand-typed)
+//! - `GET  /api/patches` — full multi-font patch catalog (D27 phase B)
 //! - `GET  /api/projects`, `POST /api/projects/{save_as,load,delete}`,
 //!   `GET /api/projects/raw` — project library
 //! - `GET/PUT /api/keymap` + `POST /api/keymap/reset` — D26 keymap file
@@ -446,6 +447,11 @@ pub struct AppState {
     /// immutable afterwards. Served by `GET /api/presets` so the web UI's
     /// voice dropdown is labelled by the FONT, not a hardcoded table.
     pub presets: Arc<Vec<PresetInfo>>,
+    /// Full patch catalog across ALL loaded soundfonts (D27 phase B): built
+    /// at boot on the main thread from a FluidSynth FFI walk, immutable
+    /// afterwards (phase E replaces the whole Arc on rescan). Served by
+    /// `GET /api/patches`; names are font-provided, never hand-typed.
+    pub patches: Arc<pocketstage_model::Catalog>,
     /// Finalized takes streamed out of the audio thread (engine → server).
     /// Drained by [`AppState::drain_takes`] on a timer; each one is appended
     /// to the stored project, so recordings survive reboot.
@@ -476,6 +482,7 @@ impl AppState {
             engine: None,
             live: Arc::new(LiveStatus::default()),
             presets: Default::default(),
+            patches: Default::default(),
             take_feed: None,
             edit_feed: None,
             keymap: None,
@@ -504,6 +511,13 @@ impl AppState {
         self
     }
 
+    /// Attach the full multi-font patch catalog (D27 phase B; engine calls
+    /// this once at boot, after loading every soundfont).
+    pub fn with_patches(mut self, catalog: pocketstage_model::Catalog) -> Self {
+        self.patches = Arc::new(catalog);
+        self
+    }
+
     /// Embedded state: full duplex with the audio thread (commands out on
     /// `engine`, finalized takes in on `take_feed`, engine-side project edits
     /// in on `edit_feed`; `live` levels are written by the audio thread and
@@ -520,6 +534,7 @@ impl AppState {
             engine: Some(engine),
             live,
             presets: Default::default(),
+            patches: Default::default(),
             take_feed: Some(Arc::new(Mutex::new(take_feed))),
             edit_feed: Some(Arc::new(Mutex::new(edit_feed))),
             keymap: None,
@@ -636,6 +651,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/scene/{n}", post(launch_scene))
         .route("/api/voice", post(set_voice))
         .route("/api/presets", get(list_presets))
+        .route("/api/patches", get(list_patches))
         // Browsers that skip the <link> tag still probe /favicon.ico.
         .route("/favicon.ico", get(favicon))
         .route("/api/projects", get(list_projects))
@@ -832,6 +848,13 @@ async fn launch_scene(
 /// mode — the UI then falls back to bare `gm N` labels).
 async fn list_presets(State(state): State<AppState>) -> Json<Vec<PresetInfo>> {
     Json((*state.presets).clone())
+}
+
+/// Full multi-font catalog (D27 phase B): fonts (incl. failed/skipped loads
+/// with their reasons) + every patch `{sfont,bank,program,name}`. Pure
+/// read of boot-time data — no engine round-trip.
+async fn list_patches(State(state): State<AppState>) -> Json<pocketstage_model::Catalog> {
+    Json((*state.patches).clone())
 }
 async fn set_voice(
     State(state): State<AppState>,
