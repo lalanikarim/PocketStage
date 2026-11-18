@@ -709,6 +709,133 @@ async fn voice_route_accepts_preset_refs_and_gates_ranges() {
     cleanup(&path);
 }
 
+#[tokio::test]
+async fn preview_route_is_exact_match_only_and_forwards() {
+    let path = temp_path("preview");
+    cleanup(&path);
+    let (tx, rx) = std::sync::mpsc::channel::<EngineCommand>();
+    let (_ptx, prx) = std::sync::mpsc::channel::<pocketstage_model::Take>();
+    let (_etx, erx) = std::sync::mpsc::channel::<ProjectFile>();
+    let mut cat = pocketstage_model::Catalog::build(vec![(
+        "TestFont".into(),
+        "/f/t.sf2".into(),
+        vec![(0, 5, "Bell".into()), (128, 0, "Kit".into())],
+    )]);
+    cat.push_skipped("broken".into(), "/f/b.sf2".into(), "corrupt".into());
+    let state = AppState::embedded(
+        std::sync::Arc::new(ProjectStore::open_or_default(&path).unwrap()),
+        tx,
+        std::sync::Arc::new(crate::LiveStatus::default()),
+        prx,
+        erx,
+    )
+    .with_patches(Arc::new(cat));
+    let app = router(state);
+
+    // Exact hit → 202 + command with defaults filled (note 60, vel 100).
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .header("content-type", "application/json")
+            .uri("/api/preview")
+            .body(Body::from(r#"{"sfont":"TestFont","bank":0,"program":5}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    match rx.try_recv() {
+        Ok(EngineCommand::PreviewPatch {
+            sfont,
+            bank,
+            program,
+            note,
+            vel,
+        }) => {
+            assert_eq!(
+                (sfont.as_str(), bank, program, note, vel),
+                ("TestFont", 0, 5, 60, 100)
+            );
+        }
+        other => panic!("expected PreviewPatch, got {other:?}"),
+    }
+
+    // Not in the catalog → 404, nothing reaches the engine. Audition is
+    // exact-match by design: a fallback would misrepresent the sound.
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .header("content-type", "application/json")
+            .uri("/api/preview")
+            .body(Body::from(r#"{"sfont":"Ghost","program":5}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // Skipped fonts carry no patches — previewing from one is also a 404.
+    let (status, _) = call(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .header("content-type", "application/json")
+            .uri("/api/preview")
+            .body(Body::from(r#"{"sfont":"broken","program":5}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // Out of range → 400.
+    let (status, _) = call(
+        app,
+        Request::builder()
+            .method("POST")
+            .header("content-type", "application/json")
+            .uri("/api/preview")
+            .body(Body::from(r#"{"sfont":"TestFont","program":200}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(rx.try_recv().is_err());
+    cleanup(&path);
+}
+
+#[tokio::test]
+async fn health_publishes_the_default_font() {
+    let path = temp_path("deffont");
+    cleanup(&path);
+    let plain = router(test_state(&path));
+    let (_status, body) = call(
+        plain,
+        Request::builder()
+            .uri("/api/health")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    // No engine attached one (standalone): the key exists and is null, so the
+    // UI never has to guess whether it is missing or just unknown.
+    assert!(body.contains("\"default_font\":null"), "got {body}");
+
+    let with = router(test_state(&path).with_default_font("/usr/share/sounds/sf2/X.sf2"));
+    let (_status, body) = call(
+        with,
+        Request::builder()
+            .uri("/api/health")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    // The patch browser compares this against catalog font names (which ARE
+    // the load path on FluidSynth 2.3.x) to mark the default font.
+    assert!(
+        body.contains("\"default_font\":\"/usr/share/sounds/sf2/X.sf2\""),
+        "got {body}"
+    );
+    cleanup(&path);
+}
+
 #[test]
 fn drain_takes_appends_to_stored_project() {
     let path = temp_path("drain");

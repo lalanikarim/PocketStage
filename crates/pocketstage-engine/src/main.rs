@@ -395,6 +395,7 @@ fn main() {
         AppState::embedded(Arc::clone(&store), ctx, Arc::clone(&live), take_rx, edit_rx)
             .with_presets(presets)
             .with_patches(Arc::clone(&catalog))
+            .with_default_font(default_font_name.clone())
             .with_keymap(Arc::clone(&keymap))
             .with_mapping_slot(Arc::clone(&mapping));
     match pocketstage_server::spawn_engine_server(http_state, ([0, 0, 0, 0], port).into()) {

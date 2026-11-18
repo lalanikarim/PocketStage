@@ -40,6 +40,15 @@ pub const WRITE_THROUGH_QUIET_SAMPLES: u64 = RATE as u64 / 2;
 
 /// Keys play track 1's voice (D3: track N → internal channel N).
 pub const LEAD_CH: i32 = 0;
+/// D27 phase D: audition channel. The spec reserved ch 7 for preview; with
+/// the D31 8-track budget that is also track 8's channel — accepted: a
+/// preview only ever lands when the user clicks ▶ in the patch browser,
+/// and the next swap/scene-launch re-programs track 8 from the project.
+/// Nothing else may use it, and preview NEVER writes the project.
+pub const PREVIEW_CH: i32 = 7;
+/// Fixed audition gate (Q-R1): 0.5 s at 48 kHz, engine-side note-off. No
+/// stop endpoint until someone is annoyed enough to ask for one.
+pub const PREVIEW_GATE_SAMPLES: u64 = 24_000;
 /// D36: normalized starting point for a RELATIVE knob move onto a field that
 /// is `None` (soundfont-default). Sends/FX have no readable current value,
 /// so the first tick begins from mid-scale — documented, deterministic, and
@@ -299,6 +308,17 @@ pub enum Event {
     /// `LiveStatus::active_voice` for the feeder + WS.
     SelectVoice {
         voice: ActiveVoice,
+    },
+    /// D27 phase D: audition a catalog patch on [`PREVIEW_CH`] for a fixed
+    /// gate. Exact-match only (the HTTP layer already 404s unknown refs — a
+    /// preview falling back to another instrument would make the browser
+    /// lie). Project state is never touched.
+    PreviewPatch {
+        sfont: String,
+        bank: u8,
+        program: u8,
+        note: u8,
+        vel: u8,
     },
     /// D23: bank-1 pad while SEQ is on — toggle step `step` (1–8) of the
     /// current window on the selected track of the active scene.
@@ -618,6 +638,9 @@ pub struct EngineCore {
     /// Per-(channel, key) chatter state — flat array, no allocation on the
     /// audio thread.
     key_guard: [[KeyGuard; 128]; 16],
+    /// D27 phase D: pending audition release — (note, sample to stop at).
+    /// One slot, latest wins: a new preview cuts the previous one short.
+    preview: Option<(i32, u64)>,
     /// Last damper state as *we* left it on the synth. Needed only to re-arm a
     /// physically-held pedal after a kill path (`kill_lead`) drops it to clear
     /// sustained notes; the release always arrives, so it cannot drift.
@@ -673,6 +696,7 @@ impl EngineCore {
             edit_feed,
             edit_pending_at: None,
             key_guard: [[KEY_UP; 128]; 16],
+            preview: None,
             sustain_down: false,
             left: vec![0.0; PERIOD_FRAMES],
             right: vec![0.0; PERIOD_FRAMES],
@@ -906,6 +930,21 @@ impl EngineCore {
                 EngineCommand::SelectVoice(v) => {
                     remote_ev.push_back(TimedEvent::now(Event::SelectVoice { voice: v }));
                 }
+                EngineCommand::PreviewPatch {
+                    sfont,
+                    bank,
+                    program,
+                    note,
+                    vel,
+                } => {
+                    remote_ev.push_back(TimedEvent::now(Event::PreviewPatch {
+                        sfont,
+                        bank,
+                        program,
+                        note,
+                        vel,
+                    }));
+                }
                 EngineCommand::RenameTake { from, to } => self.rename_take(&from, &to),
                 EngineCommand::DeleteTake { name } => self.delete_take(&name),
                 EngineCommand::SetOverlay(t) => {
@@ -947,6 +986,14 @@ impl EngineCore {
         let busy = t0.elapsed().as_nanos() as u64;
 
         self.total_samples += PERIOD_FRAMES as u64;
+        // Fixed audition gate (D27 phase D): release the preview note when
+        // its 0.5 s is up. Cheap Option check per cycle, never allocates.
+        if let Some((note, off_at)) = self.preview
+            && self.total_samples >= off_at
+        {
+            synth.note_off(PREVIEW_CH, note);
+            self.preview = None;
+        }
         self.maybe_write_through();
         self.cycles += 1;
         self.stats.cycles.fetch_add(1, Ordering::Relaxed);
@@ -1231,6 +1278,28 @@ impl EngineCore {
                     all.truncate(8);
                 }
                 self.mark_project_edit();
+            }
+            Event::PreviewPatch {
+                sfont,
+                bank,
+                program,
+                note,
+                vel,
+            } => {
+                // Exact match ONLY: an audition that silently substitutes is
+                // worse than silence (the browser would lie about the sound).
+                // The HTTP layer already 404s unknown refs; this is the D20
+                // second gate. No badge, no project write — preview leaves
+                // zero state behind except one pending note-off.
+                if self.catalog.find(&sfont, bank, program).is_none() {
+                    return;
+                }
+                if let Some((old, _)) = self.preview {
+                    synth.note_off(PREVIEW_CH, old);
+                }
+                synth.select_patch(PREVIEW_CH, &sfont, bank as i32, program as i32);
+                synth.note_on(PREVIEW_CH, note as i32, vel as i32);
+                self.preview = Some((note as i32, self.total_samples + PREVIEW_GATE_SAMPLES));
             }
             Event::ToggleMixOverlay => {
                 // D21: exclusive — entering MIX exits SEQ; re-press exits.
@@ -4058,6 +4127,90 @@ mod harness_tests {
         let notes = patch_notes(&h);
         assert_eq!(notes.len(), 1);
         assert!(notes[0].contains("no percussion"), "got {notes:?}");
+    }
+
+    // ------------------------------------- D27 phase D: preview channel
+
+    #[test]
+    fn preview_exact_notes_on_ch7_and_gates_off() {
+        let mut h = Harness::new();
+        h.set_catalog(patch_catalog());
+        h.tx_cmd
+            .send(EngineCommand::PreviewPatch {
+                sfont: "Melodic".into(),
+                bank: 8,
+                program: 33,
+                note: 60,
+                vel: 100,
+            })
+            .unwrap();
+        h.tick(1);
+        let calls = h.calls();
+        assert!(calls.contains(&Call::SelectPatch(PREVIEW_CH, "Melodic".into(), 8, 33)));
+        assert!(calls.contains(&Call::On(PREVIEW_CH, 60, 100)));
+        // Fixed 0.5 s gate: 24000 samples / 256 = 93.75 → the 94th period
+        // releases it. One cycle early must still be sounding.
+        h.tick(92);
+        assert!(!h.calls().contains(&Call::Off(PREVIEW_CH, 60))); // total 93
+        h.tick(1); // total 94 ≥ 24000
+        assert!(h.calls().contains(&Call::Off(PREVIEW_CH, 60)));
+    }
+
+    #[test]
+    fn preview_unknown_patch_is_ignored_without_a_trace() {
+        let mut h = Harness::new();
+        h.set_catalog(patch_catalog()); // "Ghost" is NOT in it
+        h.tx_cmd
+            .send(EngineCommand::PreviewPatch {
+                sfont: "Ghost".into(),
+                bank: 0,
+                program: 0,
+                note: 60,
+                vel: 100,
+            })
+            .unwrap();
+        h.tick(2);
+        assert!(h.calls().is_empty(), "preview must not touch the synth");
+        assert!(
+            h.edit_rx.try_recv().is_err(),
+            "preview never writes through"
+        );
+    }
+
+    #[test]
+    fn preview_latest_wins_cuts_the_previous_note() {
+        let mut h = Harness::new();
+        h.set_catalog(patch_catalog());
+        h.tx_cmd
+            .send(EngineCommand::PreviewPatch {
+                sfont: "Melodic".into(),
+                bank: 8,
+                program: 33,
+                note: 60,
+                vel: 100,
+            })
+            .unwrap();
+        h.tick(1);
+        h.tx_cmd
+            .send(EngineCommand::PreviewPatch {
+                sfont: "DefaultFont".into(),
+                bank: 0,
+                program: 1,
+                note: 64,
+                vel: 90,
+            })
+            .unwrap();
+        h.tick(1);
+        let calls = h.calls();
+        let off = calls
+            .iter()
+            .position(|c| *c == Call::Off(PREVIEW_CH, 60))
+            .expect("second preview must cut the first note");
+        let on2 = calls
+            .iter()
+            .position(|c| *c == Call::On(PREVIEW_CH, 64, 90))
+            .expect("second preview must sound");
+        assert!(off < on2, "cut must precede the new strike: {calls:?}");
     }
 
     #[test]

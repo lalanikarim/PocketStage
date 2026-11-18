@@ -83,6 +83,17 @@ pub enum EngineCommand {
     /// state. Anti-brick control — a bad keymap must never trap the user,
     /// so a web-side exit/entry that bypasses keymap bindings exists.
     SetOverlay(OverlayTarget),
+    /// D27 phase D: audition one catalog patch on the PREVIEW channel (ch 7).
+    /// Fire-and-forget: the engine sounds `note` for a fixed gate and lets it
+    /// go. Never touches the project, write-through, or any other lane —
+    /// auditioning must not be able to change anything.
+    PreviewPatch {
+        sfont: String,
+        bank: u8,
+        program: u8,
+        note: u8,
+        vel: u8,
+    },
 }
 
 /// Exact overlay target for [`EngineCommand::SetOverlay`] (`None` = exit).
@@ -466,6 +477,12 @@ pub struct AppState {
     /// afterwards (phase E replaces the whole Arc on rescan). Served by
     /// `GET /api/patches`; names are font-provided, never hand-typed.
     pub patches: Arc<pocketstage_model::Catalog>,
+    /// Internal name FluidSynth gave the DEFAULT soundfont (D27 phase D).
+    /// The catalog is a flat list of fonts; this is the one bare GM programs
+    /// resolve against, which is how the web UI decides whether a catalog
+    /// patch is already representable as a plain `Program(n)` voice or needs
+    /// a `Preset` ref. `None` = unknown (UI shows no default marker).
+    default_font: Option<String>,
     /// Finalized takes streamed out of the audio thread (engine → server).
     /// Drained by [`AppState::drain_takes`] on a timer; each one is appended
     /// to the stored project, so recordings survive reboot.
@@ -497,6 +514,7 @@ impl AppState {
             live: Arc::new(LiveStatus::default()),
             presets: Default::default(),
             patches: Default::default(),
+            default_font: None,
             take_feed: None,
             edit_feed: None,
             keymap: None,
@@ -533,6 +551,13 @@ impl AppState {
         self
     }
 
+    /// Attach the default soundfont's internal name (engine calls this once
+    /// at boot, next to [`AppState::with_patches`]).
+    pub fn with_default_font(mut self, name: impl Into<String>) -> Self {
+        self.default_font = Some(name.into());
+        self
+    }
+
     /// Embedded state: full duplex with the audio thread (commands out on
     /// `engine`, finalized takes in on `take_feed`, engine-side project edits
     /// in on `edit_feed`; `live` levels are written by the audio thread and
@@ -550,6 +575,7 @@ impl AppState {
             live,
             presets: Default::default(),
             patches: Default::default(),
+            default_font: None,
             take_feed: Some(Arc::new(Mutex::new(take_feed))),
             edit_feed: Some(Arc::new(Mutex::new(edit_feed))),
             keymap: None,
@@ -667,6 +693,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/voice", post(set_voice))
         .route("/api/presets", get(list_presets))
         .route("/api/patches", get(list_patches))
+        .route("/api/preview", post(preview_patch))
         // Browsers that skip the <link> tag still probe /favicon.ico.
         .route("/favicon.ico", get(favicon))
         .route("/api/projects", get(list_projects))
@@ -772,6 +799,10 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "project": name,
         "max_tracks": pocketstage_model::MAX_TRACKS,
         "max_scenes": pocketstage_model::MAX_SCENES,
+        // D27 phase D: which font the plain-GM voice list came from, so the
+        // patch browser can mark it and avoid duplicating every GM pick as a
+        // catalog ref. Null when the engine never attached one (standalone).
+        "default_font": state.default_font.clone(),
     }))
 }
 
@@ -880,6 +911,59 @@ async fn list_presets(State(state): State<AppState>) -> Json<Vec<PresetInfo>> {
 /// read of boot-time data — no engine round-trip.
 async fn list_patches(State(state): State<AppState>) -> Json<pocketstage_model::Catalog> {
     Json((*state.patches).clone())
+}
+
+/// Audition body. Only `sfont` + `program` are required; defaults land a
+/// middle-C strike at working velocity (Q-R1: fixed engine-side gate, no
+/// stop endpoint until it annoys someone).
+#[derive(Debug, serde::Deserialize)]
+struct PreviewBody {
+    sfont: String,
+    #[serde(default)]
+    bank: Option<u8>,
+    program: u8,
+    #[serde(default)]
+    note: Option<u8>,
+    #[serde(default)]
+    vel: Option<u8>,
+}
+
+/// `POST /api/preview` (D27 phase D): exact-match-only — the UI offers
+/// nothing the catalog doesn't have, and a preview that silently falls back
+/// to another instrument would make the browser lie about what it audition.
+async fn preview_patch(
+    State(state): State<AppState>,
+    Json(body): Json<PreviewBody>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let bank = body.bank.unwrap_or(0);
+    let note = body.note.unwrap_or(60);
+    let vel = body.vel.unwrap_or(100);
+    if bank > 128 || body.program > 127 || note > 127 || vel > 127 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "bank 0..=128, program/note/vel 0..=127".into(),
+        ));
+    }
+    if state
+        .patches
+        .find(&body.sfont, bank, body.program)
+        .is_none()
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("patch '{}' {bank}:{} not loaded", body.sfont, body.program),
+        ));
+    }
+    send_ctrl(
+        &state,
+        EngineCommand::PreviewPatch {
+            sfont: body.sfont,
+            bank,
+            program: body.program,
+            note,
+            vel,
+        },
+    )
 }
 async fn set_voice(
     State(state): State<AppState>,

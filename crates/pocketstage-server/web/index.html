@@ -65,6 +65,18 @@
           display:flex; align-items:center; justify-content:center; }
   .step.on { background:#2b4a6f; border-color:#3d6da8; }
   .step.b0 { border-left-width:3px; border-left-color:#555; }
+  /* patch browser (D27 phase D) + fallback badges */
+  #badges { color:#ffb066; font-size:12px; margin-top:8px; }
+  .ptfont { color:var(--dim); font-size:11px; text-transform:uppercase;
+            letter-spacing:.06em; margin:10px 0 2px; }
+  .ptrow { display:flex; align-items:center; gap:8px; padding:3px 0;
+           border-bottom:1px solid #23282e; }
+  .ptrow .nm { flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  .ptrow .bp { color:var(--dim); font-size:11px; min-width:56px; }
+  .ptskip { color:#ffb066; font-size:11px; padding:3px 0; }
+  button.mini { padding:3px 9px; margin-top:0; font-size:11px; font-weight:400;
+                background:#2c3238; color:var(--ink); }
+  button.mini.go { background:var(--acc); color:#0b0d0f; font-weight:700; }
 </style>
 </head>
 <body>
@@ -94,6 +106,7 @@
       <span style="width:10px"></span>
       <select id="voice-pick" title="active voice (D25) — same as the DAW white-key browser"></select>
     </div>
+    <div id="badges" hidden title="the project asked for patches this engine could not honor exactly (D27 fallback chain)"></div>
   </section>
 
   <section class="card">
@@ -105,6 +118,21 @@
     <h2>Drum kit <span style="font-weight:normal;color:var(--dim)">(PRESET pads 1–8)</span>
       <button id="kit-reset" class="alt" style="float:right;font-size:11px">use default</button></h2>
     <div id="drumkit" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+  </section>
+
+  <section class="card">
+    <h2>Patches <span id="pt-meta" style="font-weight:normal;color:var(--dim)"></span></h2>
+    <input id="pt-q" type="search" autocomplete="off"
+           placeholder="search name, font, or bank:program">
+    <div id="pt-list" style="max-height:340px;overflow-y:auto;margin-top:6px">
+      <em>loading catalog…</em></div>
+    <p style="color:var(--dim);font-size:11px;margin-top:6px">
+      Every patch of every loaded soundfont, named by the fonts themselves
+      (GET /api/patches — never a hand-typed table). ▶ auditions on a private
+      channel for 0.5 s and changes nothing at all; ★ makes it the live voice;
+      🥁 sets the pad kit (persists with Save). Fonts are loaded from
+      ~/.pocketstage/soundfonts at boot.
+    </p>
   </section>
 
   <section class="card">
@@ -160,6 +188,9 @@
   <section class="card">
     <h2>Structure</h2>
     <div id="structure"></div>
+    <!-- One shared datalist for every track's instrument box: the catalog can
+         hold thousands of patches, so its labels exist exactly once in the DOM. -->
+    <datalist id="patchlist"></datalist>
   </section>
 
   <section class="card">
@@ -548,7 +579,7 @@ function renderTakes() {
     });
 
     const ren = document.createElement("button");
-    ren.className = "alt"; ren.textContent = "\u270E"; ren.title = "rename take";
+    ren.className = "alt"; ren.textContent = "✎"; ren.title = "rename take";
     ren.style.margin = "0 0 0 8px"; ren.style.padding = "2px 9px";
     ren.addEventListener("click", async () => {
       const to = prompt("New name for " + t.name + ":", t.name);
@@ -562,7 +593,7 @@ function renderTakes() {
     });
 
     const del = document.createElement("button");
-    del.className = "alt"; del.textContent = "\u2715"; del.title = "delete take";
+    del.className = "alt"; del.textContent = "✕"; del.title = "delete take";
     del.style.margin = "0 0 0 8px"; del.style.padding = "2px 9px";
     del.addEventListener("click", async () => {
       if (!confirm(`Delete ${t.name}? This cannot be undone.`)) return;
@@ -675,6 +706,7 @@ async function loadPresets() {
       n++;
     }
     if (n === 0) fillFallbackPick(); // font answered nothing usable
+    fillPatchPick();   // then the catalog's other fonts (idempotent)
   } catch (e) { console.warn("preset catalog unavailable", e); fillFallbackPick(); }
 }
 function fillFallbackPick() {
@@ -688,8 +720,224 @@ function fillFallbackPick() {
 }
 function voiceName(v) {
   if (v === "drums") return "Drums";
+  // /ws reports a catalog voice as the sentinel "patch"; the exact ref lives
+  // in the project (active_voice), which is where this looks the name up.
+  if (v === "patch") return patchVoiceName();
   if (typeof v === "number") return PRESETS.get(v) || ("gm" + v);
-  return "\u2013";
+  return "–";
+}
+
+// ------------------------------------------------------------- patch catalog
+// D27 phase D: the runtime catalog across ALL loaded soundfonts — the data
+// behind the patch browser, the voice dropdown and the track instrument boxes.
+// Names come from the fonts (a hand-typed GM table once mislabelled most
+// picks, session 13 — never reintroduce one). Read-only here: the only writes
+// this card makes are POST /api/voice, POST /api/preview and drum_kit_patch.
+let CAT = { fonts: [], patches: [] };
+let DEFAULT_FONT = null;      // font bare GM programs resolve against
+const PATCH_OPT = "patch:";   // voice-select value prefix for a catalog ref
+// Render caps: one font can expose thousands of presets. Search narrows the
+// list; the caps only stop a page load from building 20k DOM nodes.
+const PT_MAX_ROWS = 300, VOICE_GROUP_MAX = 400;
+const pkey = (sfont, bank, program) => `${sfont}\u0000${bank}\u0000${program}`;
+const patchByKey = new Map();    // pkey -> patch
+const patchByLabel = new Map();  // datalist label -> patch
+const patchLabels = new Map();   // pkey -> label
+// FluidSynth 2.3.x names a loaded font by its path — shorten for display.
+const fontLabel = (name) =>
+  String(name || "").split(/[\\/]/).pop().replace(/\.sf[23]$/i, "") || "?";
+const patchLabel = (p) => `${p.name} · ${fontLabel(p.sfont)} ${p.bank}:${p.program}`;
+
+async function loadPatches() {
+  try {
+    const r = await fetch("/api/patches");
+    if (!r.ok) { $("pt-list").innerHTML = "<em>catalog unavailable</em>"; return; }
+    CAT = await r.json();
+  } catch (e) {
+    console.warn("patch catalog unavailable", e);
+    $("pt-list").innerHTML = "<em>catalog unreachable</em>";
+    return;
+  }
+  // Which font bare GM programs resolve against (engine-attached, see
+  // /api/health): decides which catalog rows duplicate an already-selectable
+  // GM program. Unknown (null) only when no engine attached one.
+  try {
+    const h = await (await fetch("/api/health")).json();
+    DEFAULT_FONT = h.default_font ?? null;
+  } catch { /* no marker, and the picker may show GM duplicates — cosmetic */ }
+  patchByKey.clear(); patchByLabel.clear(); patchLabels.clear();
+  for (const p of CAT.patches || []) {
+    let label = patchLabel(p);
+    // Two fonts whose short names match would make identical labels; fall
+    // back to the full internal name so a pick can never be ambiguous.
+    if (patchByLabel.has(label)) label = `${p.name} · ${p.sfont} ${p.bank}:${p.program}`;
+    patchByKey.set(pkey(p.sfont, p.bank, p.program), p);
+    patchByLabel.set(label, p);
+    patchLabels.set(pkey(p.sfont, p.bank, p.program), label);
+  }
+  fillInstrumentList();
+  fillPatchPick();
+  renderPatches();
+  // Track rows show catalog labels for their instrument refs; the first
+  // render usually beats the catalog here, so re-render once it lands —
+  // never over unsaved local edits (same rule as refresh()).
+  if (!dirty && project) renderStructure();
+}
+
+// One shared datalist feeds every track's instrument box; the browser does
+// the filtering, so thousands of labels cost nothing until someone types.
+function fillInstrumentList() {
+  const dl = $("patchlist");
+  if (!dl) return;
+  dl.innerHTML = "";
+  for (const label of patchByLabel.keys()) {
+    const o = document.createElement("option");
+    o.value = label;
+    dl.appendChild(o);
+  }
+}
+
+// Voice dropdown: "Drums" + the default font's GM programs (numeric values,
+// which is what /ws reports for them) + one optgroup per other loaded font,
+// whose values carry the full patch ref (POSTed as {preset:{…}}).
+function fillPatchPick() {
+  const sel = $("voice-pick");
+  for (const g of [...sel.getElementsByTagName("optgroup")]) g.remove();
+  if (!CAT.patches) return;
+  const groups = new Map();
+  let added = 0, hidden = 0;
+  for (const p of CAT.patches) {
+    // Already selectable as a plain GM program — don't offer the same thing
+    // twice under two different ActiveVoice shapes.
+    if (DEFAULT_FONT && p.sfont === DEFAULT_FONT && p.bank === 0) continue;
+    let g = groups.get(p.sfont);
+    if (!g) {
+      g = document.createElement("optgroup");
+      g.label = fontLabel(p.sfont);
+      groups.set(p.sfont, g);
+      sel.appendChild(g);
+    }
+    if (g.childElementCount >= VOICE_GROUP_MAX) { hidden++; continue; }
+    const o = document.createElement("option");
+    o.value = `${PATCH_OPT}${p.sfont}\u0000${p.bank}\u0000${p.program}`;
+    o.textContent = `${p.bank}:${p.program} ${p.name}`;
+    g.appendChild(o);
+    added++;
+  }
+  if (hidden) console.warn(`voice picker: ${hidden} font(s) truncated at ${VOICE_GROUP_MAX} patches — use the patch browser`);
+  syncVoicePick(lastVoice);
+}
+
+// Body for POST /api/voice in the model's ActiveVoice serde form.
+function voiceBody(v) {
+  if (v === "drums") return '"drums"';
+  if (v.startsWith(PATCH_OPT)) {
+    const [sfont, bank, program] = v.slice(PATCH_OPT.length).split("\u0000");
+    return JSON.stringify({ preset: { sfont, bank: +bank, program: +program } });
+  }
+  return JSON.stringify({ program: Number(v) });
+}
+
+function activePatch() {
+  const av = project?.project?.active_voice;
+  return av && typeof av === "object" && av.preset ? av.preset : null;
+}
+function patchVoiceName() {
+  const p = activePatch();
+  if (!p) return "Patch";
+  const info = patchByKey.get(pkey(p.sfont, p.bank, p.program));
+  return info ? `${info.name} (${fontLabel(info.sfont)})`
+              : `${fontLabel(p.sfont)} ${p.bank}:${p.program}`;
+}
+
+function renderPatches() {
+  const box = $("pt-list");
+  if (!box) return;
+  const fonts = CAT.fonts || [];
+  if (!fonts.length) { box.innerHTML = "<em>no fonts loaded</em>"; return; }
+  const q = $("pt-q").value.trim().toLowerCase();
+  box.innerHTML = "";
+  const hit = (p) => !q
+    || p.name.toLowerCase().includes(q)
+    || fontLabel(p.sfont).toLowerCase().includes(q)
+    || `${p.bank}:${p.program}` === q;
+  let shown = 0, matched = 0;
+  for (const f of fonts) {
+    if (f.skipped) {   // visible failure, never a silent absence (D27 rule 4)
+      const d = document.createElement("div");
+      d.className = "ptskip";
+      d.textContent = `⚠ ${fontLabel(f.name)} — ${f.skipped}`;
+      box.appendChild(d);
+      continue;
+    }
+    const items = (CAT.patches || []).filter((p) => p.sfont === f.name && hit(p));
+    matched += items.length;
+    if (!items.length) continue;
+    const head = document.createElement("div");
+    head.className = "ptfont";
+    head.textContent = `${fontLabel(f.name)}${f.name === DEFAULT_FONT ? " ★ default" : ""}`
+      + ` · ${f.presets} presets${f.has_percussion ? " · kit" : ""}`;
+    box.appendChild(head);
+    for (const p of items) {
+      if (shown >= PT_MAX_ROWS) break;
+      box.appendChild(patchRow(p));
+      shown++;
+    }
+  }
+  if (!shown) box.innerHTML = "<em>nothing matches</em>";
+  $("pt-meta").textContent = q
+    ? `${matched} match${matched === 1 ? "" : "es"}${shown < matched ? ` (showing ${shown})` : ""}`
+    : `${(CAT.patches || []).length} patches, ${fonts.filter((f) => !f.skipped).length} fonts`;
+}
+
+function patchRow(p) {
+  const row = document.createElement("div");
+  row.className = "ptrow";
+  const nm = document.createElement("span");
+  nm.className = "nm"; nm.textContent = p.name;
+  const bp = document.createElement("span");
+  bp.className = "bp"; bp.textContent = `${p.bank}:${p.program}`;
+  row.append(nm, bp);
+
+  const audition = document.createElement("button");
+  audition.className = "mini go"; audition.textContent = "▶";
+  audition.title = "audition (private channel, 0.5 s — changes nothing)";
+  audition.addEventListener("click", async () => {
+    try {
+      const r = await fetch("/api/preview", { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sfont: p.sfont, bank: p.bank, program: p.program }) });
+      if (!r.ok) msg(`audition: ${r.status} ${(await r.text()).trim()}`, true);
+    } catch (e) { msg("audition failed: " + e, true); }
+  });
+
+  const use = document.createElement("button");
+  use.className = "mini"; use.textContent = "★";
+  use.title = "make this the live voice (same as the DAW white-key browser)";
+  use.addEventListener("click", async () => {
+    try {
+      const r = await fetch("/api/voice", { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preset: { sfont: p.sfont, bank: p.bank, program: p.program } }) });
+      if (!r.ok) msg(`voice: ${r.status} ${(await r.text()).trim()}`, true);
+      else { msg("voice set — engine persists it"); refresh(); }
+    } catch (e) { msg("voice failed: " + e, true); }
+  });
+  row.append(audition, use);
+
+  if (p.has_percussion || p.bank === 128) {
+    const kit = document.createElement("button");
+    kit.className = "mini"; kit.textContent = "🥁";
+    kit.title = "use as the PRESET pad kit (drum_kit_patch — persists with Save)";
+    kit.addEventListener("click", () => {
+      if (!project) return msg("no project loaded", true);
+      project.project.drum_kit_patch = { sfont: p.sfont, bank: p.bank, program: p.program };
+      markDirty();
+      msg(`kit → ${p.name} — press Save`);
+    });
+    row.appendChild(kit);
+  }
+  return row;
 }
 
 let lastVoice = null; // most recent /ws voice, for re-sync after relabel
@@ -699,8 +947,9 @@ let lastVoice = null; // most recent /ws voice, for re-sync after relabel
   const sel = $("voice-pick");
   fillFallbackPick();       // usable immediately...
   loadPresets().then(() => syncVoicePick(lastVoice)); // ...then relabel
+  loadPatches();            // patch browser + catalog-fed options (D27 phase D)
   sel.onchange = async () => {
-    const body = sel.value === "drums" ? '"drums"' : JSON.stringify({ program: Number(sel.value) });
+    const body = voiceBody(sel.value);
     try {
       const r = await fetch("/api/voice", { method: "POST", body, headers: { "Content-Type": "application/json" } });
       if (!r.ok) console.warn("voice pick rejected:", r.status);
@@ -710,6 +959,14 @@ let lastVoice = null; // most recent /ws voice, for re-sync after relabel
     lastVoice = v;
     // Don't clobber while the dropdown is open/focused.
     if (document.activeElement === sel) return;
+    if (v === "patch") {
+      // /ws only says "a catalog patch"; the ref itself comes from the project.
+      const p = activePatch();
+      if (!p) return;
+      const want = `${PATCH_OPT}${p.sfont}\u0000${p.bank}\u0000${p.program}`;
+      if ([...sel.options].some((o) => o.value === want)) sel.value = want;
+      return;
+    }
     const val = v === "drums" ? "drums" : String(v);
     if ([...sel.options].some((o) => o.value === val)) sel.value = val;
   };
@@ -732,12 +989,21 @@ function connect() {
     $("l-mode").textContent = f.mode;
     $("l-voice").textContent = voiceName(f.voice);
     if (window.syncVoicePick) syncVoicePick(f.voice);
-    const ov = f.overlay && f.overlay !== "none" ? f.overlay.toUpperCase() : "\u2013";
+    const ov = f.overlay && f.overlay !== "none" ? f.overlay.toUpperCase() : "–";
     $("l-overlay").textContent = ov;
     lastTransport = f.transport;
     hlScene(f.scene);
     const n = Array.isArray(f.takes) ? f.takes.length : 0;
     $("l-takes").textContent = n;
+    // D27 fallback badges: the engine publishes every patch it could not
+    // honor exactly. Silence here means "you hear what the project asks for".
+    const notes = Array.isArray(f.patch_notes) ? f.patch_notes : [];
+    $("badges").hidden = notes.length === 0;
+    $("badges").textContent = notes.map((s) => "⚠ " + s).join("\n");
+    if (notes.length && document.activeElement !== $("voice-pick")) {
+      // A substituted voice is exactly when the dropdown must not lie.
+      syncVoicePick(f.voice);
+    }
     if (n !== liveTakes) { liveTakes = n; refresh(); } // new take -> re-fetch list
   };
 }
@@ -931,8 +1197,35 @@ function renderStructure() {
       markDirty();
     });
 
+    // Catalog patch box (D27 phase D): empty = plain GM program on the
+    // default font (unchanged behavior); a listed patch turns the track into
+    // a catalog ref {soundfont, bank, gm_program} — rides the same dirty-Save
+    // path as everything else on this row.
+    const patchLabelOf = (tr) => {
+      const ins = tr.instrument;
+      if (!ins.soundfont) return "";
+      return patchLabels.get(pkey(ins.soundfont, ins.bank || 0, ins.gm_program))
+        || `${ins.soundfont} ${ins.bank || 0}:${ins.gm_program}`;
+    };
+    const pin = document.createElement("input");
+    pin.type = "text"; pin.setAttribute("list", "patchlist");
+    pin.placeholder = "catalog patch…"; pin.style.width = "180px";
+    pin.title = "empty = GM program on the default font; a listed patch = catalog reference";
+    pin.value = patchLabelOf(t);
+    pin.addEventListener("change", () => {
+      const v = pin.value.trim();
+      if (!v) { t.instrument.soundfont = null; t.instrument.bank = null; markDirty(); return; }
+      const p = patchByLabel.get(v);
+      if (!p) { pin.value = patchLabelOf(t); msg("unknown patch — pick one from the list", true); return; }
+      t.instrument.soundfont = p.sfont;
+      t.instrument.bank = p.bank;
+      t.instrument.gm_program = p.program;
+      prog.value = p.program;
+      markDirty();
+    });
+
     const del = document.createElement("button");
-    del.className = "alt"; del.textContent = "\u2715"; del.title = "delete track";
+    del.className = "alt"; del.textContent = "✕"; del.title = "delete track";
     del.addEventListener("click", () => {
       if (!confirm(`Delete "${t.name}" and all its clips?`)) return;
       p.tracks.splice(ti, 1);
@@ -940,7 +1233,7 @@ function renderStructure() {
       markDirty(); rerenderAll();
     });
 
-    row.append(name, document.createTextNode(" prog"), prog, del);
+    row.append(name, document.createTextNode(" prog"), prog, pin, del);
     box.append(row);
   });
 
